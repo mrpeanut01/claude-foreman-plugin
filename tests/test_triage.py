@@ -325,7 +325,13 @@ def test_triage_output_can_be_batched_without_post_processing():
     [
         ("Update the Dockerfile base image", "Bump to bookworm.", "medium"),
         ("Documentation for the CLI flags", "Explain each flag.", "low"),
-        ("Tokenizer drops short tokens", "_tokens in the parser.", "medium"),
+        # From issue #5's reproduction list. "schema" is a genuine keyword
+        # collision, not a substring bug: over-scoring is the safe direction.
+        ("Documentation for the schema tool", "Explain the flags.", "high"),
+        # "tokens" is indistinguishable from an auth token, so this scores high.
+        # Over-scoring costs a solo PR; under-scoring auto-merges a security change.
+        ("Tokenizer drops short tokens", "_tokens in the parser.", "high"),
+        ("Tokenizer performance is poor", "Profiling the lexer.", "medium"),
         ("Session token never expires", "Auth stays valid.", "high"),
     ],
 )
@@ -354,3 +360,50 @@ def test_a_path_mentioned_twice_is_listed_once():
         available_labels=AVAILABLE,
     )
     assert record["paths"] == ["src/a.py", "src/b.py"]
+
+
+# --- the regression the review gate caught ------------------------------------
+# Word boundaries fixed substring false-positives but silently disabled the
+# security vocabulary: \bauth\b does not match "authentication".
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Authentication bypass on the admin API",
+        "Authorization header is dropped",
+        "Unauthenticated users can read private repos",
+        "OAuth callback leaks the code",
+        "Rotate leaked API tokens",
+        "Bucket permissions are world readable",
+        "Store credentials in the keychain",
+        "Secrets are printed to the log",
+        "Payments are double charged",
+        "Schemas are not migrated",
+        "Passwords are logged in plaintext",
+        "Encrypting the session store",
+        "Privilege escalation via the share link",
+    ],
+)
+def test_inflected_security_words_still_score_high(title):
+    assert triage.risk_level(issue(title=title, body="Details."), []) == "high", title
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Author of the commit is wrong",  # must not match via `auth`
+        "Authoring guide needs an update",
+        "Update the Dockerfile base image",  # must not match via `doc`
+        "Tokenizer performance is poor",  # `tokenizer` is not `token`
+        # NB "Tokenizer drops short tokens" DOES score high, and should: the word
+        # "tokens" cannot be told from an auth token, and over-scoring is safe.
+    ],
+)
+def test_lookalike_words_do_not_inflate_risk(title):
+    assert triage.risk_level(issue(title=title, body="Details."), []) != "high", title
+
+
+def test_an_empty_hint_list_matches_nothing():
+    """`\\b()\\b` compiles to something that matches any word."""
+    assert triage._has("anything at all", ()) is False

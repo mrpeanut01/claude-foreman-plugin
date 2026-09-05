@@ -287,3 +287,13 @@ def test_an_unprotected_repo_with_red_ci_cannot_merge():
         red_batch, {"labels": []}, {"auto_merge": True, "caps": {}, "protected_paths": []}
     )
     assert blockers, "a fully red CI must block the merge"
+
+
+def test_a_pr_with_no_checks_yet_is_not_green_when_protection_is_unknown():
+    """Otherwise a freshly pushed PR merges having run zero CI."""
+    assert land.ci_gate([], UNPROTECTED) == "pending"
+
+
+def test_no_required_checks_under_known_protection_is_a_deliberate_choice():
+    known = {"required_checks": [], "protection_known": True, "jobs": {}}
+    assert land.ci_gate([], known) == "full_green"

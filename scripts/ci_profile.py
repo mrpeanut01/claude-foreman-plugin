@@ -371,8 +371,9 @@ def _fetch_job_runs(repo: str, runs: int, branch: str | None) -> list[dict]:
 def _fetch_protection(repo: str) -> dict | None:
     view = _gh_json(["repo", "view", repo, "--json", "defaultBranchRef"]) or {}
     branch = (view.get("defaultBranchRef") or {}).get("name", "main")
-    # Absent or inaccessible protection is normal, not an error: it just means
-    # nothing is required, so nothing can gate a merge.
+    # Absent or inaccessible protection is normal, not an error — but it means
+    # UNKNOWN, not "nothing is required". build_profile records that as
+    # protection_known, and land.py then treats every check as required.
     return _gh_json(["api", f"repos/{repo}/branches/{branch}/protection"])
 
 

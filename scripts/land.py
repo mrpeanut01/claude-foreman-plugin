@@ -103,7 +103,11 @@ def ci_gate(checks: list[dict], profile: dict) -> str:
 
     required = list(profile.get("required_checks") or [])
     if not required:
-        # Nothing is required, so nothing can block: green once nothing is running.
+        if not profile.get("protection_known", False) and not checks:
+            # No protection to read and nothing has reported yet. Calling that
+            # green merges a PR having run zero CI.
+            return "pending"
+        # Protection says nothing is required, so nothing can block.
         return "full_green" if not summary["actionable_pending"] else "pending"
 
     jobs = profile.get("jobs") or {}
