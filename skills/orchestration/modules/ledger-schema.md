@@ -33,6 +33,7 @@ them unconditionally.
 
 ```python
 import ledger
+
 state = ledger.load(Path(".foreman"))
 for bid, batch in state.batches.items():
     if ledger.blocking_gates(batch):

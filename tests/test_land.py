@@ -1,4 +1,5 @@
 """Landing: read CI honestly, judge the reviewer, and refuse to merge on doubt."""
+
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ def check(name, state, description=""):
 
 
 # --- reading the check list ---------------------------------------------------
+
 
 def test_a_pending_required_check_is_actionable():
     s = land.classify_checks([check("lint", "SUCCESS"), check("unit", "PENDING")], PROFILE)
@@ -56,6 +58,7 @@ def test_a_check_the_profile_has_never_seen_is_treated_as_required():
 
 # --- deriving the CI gate -----------------------------------------------------
 
+
 def test_all_required_green_is_full_green():
     checks = [check(n, "SUCCESS") for n in ("lint", "unit", "integration")]
     assert land.ci_gate(checks, PROFILE) == "full_green"
@@ -82,9 +85,15 @@ def test_a_cheap_check_still_running_is_not_cheap_green():
 
 # --- judging the reviewer -----------------------------------------------------
 
+
 def clean(**kw):
-    base = {"verdict": "clean", "tests_covering": ["tests/test_upload.py::test_503_retry"],
-            "revert_check": "failed_as_expected", "findings": [], "behaviour_change": True}
+    base = {
+        "verdict": "clean",
+        "tests_covering": ["tests/test_upload.py::test_503_retry"],
+        "revert_check": "failed_as_expected",
+        "findings": [],
+        "behaviour_change": True,
+    }
     return {**base, **kw}
 
 
@@ -114,8 +123,12 @@ def test_a_low_severity_note_does_not_block_a_clean_verdict():
 
 
 def test_changes_requested_needs_no_evidence():
-    ok, errors = land.validate_review({"verdict": "changes_requested",
-                                       "findings": [{"severity": "high", "summary": "off by one"}]})
+    ok, errors = land.validate_review(
+        {
+            "verdict": "changes_requested",
+            "findings": [{"severity": "high", "summary": "off by one"}],
+        }
+    )
     assert ok and errors == []
 
 
@@ -125,8 +138,9 @@ def test_changes_requested_with_no_finding_is_rejected():
 
 
 def test_a_docs_only_change_may_skip_the_revert_check():
-    ok, _ = land.validate_review(clean(revert_check="not_applicable", tests_covering=[],
-                                       behaviour_change=False))
+    ok, _ = land.validate_review(
+        clean(revert_check="not_applicable", tests_covering=[], behaviour_change=False)
+    )
     assert ok
 
 
@@ -150,13 +164,16 @@ def test_a_missing_verdict_is_rejected():
 CAPS = {"caps": {"reruns": 2}}
 
 
-@pytest.mark.parametrize("classification,reruns,expected", [
-    ({"is_flaky": True, "confidence": 0.9}, 0, "rerun"),
-    ({"is_flaky": True, "confidence": 0.7}, 1, "rerun"),
-    ({"is_flaky": True, "confidence": 0.55}, 0, "fix"),   # below the bar: treat as real
-    ({"is_flaky": False, "confidence": 0.99}, 0, "fix"),
-    ({"is_flaky": True, "confidence": 0.95}, 2, "escalate"),  # at the rerun cap
-])
+@pytest.mark.parametrize(
+    "classification,reruns,expected",
+    [
+        ({"is_flaky": True, "confidence": 0.9}, 0, "rerun"),
+        ({"is_flaky": True, "confidence": 0.7}, 1, "rerun"),
+        ({"is_flaky": True, "confidence": 0.55}, 0, "fix"),  # below the bar: treat as real
+        ({"is_flaky": False, "confidence": 0.99}, 0, "fix"),
+        ({"is_flaky": True, "confidence": 0.95}, 2, "escalate"),  # at the rerun cap
+    ],
+)
 def test_flake_decision(classification, reruns, expected):
     batch = {"attempts": {"pushes": 0, "review_rounds": 0, "reruns": reruns}}
     assert land.flake_decision(classification, batch, CAPS) == expected
@@ -169,14 +186,24 @@ def test_a_classification_with_no_confidence_is_treated_as_real():
 
 # --- the merge decision -------------------------------------------------------
 
+
 def ready_batch(**kw):
-    base = {"id": "b-001", "state": "ready", "ci_gate": "full_green", "review_gate": "clean",
-            "attempts": {"pushes": 1, "review_rounds": 0, "reruns": 0}, "paths": ["src/upload.py"]}
+    base = {
+        "id": "b-001",
+        "state": "ready",
+        "ci_gate": "full_green",
+        "review_gate": "clean",
+        "attempts": {"pushes": 1, "review_rounds": 0, "reruns": 0},
+        "paths": ["src/upload.py"],
+    }
     return {**base, **kw}
 
 
-CFG = {"auto_merge": True, "caps": {"pushes": 3, "review_rounds": 2, "reruns": 2},
-       "protected_paths": ["**/auth/**", "**/migrations/**"]}
+CFG = {
+    "auto_merge": True,
+    "caps": {"pushes": 3, "review_rounds": 2, "reruns": 2},
+    "protected_paths": ["**/auth/**", "**/migrations/**"],
+}
 
 
 def test_a_clean_batch_has_no_blockers():

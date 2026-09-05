@@ -9,18 +9,19 @@ every trunk move, so draining it is worth more than beginning new work.
 CLI:
     loop.py next [--ledger .foreman] [--config .foreman/config.json]
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import ledger  # noqa: E402
 import land  # noqa: E402
+import ledger  # noqa: E402
 
 DORMANT = {"merged", "abandoned", "escalated"}
 IN_FLIGHT = {"built", "open", "blocked", "ready", "merging"}
@@ -32,9 +33,10 @@ def in_flight_count(state: ledger.State) -> int:
 
 
 def spent_today(state: ledger.State) -> float:
-    today = datetime.now(timezone.utc).date().isoformat()
-    return sum(e.get("seconds", 0) for e in state.ci_spend
-               if str(e.get("ts", "")).startswith(today))
+    today = datetime.now(UTC).date().isoformat()
+    return sum(
+        e.get("seconds", 0) for e in state.ci_spend if str(e.get("ts", "")).startswith(today)
+    )
 
 
 def budget_remaining(state: ledger.State, config: dict) -> float | None:
@@ -66,8 +68,12 @@ def next_action(state: ledger.State, config: dict) -> dict:
         breached = ledger.cap_breached(batch, caps)
         if breached:
             attempts = batch["attempts"][breached]
-            return {"do": "escalate", "batch": batch["id"],
-                    "reason": f"{breached} at cap ({attempts}/{caps[breached]}); the loop will not retry"}
+            return {
+                "do": "escalate",
+                "batch": batch["id"],
+                "reason": f"{breached} at cap ({attempts}/{caps[breached]}); "
+                "the loop will not retry",
+            }
 
     for batch in live:
         if batch["state"] != "ready":
@@ -76,8 +82,11 @@ def next_action(state: ledger.State, config: dict) -> dict:
         if blockers:
             return {"do": "escalate", "batch": batch["id"], "reason": "; ".join(blockers)}
         if can_spend:
-            return {"do": "merge", "batch": batch["id"],
-                    "reason": "both gates clear and nothing blocks the merge"}
+            return {
+                "do": "merge",
+                "batch": batch["id"],
+                "reason": "both gates clear and nothing blocks the merge",
+            }
         budget_blocked = True
 
     for batch in live:
@@ -85,11 +94,13 @@ def next_action(state: ledger.State, config: dict) -> dict:
             continue
         pending = ledger.blocking_gates(batch)
         if not pending:
-            return {"do": "advance", "batch": batch["id"],
-                    "reason": "gates cleared; move to ready"}
-        return {"do": "watch", "batch": batch["id"],
-                "reason": f"waiting on {', '.join(pending)}",
-                "may_run_expensive_tier": ledger.may_run_expensive_tier(batch)}
+            return {"do": "advance", "batch": batch["id"], "reason": "gates cleared; move to ready"}
+        return {
+            "do": "watch",
+            "batch": batch["id"],
+            "reason": f"waiting on {', '.join(pending)}",
+            "may_run_expensive_tier": ledger.may_run_expensive_tier(batch),
+        }
 
     for state_name, action, reason in (
         ("blocked", "unblock", "a gate came back red; fix and push again"),
@@ -114,17 +125,28 @@ def next_action(state: ledger.State, config: dict) -> dict:
     if not state.issues and not state.batches:
         return {"do": "triage", "reason": "nothing in the ledger yet"}
 
-    ungrouped = [n for n, r in sorted(state.issues.items())
-                 if r.get("verdict") == "actionable" and n not in _grouped_issues(state)]
+    ungrouped = [
+        n
+        for n, r in sorted(state.issues.items())
+        if r.get("verdict") == "actionable" and n not in _grouped_issues(state)
+    ]
     if ungrouped:
-        return {"do": "batch", "issues": ungrouped,
-                "reason": f"{len(ungrouped)} actionable issue(s) not yet in a batch"}
+        return {
+            "do": "batch",
+            "issues": ungrouped,
+            "reason": f"{len(ungrouped)} actionable issue(s) not yet in a batch",
+        }
 
     if budget_blocked:
-        return {"do": "idle",
-                "reason": f"CI budget for today is spent ({spent_today(state) / 60:.0f} min used)"}
+        return {
+            "do": "idle",
+            "reason": f"CI budget for today is spent ({spent_today(state) / 60:.0f} min used)",
+        }
 
-    return {"do": "idle", "reason": "nothing actionable; every batch is done, escalated, or waiting"}
+    return {
+        "do": "idle",
+        "reason": "nothing actionable; every batch is done, escalated, or waiting",
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -139,8 +161,12 @@ def main(argv: list[str] | None = None) -> int:
     state = ledger.load(Path(args.ledger))
     action = next_action(state, config)
     remaining = budget_remaining(state, config)
-    print(json.dumps({**action, "in_flight": in_flight_count(state),
-                      "budget_seconds_left": remaining}, indent=2))
+    print(
+        json.dumps(
+            {**action, "in_flight": in_flight_count(state), "budget_seconds_left": remaining},
+            indent=2,
+        )
+    )
     return 0
 
 

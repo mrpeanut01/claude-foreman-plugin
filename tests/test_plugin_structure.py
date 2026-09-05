@@ -1,4 +1,5 @@
 """The manifest must describe what is actually on disk."""
+
 import json
 import re
 from pathlib import Path
@@ -15,31 +16,40 @@ def test_every_declared_path_exists(kind):
     assert missing == [], f"{kind} declared but absent: {missing}"
 
 
-@pytest.mark.parametrize("kind,pattern", [
-    ("commands", "commands/*.md"),
-    ("skills", "skills/*"),
-    ("agents", "agents/*.md"),
-])
+@pytest.mark.parametrize(
+    "kind,pattern",
+    [
+        ("commands", "commands/*.md"),
+        ("skills", "skills/*"),
+        ("agents", "agents/*.md"),
+    ],
+)
 def test_nothing_on_disk_is_left_undeclared(kind, pattern):
     declared = {(ROOT / p).resolve() for p in MANIFEST.get(kind, [])}
     found = {p.resolve() for p in ROOT.glob(pattern)}
     assert found - declared == set(), f"{kind} on disk but not in plugin.json"
 
 
-@pytest.mark.parametrize("skill", sorted((ROOT / "skills").glob("*/SKILL.md")), ids=lambda p: p.parent.name)
+@pytest.mark.parametrize(
+    "skill", sorted((ROOT / "skills").glob("*/SKILL.md")), ids=lambda p: p.parent.name
+)
 def test_each_skill_declares_a_name_and_description(skill):
     head = skill.read_text()[:1200]
     assert head.startswith("---"), f"{skill} has no frontmatter"
     assert re.search(r"^name:\s*\S+", head, re.M), f"{skill} has no name"
     description = re.search(r"^description:\s*(.+)$", head, re.M)
     assert description, f"{skill} has no description"
-    assert len(description.group(1)) > 40, "a description too short to trigger on is not a description"
+    assert len(description.group(1)) > 40, (
+        "a description too short to trigger on is not a description"
+    )
 
 
-@pytest.mark.parametrize("skill", sorted((ROOT / "skills").glob("*/SKILL.md")), ids=lambda p: p.parent.name)
+@pytest.mark.parametrize(
+    "skill", sorted((ROOT / "skills").glob("*/SKILL.md")), ids=lambda p: p.parent.name
+)
 def test_every_module_a_skill_links_to_exists(skill):
     links = re.findall(r"\]\((modules/[^)]+)\)", skill.read_text())
-    missing = [l for l in links if not (skill.parent / l).exists()]
+    missing = [item for item in links if not (skill.parent / item).exists()]
     assert missing == [], f"{skill.parent.name} links to missing modules: {missing}"
 
 

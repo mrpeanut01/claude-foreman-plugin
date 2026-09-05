@@ -1,5 +1,5 @@
 """Ledger: an append-only event log folded into current state."""
-import json
+
 import sys
 from pathlib import Path
 
@@ -16,6 +16,7 @@ def root(tmp_path):
 
 
 # --- append / read round trip -------------------------------------------------
+
 
 def test_append_then_read_round_trip(root):
     ledger.append(root, "issue.triaged", issue=42, verdict="actionable")
@@ -42,6 +43,7 @@ def test_corrupt_line_is_skipped_not_fatal(root):
 
 
 # --- folding ------------------------------------------------------------------
+
 
 def test_fold_builds_batch_from_events(root):
     ledger.append(root, "batch.created", batch="b-001", issues=[42, 43], branch="foreman/b-001")
@@ -72,6 +74,7 @@ def test_fold_collects_escalations_and_flakes(root):
 
 
 # --- state machine ------------------------------------------------------------
+
 
 def test_legal_transition_is_recorded(root):
     ledger.append(root, "batch.created", batch="b-001", issues=[1])
@@ -109,6 +112,7 @@ def test_terminal_state_accepts_no_further_transition(root):
 
 
 # --- gates --------------------------------------------------------------------
+
 
 def _open_batch(root, bid="b-001"):
     ledger.append(root, "batch.created", batch=bid, issues=[1])
@@ -174,6 +178,7 @@ def test_new_push_resets_gates_to_pending(root):
 
 # --- attempt counters (these drive escalation) --------------------------------
 
+
 def test_counters_track_pushes_reviews_and_reruns(root):
     _open_batch(root)
     ledger.append(root, "batch.pushed", batch="b-001", sha="a")
@@ -206,8 +211,9 @@ def test_ci_spend_is_recorded_for_the_budget(root):
 
 def test_a_batch_keeps_the_paths_and_risk_it_was_created_with(root):
     """merge_blockers reads batch['paths'] to enforce protected paths."""
-    ledger.append(root, "batch.created", batch="b-001", issues=[3],
-                  paths=["src/auth/session.py"], risk="high")
+    ledger.append(
+        root, "batch.created", batch="b-001", issues=[3], paths=["src/auth/session.py"], risk="high"
+    )
     batch = ledger.fold(ledger.read_events(root)).batches["b-001"]
     assert batch["paths"] == ["src/auth/session.py"]
     assert batch["risk"] == "high"

@@ -14,13 +14,14 @@ CLI:
     ledger.py gate BATCH {ci|review} VALUE
     ledger.py state [--batch ID]
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 LEDGER_DIR = ".foreman"
@@ -31,15 +32,15 @@ EVENTS = "events.jsonl"
 # concurrently and are tracked separately from this coarse lifecycle.
 
 TRANSITIONS: dict[str, set[str]] = {
-    "planned":   {"building", "escalated", "abandoned"},
-    "building":  {"built", "escalated", "abandoned"},
-    "built":     {"open", "escalated", "abandoned"},
-    "open":      {"blocked", "ready", "escalated", "abandoned"},
-    "blocked":   {"open", "escalated", "abandoned"},
-    "ready":     {"merging", "blocked", "escalated"},
-    "merging":   {"merged", "blocked", "escalated"},
+    "planned": {"building", "escalated", "abandoned"},
+    "building": {"built", "escalated", "abandoned"},
+    "built": {"open", "escalated", "abandoned"},
+    "open": {"blocked", "ready", "escalated", "abandoned"},
+    "blocked": {"open", "escalated", "abandoned"},
+    "ready": {"merging", "blocked", "escalated"},
+    "merging": {"merged", "blocked", "escalated"},
     "escalated": {"planned", "abandoned"},
-    "merged":    set(),
+    "merged": set(),
     "abandoned": set(),
 }
 TERMINAL = {s for s, nxt in TRANSITIONS.items() if not nxt}
@@ -85,6 +86,7 @@ class State:
 
 # --- storage ------------------------------------------------------------------
 
+
 def init(repo_root: Path | str) -> Path:
     root = Path(repo_root) / LEDGER_DIR
     root.mkdir(parents=True, exist_ok=True)
@@ -93,7 +95,7 @@ def init(repo_root: Path | str) -> Path:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def append(root: Path, event_type: str, **fields) -> dict:
@@ -121,6 +123,7 @@ def read_events(root: Path) -> list[dict]:
 
 
 # --- folding ------------------------------------------------------------------
+
 
 def _new_batch(event: dict) -> dict:
     return {
@@ -177,8 +180,7 @@ def fold(events: list[dict]) -> State:
             batch["attempts"]["reruns"] += 1
 
         elif kind == "batch.meta" and batch:
-            batch.update({k: v for k, v in event.items()
-                          if k not in {"type", "ts", "batch"}})
+            batch.update({k: v for k, v in event.items() if k not in {"type", "ts", "batch"}})
 
         elif kind == "escalation":
             state.escalations.append(event)
@@ -207,16 +209,18 @@ def load(root: Path) -> State:
 
 # --- rules --------------------------------------------------------------------
 
+
 def blocking_gates(batch: dict) -> list[str]:
     """Gates not yet clear enough to merge, in a stable order."""
-    return [name for name in ("ci", "review")
-            if batch.get(f"{name}_gate") != CLEAR[name]]
+    return [name for name in ("ci", "review") if batch.get(f"{name}_gate") != CLEAR[name]]
 
 
 def may_run_expensive_tier(batch: dict) -> bool:
     """Spend the slow suite only once the cheap signals agree it is worth it."""
-    return (batch.get("review_gate") == "clean"
-            and batch.get("ci_gate") in {"cheap_green", "full_green"})
+    return batch.get("review_gate") == "clean" and batch.get("ci_gate") in {
+        "cheap_green",
+        "full_green",
+    }
 
 
 def cap_breached(batch: dict, caps: dict[str, int]) -> str | None:
@@ -255,11 +259,14 @@ def gate(root: Path, batch_id: str, which: str, value: str) -> dict:
     if which not in GATES:
         raise LedgerError(f"unknown gate {which!r}; expected one of {sorted(GATES)}")
     if value not in GATES[which]:
-        raise LedgerError(f"{which} gate cannot be {value!r}; expected one of {sorted(GATES[which])}")
+        raise LedgerError(
+            f"{which} gate cannot be {value!r}; expected one of {sorted(GATES[which])}"
+        )
     return append(root, "gate.set", batch=batch_id, gate=which, value=value)
 
 
 # --- CLI ----------------------------------------------------------------------
+
 
 def _resolve(root_arg: str | None) -> Path:
     return Path(root_arg) if root_arg else Path.cwd() / LEDGER_DIR
@@ -271,10 +278,18 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init")
-    p = sub.add_parser("append"); p.add_argument("--type", required=True); p.add_argument("--json", default="{}")
-    p = sub.add_parser("transition"); p.add_argument("batch"); p.add_argument("state")
-    p = sub.add_parser("gate"); p.add_argument("batch"); p.add_argument("which", choices=sorted(GATES)); p.add_argument("value")
-    p = sub.add_parser("state"); p.add_argument("--batch")
+    p = sub.add_parser("append")
+    p.add_argument("--type", required=True)
+    p.add_argument("--json", default="{}")
+    p = sub.add_parser("transition")
+    p.add_argument("batch")
+    p.add_argument("state")
+    p = sub.add_parser("gate")
+    p.add_argument("batch")
+    p.add_argument("which", choices=sorted(GATES))
+    p.add_argument("value")
+    p = sub.add_parser("state")
+    p.add_argument("--batch")
 
     args = parser.parse_args(argv)
     try:
@@ -290,10 +305,16 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(gate(root, args.batch, args.which, args.value)))
         elif args.cmd == "state":
             st = load(root)
-            payload = st.batches.get(args.batch) if args.batch else {
-                "issues": st.issues, "batches": st.batches,
-                "escalations": st.escalations, "flakes": st.flakes,
-            }
+            payload = (
+                st.batches.get(args.batch)
+                if args.batch
+                else {
+                    "issues": st.issues,
+                    "batches": st.batches,
+                    "escalations": st.escalations,
+                    "flakes": st.flakes,
+                }
+            )
             print(json.dumps(payload, indent=2))
     except LedgerError as exc:
         print(f"error: {exc}", file=sys.stderr)

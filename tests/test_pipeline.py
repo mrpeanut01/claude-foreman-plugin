@@ -2,6 +2,7 @@
 
 Every stage is the real module. Only GitHub is absent.
 """
+
 import sys
 from pathlib import Path
 
@@ -18,8 +19,12 @@ import triage  # noqa: E402
 CONFIG = {
     "auto_merge": True,
     "caps": {"pushes": 3, "review_rounds": 2, "reruns": 2},
-    "limits": {"max_open_prs": 3, "max_batch_issues": 3, "max_batch_weight": 6,
-               "max_ci_minutes_per_day": 400},
+    "limits": {
+        "max_open_prs": 3,
+        "max_batch_issues": 3,
+        "max_batch_weight": 6,
+        "max_ci_minutes_per_day": 400,
+    },
     "risk_ceiling": "medium",
     "protected_paths": ["**/auth/**", "**/migrations/**"],
 }
@@ -27,21 +32,46 @@ CONFIG = {
 LABELS = ["bug", "enhancement", "question", "duplicate", "needs-repro", "needs-info"]
 
 ISSUES = [
-    {"number": 1, "title": "Upload retries forever on 503",
-     "body": "Traceback in src/upload.py line 88 shows the retry loop never exits.",
-     "labels": ["bug"], "state": "open", "updatedAt": "2026-09-01T00:00:00Z"},
-    {"number": 2, "title": "Parser drops trailing comma",
-     "body": "Run `foo parse a,b,` in src/parser/lexer.py and the last field vanishes.",
-     "labels": ["bug"], "state": "open", "updatedAt": "2026-09-01T00:00:00Z"},
-    {"number": 3, "title": "Session token never expires",
-     "body": "Old tokens in src/auth/session.py stay valid forever.",
-     "labels": ["bug"], "state": "open", "updatedAt": "2026-09-01T00:00:00Z"},
-    {"number": 4, "title": "It is broken",
-     "body": "Does not work.", "labels": ["bug"], "state": "open",
-     "updatedAt": "2026-09-01T00:00:00Z"},
-    {"number": 5, "title": "Upload retries forever on 503 errors",
-     "body": "Same as the other one.", "labels": ["bug"], "state": "open",
-     "updatedAt": "2026-09-01T00:00:00Z"},
+    {
+        "number": 1,
+        "title": "Upload retries forever on 503",
+        "body": "Traceback in src/upload.py line 88 shows the retry loop never exits.",
+        "labels": ["bug"],
+        "state": "open",
+        "updatedAt": "2026-09-01T00:00:00Z",
+    },
+    {
+        "number": 2,
+        "title": "Parser drops trailing comma",
+        "body": "Run `foo parse a,b,` in src/parser/lexer.py and the last field vanishes.",
+        "labels": ["bug"],
+        "state": "open",
+        "updatedAt": "2026-09-01T00:00:00Z",
+    },
+    {
+        "number": 3,
+        "title": "Session token never expires",
+        "body": "Old tokens in src/auth/session.py stay valid forever.",
+        "labels": ["bug"],
+        "state": "open",
+        "updatedAt": "2026-09-01T00:00:00Z",
+    },
+    {
+        "number": 4,
+        "title": "It is broken",
+        "body": "Does not work.",
+        "labels": ["bug"],
+        "state": "open",
+        "updatedAt": "2026-09-01T00:00:00Z",
+    },
+    {
+        "number": 5,
+        "title": "Upload retries forever on 503 errors",
+        "body": "Same as the other one.",
+        "labels": ["bug"],
+        "state": "open",
+        "updatedAt": "2026-09-01T00:00:00Z",
+    },
 ]
 
 
@@ -49,7 +79,7 @@ ISSUES = [
 def triaged():
     records = [triage.triage_issue(i, ISSUES, CONFIG["protected_paths"], LABELS) for i in ISSUES]
     # paths come from the issue text; batching needs them to prove independence
-    for record, issue in zip(records, ISSUES):
+    for record, issue in zip(records, ISSUES, strict=True):
         record["paths"] = triage._paths_in(issue["body"])
     return records
 
@@ -86,8 +116,9 @@ def test_the_loop_walks_a_batch_from_planned_to_merged(tmp_path, triaged):
         ledger.append(root, "issue.triaged", **record)
     batches = batch.group_issues(triaged, CONFIG)
     work = next(b for b in batches if 3 not in b["issues"])
-    ledger.append(root, "batch.created", batch=work["id"], issues=work["issues"],
-                  paths=work["paths"])
+    ledger.append(
+        root, "batch.created", batch=work["id"], issues=work["issues"], paths=work["paths"]
+    )
 
     def act():
         return loop.next_action(ledger.load(root), CONFIG)
@@ -137,7 +168,13 @@ def test_the_auth_batch_reaches_ready_and_then_refuses_to_merge(tmp_path, triage
 
 def test_a_review_verdict_without_evidence_never_becomes_a_clean_gate():
     ok, errors = land.validate_review(
-        {"verdict": "clean", "tests_covering": [], "revert_check": "not_applicable",
-         "findings": [], "behaviour_change": True})
+        {
+            "verdict": "clean",
+            "tests_covering": [],
+            "revert_check": "not_applicable",
+            "findings": [],
+            "behaviour_change": True,
+        }
+    )
     assert not ok and len(errors) == 2
     assert not any(e.startswith("verdict must be") for e in errors)

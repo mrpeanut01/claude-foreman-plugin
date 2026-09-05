@@ -1,4 +1,5 @@
 """Status digest: what is in flight, what is stuck, and what needs a human."""
+
 import sys
 from pathlib import Path
 
@@ -46,8 +47,7 @@ def test_batch_at_its_cap_is_flagged_as_needing_a_human(root):
         ledger.transition(root, "b-001", s)
     for sha in "abc":
         ledger.append(root, "batch.pushed", batch="b-001", sha=sha)
-    out = status.render(ledger.fold(ledger.read_events(root)),
-                        config={"caps": {"pushes": 3}})
+    out = status.render(ledger.fold(ledger.read_events(root)), config={"caps": {"pushes": 3}})
     assert "pushes" in out
     assert "needs you" in out.lower()
 

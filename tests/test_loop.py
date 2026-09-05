@@ -1,9 +1,8 @@
 """The scheduler: given the ledger, what is the single best next action?"""
-import sys
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-import pytest
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -21,10 +20,16 @@ CONFIG = {
 def state_with(*batches, issues=None, spend=()):
     st = ledger.State()
     for b in batches:
-        base = {"id": b["id"], "issues": b.get("issues", [1]), "state": b["state"],
-                "ci_gate": b.get("ci_gate", "pending"), "review_gate": b.get("review_gate", "pending"),
-                "attempts": b.get("attempts", {"pushes": 0, "review_rounds": 0, "reruns": 0}),
-                "paths": b.get("paths", ["src/x.py"]), "pr": b.get("pr")}
+        base = {
+            "id": b["id"],
+            "issues": b.get("issues", [1]),
+            "state": b["state"],
+            "ci_gate": b.get("ci_gate", "pending"),
+            "review_gate": b.get("review_gate", "pending"),
+            "attempts": b.get("attempts", {"pushes": 0, "review_rounds": 0, "reruns": 0}),
+            "paths": b.get("paths", ["src/x.py"]),
+            "pr": b.get("pr"),
+        }
         st.batches[b["id"]] = base
     st.issues = issues or {}
     st.ci_spend = list(spend)
@@ -33,10 +38,12 @@ def state_with(*batches, issues=None, spend=()):
 
 # --- priority: finish what is started before starting more --------------------
 
+
 def test_a_ready_batch_is_merged_first():
-    st = state_with({"id": "b-001", "state": "planned"},
-                    {"id": "b-002", "state": "ready", "ci_gate": "full_green",
-                     "review_gate": "clean"})
+    st = state_with(
+        {"id": "b-001", "state": "planned"},
+        {"id": "b-002", "state": "ready", "ci_gate": "full_green", "review_gate": "clean"},
+    )
     action = loop.next_action(st, CONFIG)
     assert action["do"] == "merge" and action["batch"] == "b-002"
 
@@ -64,26 +71,30 @@ def test_a_planned_batch_is_built_when_nothing_older_needs_attention():
 
 # --- work in progress limits --------------------------------------------------
 
+
 def test_no_new_build_while_the_open_pr_limit_is_reached():
-    st = state_with({"id": "b-001", "state": "open", "pr": 1, "ci_gate": "full_green",
-                     "review_gate": "clean"},
-                    {"id": "b-002", "state": "open", "pr": 2, "ci_gate": "full_green",
-                     "review_gate": "clean"},
-                    {"id": "b-003", "state": "planned"})
+    st = state_with(
+        {"id": "b-001", "state": "open", "pr": 1, "ci_gate": "full_green", "review_gate": "clean"},
+        {"id": "b-002", "state": "open", "pr": 2, "ci_gate": "full_green", "review_gate": "clean"},
+        {"id": "b-003", "state": "planned"},
+    )
     # both open batches have clear gates, so they advance rather than idle
     action = loop.next_action(st, CONFIG)
     assert action["do"] != "build"
 
 
 def test_the_open_pr_limit_counts_only_live_prs():
-    st = state_with({"id": "b-001", "state": "merged", "pr": 1},
-                    {"id": "b-002", "state": "abandoned", "pr": 2},
-                    {"id": "b-003", "state": "planned"})
+    st = state_with(
+        {"id": "b-001", "state": "merged", "pr": 1},
+        {"id": "b-002", "state": "abandoned", "pr": 2},
+        {"id": "b-003", "state": "planned"},
+    )
     assert loop.in_flight_count(st) == 0
     assert loop.next_action(st, CONFIG)["do"] == "build"
 
 
 # --- things the loop must not pick up ----------------------------------------
+
 
 def test_escalated_batches_are_left_alone():
     st = state_with({"id": "b-001", "state": "escalated"})
@@ -91,20 +102,33 @@ def test_escalated_batches_are_left_alone():
 
 
 def test_a_batch_at_its_cap_is_not_retried():
-    st = state_with({"id": "b-001", "state": "blocked",
-                     "attempts": {"pushes": 3, "review_rounds": 0, "reruns": 0}})
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "blocked",
+            "attempts": {"pushes": 3, "review_rounds": 0, "reruns": 0},
+        }
+    )
     action = loop.next_action(st, CONFIG)
     assert action["do"] == "escalate" and "pushes" in action["reason"]
 
 
 def test_a_ready_batch_with_a_blocker_escalates_rather_than_merging():
-    st = state_with({"id": "b-001", "state": "ready", "ci_gate": "full_green",
-                     "review_gate": "clean", "paths": ["src/auth/x.py"]})
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "ready",
+            "ci_gate": "full_green",
+            "review_gate": "clean",
+            "paths": ["src/auth/x.py"],
+        }
+    )
     action = loop.next_action(st, {**CONFIG, "protected_paths": ["**/auth/**"]})
     assert action["do"] == "escalate" and "auth" in action["reason"]
 
 
 # --- new work -----------------------------------------------------------------
+
 
 def test_untriaged_issues_are_triaged_when_nothing_is_in_flight():
     st = state_with(issues={})
@@ -117,22 +141,32 @@ def test_triaged_but_ungrouped_issues_are_batched():
 
 
 def test_issues_already_in_a_batch_are_not_batched_again():
-    st = state_with({"id": "b-001", "state": "open", "issues": [1], "pr": 3,
-                     "ci_gate": "full_green", "review_gate": "clean"},
-                    issues={1: {"issue": 1, "verdict": "actionable"}})
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "open",
+            "issues": [1],
+            "pr": 3,
+            "ci_gate": "full_green",
+            "review_gate": "clean",
+        },
+        issues={1: {"issue": 1, "verdict": "actionable"}},
+    )
     assert loop.next_action(st, CONFIG)["do"] != "batch"
 
 
 def test_nothing_to_do_is_idle_not_an_error():
-    st = state_with({"id": "b-001", "state": "merged"},
-                    issues={1: {"issue": 1, "verdict": "needs-repro"}})
+    st = state_with(
+        {"id": "b-001", "state": "merged"}, issues={1: {"issue": 1, "verdict": "needs-repro"}}
+    )
     assert loop.next_action(st, CONFIG)["do"] == "idle"
 
 
 # --- the budget ---------------------------------------------------------------
 
+
 def _spend(seconds, days_ago=0):
-    ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat().replace("+00:00", "Z")
+    ts = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat().replace("+00:00", "Z")
     return {"ts": ts, "seconds": seconds}
 
 

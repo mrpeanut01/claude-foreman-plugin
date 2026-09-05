@@ -13,6 +13,7 @@ CLI:
     land.py verdict  --file verdict.json
     land.py blockers --batch b-001 [--ledger .foreman] [--config .foreman/config.json]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,7 +34,9 @@ FAILED = {"FAILURE", "FAIL", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_F
 # sit waiting on it.
 HUMAN_GATE = re.compile(
     r"(review\s+required|required\s+review|requires\s+review|approval\s+required"
-    r"|waiting\s+for\s+approval|manual\s+approval|awaiting\s+approval)", re.I)
+    r"|waiting\s+for\s+approval|manual\s+approval|awaiting\s+approval)",
+    re.I,
+)
 
 BLOCKING_LABELS = {"needs-human", "do-not-merge", "wip", "blocked", "hold"}
 
@@ -46,6 +49,7 @@ CLEAR = {"ci": "full_green", "review": "clean"}
 
 # --- reading the check list ---------------------------------------------------
 
+
 def _is_advisory(name: str, profile: dict) -> bool:
     """Unknown checks count as required: an unknown gate may block the queue."""
     job = (profile.get("jobs") or {}).get(name)
@@ -53,8 +57,15 @@ def _is_advisory(name: str, profile: dict) -> bool:
 
 
 def classify_checks(checks: list[dict], profile: dict) -> dict:
-    summary = {"passed": [], "failed": [], "advisory_failed": [], "actionable_pending": [],
-               "advisory_pending": [], "human_gate_pending": [], "pending": []}
+    summary = {
+        "passed": [],
+        "failed": [],
+        "advisory_failed": [],
+        "actionable_pending": [],
+        "advisory_pending": [],
+        "human_gate_pending": [],
+        "pending": [],
+    }
     for entry in checks or []:
         name = entry.get("name", "")
         state = (entry.get("state") or entry.get("bucket") or "").upper()
@@ -101,6 +112,7 @@ def ci_gate(checks: list[dict], profile: dict) -> str:
 
 # --- judging the reviewer -----------------------------------------------------
 
+
 def validate_review(verdict: dict) -> tuple[bool, list[str]]:
     """A clean verdict must carry its evidence, or it is not a clean verdict.
 
@@ -123,8 +135,10 @@ def validate_review(verdict: dict) -> tuple[bool, list[str]]:
         return not errors, errors
 
     if serious:
-        errors.append(f"a clean verdict cannot carry {len(serious)} finding(s) of "
-                      f"severity {sorted({str(f.get('severity')).lower() for f in serious})}")
+        errors.append(
+            f"a clean verdict cannot carry {len(serious)} finding(s) of "
+            f"severity {sorted({str(f.get('severity')).lower() for f in serious})}"
+        )
 
     if verdict.get("behaviour_change", True):
         if not verdict.get("tests_covering"):
@@ -132,7 +146,9 @@ def validate_review(verdict: dict) -> tuple[bool, list[str]]:
         if verdict.get("revert_check") != "failed_as_expected":
             errors.append(
                 f"clean requires revert_check=failed_as_expected (got "
-                f"{verdict.get('revert_check')!r}): revert the fix, keep the test, and show it fails")
+                f"{verdict.get('revert_check')!r}): revert the fix, keep the test, "
+                "and show it fails"
+            )
     elif verdict.get("revert_check") == "still_passed":
         errors.append("revert_check=still_passed contradicts behaviour_change=false")
 
@@ -140,6 +156,7 @@ def validate_review(verdict: dict) -> tuple[bool, list[str]]:
 
 
 # --- flake or bug -------------------------------------------------------------
+
 
 def flake_decision(classification: dict, batch: dict, config: dict) -> str:
     """rerun | fix | escalate. When unsure, fix — a rerun can hide a real bug."""
@@ -156,6 +173,7 @@ def flake_decision(classification: dict, batch: dict, config: dict) -> str:
 
 # --- the merge decision -------------------------------------------------------
 
+
 def merge_blockers(batch: dict, pr: dict, config: dict) -> list[str]:
     """Everything standing between this batch and a merge, reported at once."""
     blockers: list[str] = []
@@ -168,7 +186,7 @@ def merge_blockers(batch: dict, pr: dict, config: dict) -> list[str]:
         if actual != wanted:
             blockers.append(f"{gate} gate is {actual}, needs {wanted}")
 
-    held = sorted(BLOCKING_LABELS & {str(l).lower() for l in (pr.get("labels") or [])})
+    held = sorted(BLOCKING_LABELS & {str(item).lower() for item in (pr.get("labels") or [])})
     for label in held:
         blockers.append(f"PR carries the {label} label")
 
@@ -188,6 +206,7 @@ def merge_blockers(batch: dict, pr: dict, config: dict) -> list[str]:
 
 # --- gh plumbing --------------------------------------------------------------
 
+
 def _gh_json(args: list[str]):
     try:
         out = subprocess.run(["gh", *args], capture_output=True, text=True, check=True).stdout
@@ -197,15 +216,38 @@ def _gh_json(args: list[str]):
 
 
 def fetch_checks(repo: str, pr: int) -> list[dict]:
-    raw = _gh_json(["pr", "checks", str(pr), "--repo", repo,
-                    "--json", "name,state,bucket,description,workflow,link"])
+    raw = _gh_json(
+        [
+            "pr",
+            "checks",
+            str(pr),
+            "--repo",
+            repo,
+            "--json",
+            "name,state,bucket,description,workflow,link",
+        ]
+    )
     return raw if isinstance(raw, list) else []
 
 
 def fetch_pr(repo: str, pr: int) -> dict:
-    raw = _gh_json(["pr", "view", str(pr), "--repo", repo,
-                    "--json", "number,labels,isDraft,mergeable,reviewDecision,url"]) or {}
-    raw["labels"] = [l["name"] if isinstance(l, dict) else l for l in raw.get("labels", [])]
+    raw = (
+        _gh_json(
+            [
+                "pr",
+                "view",
+                str(pr),
+                "--repo",
+                repo,
+                "--json",
+                "number,labels,isDraft,mergeable,reviewDecision,url",
+            ]
+        )
+        or {}
+    )
+    raw["labels"] = [
+        item["name"] if isinstance(item, dict) else item for item in raw.get("labels", [])
+    ]
     return raw
 
 
@@ -213,12 +255,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("checks")
-    p.add_argument("--pr", type=int, required=True); p.add_argument("--repo", required=True)
+    p.add_argument("--pr", type=int, required=True)
+    p.add_argument("--repo", required=True)
     p.add_argument("--profile", default=".foreman/ci-profile.json")
-    p = sub.add_parser("verdict"); p.add_argument("--file", required=True)
+    p = sub.add_parser("verdict")
+    p.add_argument("--file", required=True)
     p = sub.add_parser("blockers")
-    p.add_argument("--batch", required=True); p.add_argument("--pr", type=int)
-    p.add_argument("--repo"); p.add_argument("--ledger", default=".foreman")
+    p.add_argument("--batch", required=True)
+    p.add_argument("--pr", type=int)
+    p.add_argument("--repo")
+    p.add_argument("--ledger", default=".foreman")
     p.add_argument("--config", default=".foreman/config.json")
 
     args = parser.parse_args(argv)
@@ -235,12 +281,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "verdict":
         ok, errors = validate_review(load_json(args.file, {}))
-        print(json.dumps({"accepted": ok, "errors": errors,
-                          "gate_value": "clean" if ok and load_json(args.file, {}).get("verdict") == "clean"
-                                        else "changes_requested"}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "accepted": ok,
+                    "errors": errors,
+                    "gate_value": "clean"
+                    if ok and load_json(args.file, {}).get("verdict") == "clean"
+                    else "changes_requested",
+                },
+                indent=2,
+            )
+        )
         return 0 if ok else 1
 
     import ledger as ledger_mod
+
     state = ledger_mod.load(Path(args.ledger))
     batch = state.batches.get(args.batch)
     if batch is None:
@@ -248,8 +304,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     pr = fetch_pr(args.repo, args.pr) if (args.repo and args.pr) else {"labels": []}
     blockers = merge_blockers(batch, pr, load_json(args.config, {}))
-    print(json.dumps({"batch": args.batch, "mergeable": not blockers, "blockers": blockers},
-                     indent=2))
+    print(
+        json.dumps({"batch": args.batch, "mergeable": not blockers, "blockers": blockers}, indent=2)
+    )
     return 0 if not blockers else 2
 
 

@@ -15,6 +15,7 @@ CLI:
     triage.py plan --repo OWNER/NAME [--limit 50] [--json]
     triage.py apply --repo OWNER/NAME --plan plan.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -29,26 +30,76 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 CATEGORIES = ("bug", "enhancement", "question", "duplicate")
 DUPLICATE_THRESHOLD = 0.6
 
-LARGE_HINTS = ("redesign", "rewrite", "refactor", "migrate", "migration", "overhaul",
-               "architecture", "epic", "re-architect", "port to")
-SMALL_HINTS = ("typo", "bump", "rename", "readme", "changelog", "whitespace",
-               "lint", "formatting", "spelling", "docstring")
-LOW_RISK_HINTS = ("typo", "doc", "docs", "documentation", "readme", "comment",
-                  "test", "tests", "coverage", "lint", "format", "rename", "changelog")
-HIGH_RISK_HINTS = ("auth", "token", "password", "session", "credential", "permission",
-                   "migration", "migrate", "schema", "payment", "billing", "secret",
-                   "csrf", "xss", "injection", "encryption", "privilege", "logged in")
+LARGE_HINTS = (
+    "redesign",
+    "rewrite",
+    "refactor",
+    "migrate",
+    "migration",
+    "overhaul",
+    "architecture",
+    "epic",
+    "re-architect",
+    "port to",
+)
+SMALL_HINTS = (
+    "typo",
+    "bump",
+    "rename",
+    "readme",
+    "changelog",
+    "whitespace",
+    "lint",
+    "formatting",
+    "spelling",
+    "docstring",
+)
+LOW_RISK_HINTS = (
+    "typo",
+    "doc",
+    "docs",
+    "documentation",
+    "readme",
+    "comment",
+    "test",
+    "tests",
+    "coverage",
+    "lint",
+    "format",
+    "rename",
+    "changelog",
+)
+HIGH_RISK_HINTS = (
+    "auth",
+    "token",
+    "password",
+    "session",
+    "credential",
+    "permission",
+    "migration",
+    "migrate",
+    "schema",
+    "payment",
+    "billing",
+    "secret",
+    "csrf",
+    "xss",
+    "injection",
+    "encryption",
+    "privilege",
+    "logged in",
+)
 HIGH_RISK_LABELS = ("security", "critical", "data-loss", "p0")
 
 # Evidence that a reporter has already given someone enough to work with.
 EVIDENCE = (
     re.compile(r"traceback|stack ?trace|exception in|panic:", re.I),
     re.compile(r'File "[^"]+", line \d+'),
-    re.compile(r"\b[A-Z]{3,}[A-Z_]*\b"),                 # ECONNREFUSED, ENOENT
-    re.compile(r"\b[45]\d\d\b"),                          # HTTP status codes
+    re.compile(r"\b[A-Z]{3,}[A-Z_]*\b"),  # ECONNREFUSED, ENOENT
+    re.compile(r"\b[45]\d\d\b"),  # HTTP status codes
     re.compile(r"[\w./-]+\.(py|js|ts|tsx|rs|go|rb|java|kt|c|cpp|sh)\b"),
-    re.compile(r"`[^`]+`"),                               # a command or symbol
-    re.compile(r"^\s*\d+[.)]\s+\S", re.M),                # numbered steps
+    re.compile(r"`[^`]+`"),  # a command or symbol
+    re.compile(r"^\s*\d+[.)]\s+\S", re.M),  # numbered steps
     re.compile(r"\bsteps?\s+to\s+reproduce\b", re.I),
 )
 # A described expectation is a repro for behaviour bugs, where "run this and
@@ -56,9 +107,42 @@ EVIDENCE = (
 EXPECTATION = re.compile(r"\b(should|expected|instead of|rather than|ought to)\b", re.I)
 CONDITION = re.compile(r"\b(when|if|after|whenever|once)\b", re.I)
 
-STOPWORDS = {"a", "an", "the", "is", "are", "was", "were", "be", "on", "in", "at", "to",
-             "for", "of", "with", "and", "or", "but", "it", "its", "this", "that", "when",
-             "from", "by", "as", "if", "not", "no", "does", "do", "doesn't", "can", "cannot"}
+STOPWORDS = {
+    "a",
+    "an",
+    "the",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "on",
+    "in",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "and",
+    "or",
+    "but",
+    "it",
+    "its",
+    "this",
+    "that",
+    "when",
+    "from",
+    "by",
+    "as",
+    "if",
+    "not",
+    "no",
+    "does",
+    "do",
+    "doesn't",
+    "can",
+    "cannot",
+}
 
 
 from globs import compile_glob as _glob_to_re  # noqa: E402
@@ -79,6 +163,7 @@ def _has(text: str, needles) -> bool:
 
 # --- sizing -------------------------------------------------------------------
 
+
 def classify_size(issue: dict) -> str:
     """How much work this looks like. Feeds batch grouping, not scheduling."""
     text = _text(issue)
@@ -92,6 +177,7 @@ def classify_size(issue: dict) -> str:
 
 
 # --- risk ---------------------------------------------------------------------
+
 
 def risk_level(issue: dict, protected: list[str]) -> str:
     """Risk gates batching and auto-merge. When unsure, this rounds upward."""
@@ -111,6 +197,7 @@ def risk_level(issue: dict, protected: list[str]) -> str:
 
 # --- actionability ------------------------------------------------------------
 
+
 def actionability(issue: dict) -> dict:
     """Can someone start on this, or does it need something from the reporter?
 
@@ -126,19 +213,29 @@ def actionability(issue: dict) -> dict:
     if any(rx.search(body) for rx in EVIDENCE):
         return {"actionable": True, "lifecycle": None, "reason": "body carries concrete evidence"}
     if EXPECTATION.search(text) and CONDITION.search(text):
-        return {"actionable": True, "lifecycle": None,
-                "reason": "describes expected vs actual behaviour under a stated condition"}
+        return {
+            "actionable": True,
+            "lifecycle": None,
+            "reason": "describes expected vs actual behaviour under a stated condition",
+        }
     if "bug" in labels:
-        return {"actionable": False, "lifecycle": "needs-repro",
-                "reason": "bug report with no evidence, steps, or stated expectation"}
+        return {
+            "actionable": False,
+            "lifecycle": "needs-repro",
+            "reason": "bug report with no evidence, steps, or stated expectation",
+        }
     return {"actionable": True, "lifecycle": None, "reason": "uncategorised; no lifecycle label"}
 
 
 # --- dedupe -------------------------------------------------------------------
 
+
 def _tokens(title: str) -> set[str]:
-    return {t for t in re.findall(r"[a-z0-9]+", (title or "").lower())
-            if t not in STOPWORDS and len(t) > 1}
+    return {
+        t
+        for t in re.findall(r"[a-z0-9]+", (title or "").lower())
+        if t not in STOPWORDS and len(t) > 1
+    }
 
 
 def dedupe(issue: dict, others: list[dict], threshold: float = DUPLICATE_THRESHOLD) -> list[dict]:
@@ -160,22 +257,29 @@ def dedupe(issue: dict, others: list[dict], threshold: float = DUPLICATE_THRESHO
             continue
         score = len(mine & theirs) / len(mine | theirs)
         if score >= threshold:
-            hits.append({"number": other["number"], "score": round(score, 3),
-                         "title": other.get("title")})
+            hits.append(
+                {"number": other["number"], "score": round(score, 3), "title": other.get("title")}
+            )
     return sorted(hits, key=lambda h: -h["score"])
 
 
 # --- labels -------------------------------------------------------------------
 
+
 def plan_labels(record: dict, available: list[str]) -> list[str]:
     """Only labels the repo already defines. Never invent one."""
     have = set(available or [])
-    wanted = [record.get("kind"), f"size:{record.get('size')}",
-              record.get("lifecycle"), f"risk:{record.get('risk')}"]
-    return [l for l in wanted if l and l in have]
+    wanted = [
+        record.get("kind"),
+        f"size:{record.get('size')}",
+        record.get("lifecycle"),
+        f"risk:{record.get('risk')}",
+    ]
+    return [item for item in wanted if item and item in have]
 
 
 # --- skipping -----------------------------------------------------------------
+
 
 def should_skip(issue: dict, prior: dict) -> bool:
     """Re-triaging an untouched issue spends tokens to reach the same verdict."""
@@ -186,6 +290,7 @@ def should_skip(issue: dict, prior: dict) -> bool:
 
 
 # --- the record ---------------------------------------------------------------
+
 
 def _kind(issue: dict) -> str:
     labels = set(issue.get("labels") or [])
@@ -200,8 +305,9 @@ def _kind(issue: dict) -> str:
     return "enhancement"
 
 
-def triage_issue(issue: dict, others: list[dict], protected: list[str],
-                 available_labels: list[str]) -> dict:
+def triage_issue(
+    issue: dict, others: list[dict], protected: list[str], available_labels: list[str]
+) -> dict:
     duplicates = dedupe(issue, others)
     act = actionability(issue)
     record = {
@@ -218,7 +324,9 @@ def triage_issue(issue: dict, others: list[dict], protected: list[str],
         record["verdict"] = "duplicate"
         record["duplicate_of"] = duplicates[0]["number"]
         record["duplicate_score"] = duplicates[0]["score"]
-        record["rationale"] = f"title overlaps #{duplicates[0]['number']} at {duplicates[0]['score']}"
+        record["rationale"] = (
+            f"title overlaps #{duplicates[0]['number']} at {duplicates[0]['score']}"
+        )
     elif act["lifecycle"]:
         record["verdict"] = act["lifecycle"]
     else:
@@ -234,6 +342,7 @@ def queueable(records: list[dict]) -> list[dict]:
 
 # --- gh plumbing --------------------------------------------------------------
 
+
 def _gh_json(args: list[str]):
     try:
         out = subprocess.run(["gh", *args], capture_output=True, text=True, check=True).stdout
@@ -243,16 +352,33 @@ def _gh_json(args: list[str]):
 
 
 def fetch_issues(repo: str, limit: int = 50) -> list[dict]:
-    raw = _gh_json(["issue", "list", "--repo", repo, "--state", "open", "--limit", str(limit),
-                    "--json", "number,title,body,labels,state,updatedAt"]) or []
+    raw = (
+        _gh_json(
+            [
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--limit",
+                str(limit),
+                "--json",
+                "number,title,body,labels,state,updatedAt",
+            ]
+        )
+        or []
+    )
     for item in raw:
-        item["labels"] = [l["name"] if isinstance(l, dict) else l for l in item.get("labels", [])]
+        item["labels"] = [
+            item["name"] if isinstance(item, dict) else item for item in item.get("labels", [])
+        ]
     return raw
 
 
 def fetch_labels(repo: str) -> list[str]:
     raw = _gh_json(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"]) or []
-    return [l["name"] for l in raw]
+    return [item["name"] for item in raw]
 
 
 def apply_labels(repo: str, number: int, labels: list[str], wrapper: Path) -> bool:
@@ -286,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
             config = json.loads(Path(args.config).read_text())
         sys.path.insert(0, str(here))
         import ledger as ledger_mod
+
         prior = ledger_mod.load(Path(args.ledger)).issues if Path(args.ledger).exists() else {}
         issues = fetch_issues(args.repo, args.limit)
         available = fetch_labels(args.repo)
@@ -295,13 +422,23 @@ def main(argv: list[str] | None = None) -> int:
                 skipped.append(item["number"])
                 continue
             records.append(triage_issue(item, issues, config.get("protected_paths", []), available))
-        print(json.dumps({"repo": args.repo, "triaged": records, "skipped": skipped,
-                          "queueable": [r["issue"] for r in queueable(records)]}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "repo": args.repo,
+                    "triaged": records,
+                    "skipped": skipped,
+                    "queueable": [r["issue"] for r in queueable(records)],
+                },
+                indent=2,
+            )
+        )
         return 0
 
     plan = json.loads(Path(args.plan).read_text())
     sys.path.insert(0, str(here))
     import ledger as ledger_mod
+
     root = Path(args.ledger)
     ledger_mod.init(root.parent if root.name == ledger_mod.LEDGER_DIR else root)
     failed = []

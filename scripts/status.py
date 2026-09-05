@@ -4,6 +4,7 @@
 CLI:
     status.py [--root .foreman] [--config .foreman/config.json]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,14 +24,19 @@ def _needs_human(state: ledger.State, caps: dict) -> list[str]:
     """Two ways a batch stops being the loop's problem and becomes yours."""
     lines = []
     for event in state.escalations:
-        lines.append(f"  {event.get('batch', '—'):<10} escalated — {event.get('reason', 'no reason recorded')}")
+        lines.append(
+            f"  {event.get('batch', '—'):<10} escalated — "
+            f"{event.get('reason', 'no reason recorded')}"
+        )
     for bid, batch in sorted(state.batches.items()):
         if batch["state"] in ("merged", "abandoned", "escalated"):
             continue
         breached = ledger.cap_breached(batch, caps)
         if breached:
             hit = batch["attempts"][breached]
-            lines.append(f"  {bid:<10} at cap — {breached} = {hit}/{caps[breached]}, loop will not retry")
+            lines.append(
+                f"  {bid:<10} at cap — {breached} = {hit}/{caps[breached]}, loop will not retry"
+            )
     return lines
 
 
@@ -49,8 +55,10 @@ def render(state: ledger.State, config: dict | None = None) -> str:
         out.append(f"  {'batch':<10} {'state':<10} {'ci':<12} {'review':<18} {'pr':<6} issues")
         for bid, batch in in_flight.items():
             pr = f"#{batch['pr']}" if batch.get("pr") else "—"
-            out.append(f"  {bid:<10} {batch['state']:<10} {batch['ci_gate']:<12} "
-                       f"{batch['review_gate']:<18} {pr:<6} {_issues(batch)}")
+            out.append(
+                f"  {bid:<10} {batch['state']:<10} {batch['ci_gate']:<12} "
+                f"{batch['review_gate']:<18} {pr:<6} {_issues(batch)}"
+            )
             if batch["state"] == "open" and ledger.may_run_expensive_tier(batch):
                 out.append(f"  {'':<10} └─ cheap gates clear; full suite may run")
     out.append("")
@@ -79,8 +87,10 @@ def render(state: ledger.State, config: dict | None = None) -> str:
             out.append("  ⚠ above 10% — the review gate is approving too easily")
         out.append("")
 
-    out.append(f"TOTALS  merged: {len(merged)}   triaged issues: {len(state.issues)}   "
-               f"batches: {len(state.batches)}")
+    out.append(
+        f"TOTALS  merged: {len(merged)}   triaged issues: {len(state.issues)}   "
+        f"batches: {len(state.batches)}"
+    )
     return "\n".join(out)
 
 
@@ -99,8 +109,17 @@ def main(argv: list[str] | None = None) -> int:
 
     state = ledger.load(root)
     if args.json:
-        print(json.dumps({"batches": state.batches, "issues": state.issues,
-                          "escalations": state.escalations, "flakes": state.flakes}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "batches": state.batches,
+                    "issues": state.issues,
+                    "escalations": state.escalations,
+                    "flakes": state.flakes,
+                },
+                indent=2,
+            )
+        )
     else:
         print(render(state, config))
     return 0

@@ -13,6 +13,7 @@ CLI:
     ci_profile.py probe --repo OWNER/NAME [--runs 50] [--out PATH]
     ci_profile.py impact --changed FILE [FILE ...]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,6 +31,7 @@ import yaml
 # every push. Anything slower waits behind the cheap tier and the review gate.
 DEFAULT_TIER_THRESHOLD_S = 300
 
+
 class ProfileError(Exception):
     pass
 
@@ -40,6 +42,7 @@ FINISHED = {"success", "failure"}
 
 
 # --- workflow parsing ---------------------------------------------------------
+
 
 def _on_block(doc: dict) -> dict:
     # YAML 1.1 reads a bare `on:` key as the boolean True. PyYAML obliges.
@@ -78,19 +81,22 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
         for name, spec in (doc.get("jobs") or {}).items():
             spec = spec if isinstance(spec, dict) else {}
             needs = spec.get("needs", [])
-            jobs.append({
-                "name": name,
-                "display": spec.get("name"),
-                "workflow": doc.get("name", path.stem),
-                "workflow_file": path.name,
-                "needs": [needs] if isinstance(needs, str) else list(needs or []),
-                "triggers": triggers,
-                "path_filters": filters,
-            })
+            jobs.append(
+                {
+                    "name": name,
+                    "display": spec.get("name"),
+                    "workflow": doc.get("name", path.stem),
+                    "workflow_file": path.name,
+                    "needs": [needs] if isinstance(needs, str) else list(needs or []),
+                    "triggers": triggers,
+                    "path_filters": filters,
+                }
+            )
     return (jobs, problems) if report_problems else jobs
 
 
 # --- observed cost ------------------------------------------------------------
+
 
 def _seconds(job: dict) -> float | None:
     try:
@@ -161,9 +167,13 @@ def duration_stats(job_runs: list[dict]) -> dict[str, dict]:
     }
 
 
-def classify_tiers(stats: dict[str, dict], threshold_s: int = DEFAULT_TIER_THRESHOLD_S) -> dict[str, str]:
-    return {name: ("cheap" if s.get("p95", 0) <= threshold_s else "expensive")
-            for name, s in stats.items()}
+def classify_tiers(
+    stats: dict[str, dict], threshold_s: int = DEFAULT_TIER_THRESHOLD_S
+) -> dict[str, str]:
+    return {
+        name: ("cheap" if s.get("p95", 0) <= threshold_s else "expensive")
+        for name, s in stats.items()
+    }
 
 
 def flake_rates(job_runs: list[dict]) -> dict[str, float]:
@@ -176,7 +186,9 @@ def flake_rates(job_runs: list[dict]) -> dict[str, float]:
     for job in job_runs:
         if job.get("conclusion") not in FINISHED:
             continue
-        by_job.setdefault(job["name"], {}).setdefault(job.get("head_sha", ""), set()).add(job["conclusion"])
+        by_job.setdefault(job["name"], {}).setdefault(job.get("head_sha", ""), set()).add(
+            job["conclusion"]
+        )
     rates = {}
     for name, shas in by_job.items():
         flaky = sum(1 for outcomes in shas.values() if outcomes >= {"success", "failure"})
@@ -193,6 +205,7 @@ def required_checks(protection: dict | None) -> list[str]:
 
 
 # --- test impact --------------------------------------------------------------
+
 
 def _is_test(rel: str) -> bool:
     parts = Path(rel).parts
@@ -221,8 +234,7 @@ def impacted_tests(changed: list[str], repo_root: Path) -> tuple[list[str], bool
             continue  # documentation genuinely maps to no tests
         else:
             stem = Path(rel).stem
-            found = [str(p.relative_to(root))
-                     for p in sorted(root.glob(f"tests/**/test_{stem}.*"))]
+            found = [str(p.relative_to(root)) for p in sorted(root.glob(f"tests/**/test_{stem}.*"))]
             if found:
                 hits.update(found)
             else:
@@ -232,8 +244,13 @@ def impacted_tests(changed: list[str], repo_root: Path) -> tuple[list[str], bool
 
 # --- assembly -----------------------------------------------------------------
 
-def build_profile(workflow_dir: Path, job_runs: list[dict], protection: dict | None,
-                  threshold_s: int = DEFAULT_TIER_THRESHOLD_S) -> dict:
+
+def build_profile(
+    workflow_dir: Path,
+    job_runs: list[dict],
+    protection: dict | None,
+    threshold_s: int = DEFAULT_TIER_THRESHOLD_S,
+) -> dict:
     jobs, problems = parse_workflows(workflow_dir, report_problems=True)
     attributed, unattributed = attribute_runs(job_runs, jobs)
     stats = duration_stats(attributed)
@@ -248,7 +265,10 @@ def build_profile(workflow_dir: Path, job_runs: list[dict], protection: dict | N
         if stat is None:
             unmeasured.append(name)
         merged[name] = {
-            **{k: job[k] for k in ("workflow", "workflow_file", "needs", "triggers", "path_filters")},
+            **{
+                k: job[k]
+                for k in ("workflow", "workflow_file", "needs", "triggers", "path_filters")
+            },
             "display": job.get("display"),
             "p50": stat["p50"] if stat else None,
             "p95": stat["p95"] if stat else None,
@@ -276,6 +296,7 @@ def build_profile(workflow_dir: Path, job_runs: list[dict], protection: dict | N
 
 # --- live probe ---------------------------------------------------------------
 
+
 def _gh_json(args: list[str]) -> object:
     try:
         out = subprocess.run(["gh", *args], capture_output=True, text=True, check=True).stdout
@@ -291,18 +312,36 @@ def current_repo() -> str | None:
 
 
 def _fetch_job_runs(repo: str, runs: int, branch: str | None) -> list[dict]:
-    listing = _gh_json(["run", "list", "--repo", repo, "--limit", str(runs),
-                        *(["--branch", branch] if branch else []),
-                        "--json", "databaseId,headSha,conclusion"]) or []
+    listing = (
+        _gh_json(
+            [
+                "run",
+                "list",
+                "--repo",
+                repo,
+                "--limit",
+                str(runs),
+                *(["--branch", branch] if branch else []),
+                "--json",
+                "databaseId,headSha,conclusion",
+            ]
+        )
+        or []
+    )
     job_runs = []
     for run in listing:
         detail = _gh_json(["api", f"repos/{repo}/actions/runs/{run['databaseId']}/jobs"]) or {}
         for job in detail.get("jobs", []):
-            job_runs.append({
-                "run_id": run["databaseId"], "head_sha": run.get("headSha"),
-                "name": job.get("name"), "conclusion": job.get("conclusion"),
-                "started_at": job.get("started_at"), "completed_at": job.get("completed_at"),
-            })
+            job_runs.append(
+                {
+                    "run_id": run["databaseId"],
+                    "head_sha": run.get("headSha"),
+                    "name": job.get("name"),
+                    "conclusion": job.get("conclusion"),
+                    "started_at": job.get("started_at"),
+                    "completed_at": job.get("completed_at"),
+                }
+            )
     return job_runs
 
 
@@ -314,9 +353,13 @@ def _fetch_protection(repo: str) -> dict | None:
     return _gh_json(["api", f"repos/{repo}/branches/{branch}/protection"])
 
 
-def probe(repo: str, runs: int = 50, branch: str | None = None,
-          workflow_dir: Path | None = None,
-          threshold_s: int = DEFAULT_TIER_THRESHOLD_S) -> dict:
+def probe(
+    repo: str,
+    runs: int = 50,
+    branch: str | None = None,
+    workflow_dir: Path | None = None,
+    threshold_s: int = DEFAULT_TIER_THRESHOLD_S,
+) -> dict:
     """Pull real run history off GitHub. Read-only: run list, jobs, protection.
 
     Job *history* comes from `repo`; job *definitions* come from workflow files
@@ -338,8 +381,9 @@ def probe(repo: str, runs: int = 50, branch: str | None = None,
     if not workflow_dir.is_dir():
         raise ProfileError(f"no workflow directory at {workflow_dir}: nothing to profile")
 
-    profile = build_profile(workflow_dir, _fetch_job_runs(repo, runs, branch),
-                            _fetch_protection(repo), threshold_s)
+    profile = build_profile(
+        workflow_dir, _fetch_job_runs(repo, runs, branch), _fetch_protection(repo), threshold_s
+    )
     profile["repo"] = repo
     return profile
 
@@ -351,8 +395,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--runs", type=int, default=50)
     p.add_argument("--out", default=".foreman/ci-profile.json")
-    p.add_argument("--workflows", default=None,
-                   help="workflow directory (required when profiling another repo)")
+    p.add_argument(
+        "--workflows",
+        default=None,
+        help="workflow directory (required when profiling another repo)",
+    )
     p.add_argument("--branch", default=None)
     p.add_argument("--threshold", type=int, default=DEFAULT_TIER_THRESHOLD_S)
     p = sub.add_parser("impact")
@@ -362,24 +409,43 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "probe":
         try:
-            profile = probe(args.repo, args.runs, args.branch,
-                            Path(args.workflows) if args.workflows else None,
-                            args.threshold)
+            profile = probe(
+                args.repo,
+                args.runs,
+                args.branch,
+                Path(args.workflows) if args.workflows else None,
+                args.threshold,
+            )
         except ProfileError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(profile, indent=2), encoding="utf-8")
-        print(json.dumps({"written": str(out), "jobs": len(profile["jobs"]),
-                          "cheap_tier_s": profile["cheap_tier_s"],
-                          "expensive_tier_s": profile["expensive_tier_s"],
-                          "unmeasured": profile["unmeasured_jobs"]}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "written": str(out),
+                    "jobs": len(profile["jobs"]),
+                    "cheap_tier_s": profile["cheap_tier_s"],
+                    "expensive_tier_s": profile["expensive_tier_s"],
+                    "unmeasured": profile["unmeasured_jobs"],
+                },
+                indent=2,
+            )
+        )
     else:
         tests, complete = impacted_tests(args.changed, Path(args.root))
-        print(json.dumps({"tests": tests, "complete": complete,
-                          "recommendation": "run listed tests" if complete else "run full suite"},
-                         indent=2))
+        print(
+            json.dumps(
+                {
+                    "tests": tests,
+                    "complete": complete,
+                    "recommendation": "run listed tests" if complete else "run full suite",
+                },
+                indent=2,
+            )
+        )
     return 0
 
 

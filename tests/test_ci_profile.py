@@ -1,4 +1,5 @@
 """CI profile: learn the repo's job graph, costs, flake rates, and test mapping."""
+
 import sys
 import textwrap
 from pathlib import Path
@@ -9,14 +10,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import ci_profile  # noqa: E402
 
-
 # --- workflow parsing ---------------------------------------------------------
+
 
 @pytest.fixture
 def workflows(tmp_path):
     d = tmp_path / ".github" / "workflows"
     d.mkdir(parents=True)
-    (d / "ci.yml").write_text(textwrap.dedent("""
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
         name: CI
         on:
           pull_request:
@@ -31,15 +33,18 @@ def workflows(tmp_path):
           integration:
             needs: [unit]
             steps: [{run: pytest tests/integration}]
-    """))
-    (d / "nightly.yml").write_text(textwrap.dedent("""
+    """)
+    )
+    (d / "nightly.yml").write_text(
+        textwrap.dedent("""
         name: Nightly
         on:
           schedule: [{cron: '0 3 * * *'}]
         jobs:
           soak:
             steps: [{run: make soak}]
-    """))
+    """)
+    )
     return d
 
 
@@ -71,6 +76,7 @@ def test_malformed_workflow_is_skipped_with_a_warning(workflows):
 
 # --- durations ----------------------------------------------------------------
 
+
 def _job(name, sha, conclusion, seconds, run_id=1):
     start = "2026-09-01T10:00:00Z"
     end_min, end_sec = divmod(seconds, 60)
@@ -85,8 +91,10 @@ def _job(name, sha, conclusion, seconds, run_id=1):
 
 
 def test_duration_stats_use_nearest_rank_percentiles():
-    jobs = [_job("unit", f"sha{i}", "success", s, run_id=i)
-            for i, s in enumerate([60, 90, 120, 150, 600])]
+    jobs = [
+        _job("unit", f"sha{i}", "success", s, run_id=i)
+        for i, s in enumerate([60, 90, 120, 150, 600])
+    ]
     stats = ci_profile.duration_stats(jobs)["unit"]
     assert stats["n"] == 5
     assert stats["p50"] == 120
@@ -94,13 +102,16 @@ def test_duration_stats_use_nearest_rank_percentiles():
 
 
 def test_duration_stats_ignore_cancelled_and_skipped_jobs():
-    jobs = [_job("unit", "a", "success", 100, 1),
-            _job("unit", "b", "cancelled", 5, 2),
-            _job("unit", "c", "skipped", 1, 3)]
+    jobs = [
+        _job("unit", "a", "success", 100, 1),
+        _job("unit", "b", "cancelled", 5, 2),
+        _job("unit", "c", "skipped", 1, 3),
+    ]
     assert ci_profile.duration_stats(jobs)["unit"]["n"] == 1
 
 
 # --- tiers --------------------------------------------------------------------
+
 
 def test_tiers_split_on_the_configured_threshold():
     stats = {"lint": {"p95": 45}, "unit": {"p95": 240}, "integration": {"p95": 2400}}
@@ -110,12 +121,15 @@ def test_tiers_split_on_the_configured_threshold():
 
 # --- flake rate ---------------------------------------------------------------
 
+
 def test_flake_is_a_job_that_both_failed_and_passed_on_one_sha():
-    jobs = [_job("integration", "sha1", "failure", 100, 1),
-            _job("integration", "sha1", "success", 100, 2),
-            _job("integration", "sha2", "success", 100, 3),
-            _job("integration", "sha3", "success", 100, 4),
-            _job("integration", "sha4", "success", 100, 5)]
+    jobs = [
+        _job("integration", "sha1", "failure", 100, 1),
+        _job("integration", "sha1", "success", 100, 2),
+        _job("integration", "sha2", "success", 100, 3),
+        _job("integration", "sha3", "success", 100, 4),
+        _job("integration", "sha4", "success", 100, 5),
+    ]
     assert ci_profile.flake_rates(jobs)["integration"] == pytest.approx(0.25)
 
 
@@ -126,9 +140,14 @@ def test_a_sha_that_only_ever_failed_is_a_real_failure_not_a_flake():
 
 # --- required checks ----------------------------------------------------------
 
+
 def test_required_checks_read_from_branch_protection():
-    protection = {"required_status_checks": {"contexts": ["lint", "unit"],
-                                             "checks": [{"context": "integration"}]}}
+    protection = {
+        "required_status_checks": {
+            "contexts": ["lint", "unit"],
+            "checks": [{"context": "integration"}],
+        }
+    }
     assert ci_profile.required_checks(protection) == ["integration", "lint", "unit"]
 
 
@@ -139,10 +158,15 @@ def test_missing_protection_yields_no_required_checks():
 
 # --- test impact --------------------------------------------------------------
 
+
 @pytest.fixture
 def repo(tmp_path):
-    for p in ["src/foreman/ledger.py", "src/foreman/api.py",
-              "tests/test_ledger.py", "tests/integration/test_api.py"]:
+    for p in [
+        "src/foreman/ledger.py",
+        "src/foreman/api.py",
+        "tests/test_ledger.py",
+        "tests/integration/test_api.py",
+    ]:
         f = tmp_path / p
         f.parent.mkdir(parents=True, exist_ok=True)
         f.touch()
@@ -180,10 +204,12 @@ def test_docs_only_change_maps_to_no_tests_and_stays_complete(repo):
 
 # --- assembly -----------------------------------------------------------------
 
+
 def test_build_profile_assembles_every_part(workflows, repo):
     jobs_json = [_job("unit", "a", "success", 100, 1), _job("integration", "a", "success", 900, 2)]
     profile = ci_profile.build_profile(
-        workflow_dir=workflows, job_runs=jobs_json,
+        workflow_dir=workflows,
+        job_runs=jobs_json,
         protection={"required_status_checks": {"contexts": ["unit"]}},
         threshold_s=300,
     )
@@ -197,13 +223,15 @@ def test_build_profile_assembles_every_part(workflows, repo):
 
 
 def test_job_with_no_observed_runs_is_reported_as_unmeasured(workflows):
-    profile = ci_profile.build_profile(workflow_dir=workflows, job_runs=[],
-                                       protection={}, threshold_s=300)
+    profile = ci_profile.build_profile(
+        workflow_dir=workflows, job_runs=[], protection={}, threshold_s=300
+    )
     assert profile["jobs"]["soak"]["tier"] == "unmeasured"
     assert profile["unmeasured_jobs"] == ["integration", "lint", "soak", "unit"]
 
 
 # --- probe guards -------------------------------------------------------------
+
 
 def test_probe_refuses_to_mix_a_remote_repo_with_local_workflows(monkeypatch, tmp_path):
     """Run history from one repo plus workflow files from another is nonsense."""
@@ -239,13 +267,16 @@ JOBS = [
 ]
 
 
-@pytest.mark.parametrize("reported,expected", [
-    ("unit", "unit"),                      # key, reported verbatim
-    ("Run the tests", "test"),             # display name override
-    ("unit (3.11)", "unit"),               # matrix suffix on a key
-    ("Run the tests (macos-latest)", "test"),  # matrix suffix on a display name
-    ("unit (3.11, ubuntu-latest)", "unit"),    # multi-axis matrix
-])
+@pytest.mark.parametrize(
+    "reported,expected",
+    [
+        ("unit", "unit"),  # key, reported verbatim
+        ("Run the tests", "test"),  # display name override
+        ("unit (3.11)", "unit"),  # matrix suffix on a key
+        ("Run the tests (macos-latest)", "test"),  # matrix suffix on a display name
+        ("unit (3.11, ubuntu-latest)", "unit"),  # multi-axis matrix
+    ],
+)
 def test_reported_names_resolve_to_their_declared_job(reported, expected):
     assert ci_profile.attribute(reported, JOBS) == expected
 
@@ -259,16 +290,20 @@ def test_unknown_job_resolves_to_nothing():
 
 
 def test_build_profile_attributes_matrix_runs_to_the_declared_job(workflows):
-    runs = [_job("unit (3.11)", "a", "success", 100, 1),
-            _job("unit (3.12)", "a", "success", 140, 2)]
-    profile = ci_profile.build_profile(workflow_dir=workflows, job_runs=runs,
-                                       protection={}, threshold_s=300)
+    runs = [
+        _job("unit (3.11)", "a", "success", 100, 1),
+        _job("unit (3.12)", "a", "success", 140, 2),
+    ]
+    profile = ci_profile.build_profile(
+        workflow_dir=workflows, job_runs=runs, protection={}, threshold_s=300
+    )
     assert profile["jobs"]["unit"]["samples"] == 2
     assert "unit" not in profile["unmeasured_jobs"]
 
 
 def test_runs_that_match_no_declared_job_are_reported_not_dropped(workflows):
     runs = [_job("Publish release", "a", "success", 30, 1)]
-    profile = ci_profile.build_profile(workflow_dir=workflows, job_runs=runs,
-                                       protection={}, threshold_s=300)
+    profile = ci_profile.build_profile(
+        workflow_dir=workflows, job_runs=runs, protection={}, threshold_s=300
+    )
     assert profile["unattributed_runs"] == ["Publish release"]
