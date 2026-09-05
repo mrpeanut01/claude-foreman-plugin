@@ -201,3 +201,74 @@ def test_job_with_no_observed_runs_is_reported_as_unmeasured(workflows):
                                        protection={}, threshold_s=300)
     assert profile["jobs"]["soak"]["tier"] == "unmeasured"
     assert profile["unmeasured_jobs"] == ["integration", "lint", "soak", "unit"]
+
+
+# --- probe guards -------------------------------------------------------------
+
+def test_probe_refuses_to_mix_a_remote_repo_with_local_workflows(monkeypatch, tmp_path):
+    """Run history from one repo plus workflow files from another is nonsense."""
+    monkeypatch.setattr(ci_profile, "current_repo", lambda: "me/mine")
+    with pytest.raises(ci_profile.ProfileError) as exc:
+        ci_profile.probe("someone/else", workflow_dir=None)
+    assert "someone/else" in str(exc.value) and "me/mine" in str(exc.value)
+
+
+def test_probe_allows_a_remote_repo_when_workflows_are_named_explicitly(monkeypatch, workflows):
+    monkeypatch.setattr(ci_profile, "current_repo", lambda: "me/mine")
+    monkeypatch.setattr(ci_profile, "_fetch_job_runs", lambda repo, runs, branch: [])
+    monkeypatch.setattr(ci_profile, "_fetch_protection", lambda repo: {})
+    profile = ci_profile.probe("someone/else", workflow_dir=workflows)
+    assert profile["repo"] == "someone/else"
+    assert "lint" in profile["jobs"]
+
+
+def test_missing_workflow_directory_is_a_clear_error(tmp_path):
+    with pytest.raises(ci_profile.ProfileError) as exc:
+        ci_profile.probe("me/mine", workflow_dir=tmp_path / "nope")
+    assert "nope" in str(exc.value)
+
+
+# --- attributing observed runs to declared jobs -------------------------------
+# GitHub reports a job's *display* name, with matrix values appended. Workflow
+# files declare a job *key*. Matching them exactly loses most real repos.
+
+JOBS = [
+    {"name": "unit", "display": None},
+    {"name": "test", "display": "Run the tests"},
+    {"name": "e2e", "display": "E2E ${{ matrix.browser }}"},
+]
+
+
+@pytest.mark.parametrize("reported,expected", [
+    ("unit", "unit"),                      # key, reported verbatim
+    ("Run the tests", "test"),             # display name override
+    ("unit (3.11)", "unit"),               # matrix suffix on a key
+    ("Run the tests (macos-latest)", "test"),  # matrix suffix on a display name
+    ("unit (3.11, ubuntu-latest)", "unit"),    # multi-axis matrix
+])
+def test_reported_names_resolve_to_their_declared_job(reported, expected):
+    assert ci_profile.attribute(reported, JOBS) == expected
+
+
+def test_unresolvable_expression_name_is_not_guessed():
+    assert ci_profile.attribute("E2E chrome", JOBS) is None
+
+
+def test_unknown_job_resolves_to_nothing():
+    assert ci_profile.attribute("Publish release", JOBS) is None
+
+
+def test_build_profile_attributes_matrix_runs_to_the_declared_job(workflows):
+    runs = [_job("unit (3.11)", "a", "success", 100, 1),
+            _job("unit (3.12)", "a", "success", 140, 2)]
+    profile = ci_profile.build_profile(workflow_dir=workflows, job_runs=runs,
+                                       protection={}, threshold_s=300)
+    assert profile["jobs"]["unit"]["samples"] == 2
+    assert "unit" not in profile["unmeasured_jobs"]
+
+
+def test_runs_that_match_no_declared_job_are_reported_not_dropped(workflows):
+    runs = [_job("Publish release", "a", "success", 30, 1)]
+    profile = ci_profile.build_profile(workflow_dir=workflows, job_runs=runs,
+                                       protection={}, threshold_s=300)
+    assert profile["unattributed_runs"] == ["Publish release"]

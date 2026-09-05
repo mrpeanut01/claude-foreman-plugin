@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -28,6 +29,10 @@ import yaml
 # A job whose p95 sits under this runs in the cheap tier: it is worth paying on
 # every push. Anything slower waits behind the cheap tier and the review gate.
 DEFAULT_TIER_THRESHOLD_S = 300
+
+class ProfileError(Exception):
+    pass
+
 
 DOC_SUFFIXES = {".md", ".rst", ".txt", ".adoc"}
 DOC_DIRS = {"docs", "doc", "documentation"}
@@ -75,6 +80,7 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
             needs = spec.get("needs", [])
             jobs.append({
                 "name": name,
+                "display": spec.get("name"),
                 "workflow": doc.get("name", path.stem),
                 "workflow_file": path.name,
                 "needs": [needs] if isinstance(needs, str) else list(needs or []),
@@ -102,6 +108,43 @@ def _percentile(values: list[float], pct: float) -> float:
     ordered = sorted(values)
     rank = max(1, math.ceil(pct / 100 * len(ordered)))
     return ordered[min(rank, len(ordered)) - 1]
+
+
+_MATRIX_SUFFIX = re.compile(r"\s*\([^()]*\)\s*$")
+_EXPRESSION = re.compile(r"\$\{\{.*?\}\}")
+
+
+def attribute(reported: str, jobs: list[dict]) -> str | None:
+    """Resolve a name GitHub reported back to the workflow job that declared it.
+
+    Returns None rather than guessing. A wrong attribution silently mixes two
+    jobs' durations, which is worse than an honest gap in the profile.
+    """
+    if not reported:
+        return None
+    candidates = {}
+    for job in jobs:
+        candidates[job["name"]] = job["name"]
+        display = job.get("display")
+        # A display name built from a matrix expression cannot be reversed.
+        if display and not _EXPRESSION.search(display):
+            candidates[display] = job["name"]
+    for probe_name in (reported, _MATRIX_SUFFIX.sub("", reported)):
+        if probe_name in candidates:
+            return candidates[probe_name]
+    return None
+
+
+def attribute_runs(job_runs: list[dict], jobs: list[dict]) -> tuple[list[dict], list[str]]:
+    """Relabel observed runs with their declared job key; report what did not match."""
+    mapped, orphans = [], set()
+    for run in job_runs:
+        key = attribute(run.get("name", ""), jobs)
+        if key is None:
+            orphans.add(run.get("name", ""))
+        else:
+            mapped.append({**run, "name": key})
+    return mapped, sorted(n for n in orphans if n)
 
 
 def duration_stats(job_runs: list[dict]) -> dict[str, dict]:
@@ -192,9 +235,10 @@ def impacted_tests(changed: list[str], repo_root: Path) -> tuple[list[str], bool
 def build_profile(workflow_dir: Path, job_runs: list[dict], protection: dict | None,
                   threshold_s: int = DEFAULT_TIER_THRESHOLD_S) -> dict:
     jobs, problems = parse_workflows(workflow_dir, report_problems=True)
-    stats = duration_stats(job_runs)
+    attributed, unattributed = attribute_runs(job_runs, jobs)
+    stats = duration_stats(attributed)
     tiers = classify_tiers(stats, threshold_s)
-    flakes = flake_rates(job_runs)
+    flakes = flake_rates(attributed)
     required = set(required_checks(protection))
 
     merged, unmeasured = {}, []
@@ -205,6 +249,7 @@ def build_profile(workflow_dir: Path, job_runs: list[dict], protection: dict | N
             unmeasured.append(name)
         merged[name] = {
             **{k: job[k] for k in ("workflow", "workflow_file", "needs", "triggers", "path_filters")},
+            "display": job.get("display"),
             "p50": stat["p50"] if stat else None,
             "p95": stat["p95"] if stat else None,
             "samples": stat["n"] if stat else 0,
@@ -224,6 +269,7 @@ def build_profile(workflow_dir: Path, job_runs: list[dict], protection: dict | N
         "cheap_tier_s": tier_cost("cheap"),
         "expensive_tier_s": tier_cost("expensive"),
         "unmeasured_jobs": sorted(unmeasured),
+        "unattributed_runs": unattributed,
         "problems": problems,
     }
 
@@ -238,8 +284,13 @@ def _gh_json(args: list[str]) -> object:
         return None
 
 
-def probe(repo: str, runs: int = 50, branch: str | None = None) -> dict:
-    """Pull real run history off GitHub. Read-only: list runs, jobs, protection."""
+def current_repo() -> str | None:
+    """The repo the cwd belongs to, or None outside a GitHub checkout."""
+    info = _gh_json(["repo", "view", "--json", "nameWithOwner"]) or {}
+    return info.get("nameWithOwner")
+
+
+def _fetch_job_runs(repo: str, runs: int, branch: str | None) -> list[dict]:
     listing = _gh_json(["run", "list", "--repo", repo, "--limit", str(runs),
                         *(["--branch", branch] if branch else []),
                         "--json", "databaseId,headSha,conclusion"]) or []
@@ -252,10 +303,45 @@ def probe(repo: str, runs: int = 50, branch: str | None = None) -> dict:
                 "name": job.get("name"), "conclusion": job.get("conclusion"),
                 "started_at": job.get("started_at"), "completed_at": job.get("completed_at"),
             })
-    default_branch = (_gh_json(["repo", "view", repo, "--json", "defaultBranchRef"]) or {})
-    branch_name = (default_branch.get("defaultBranchRef") or {}).get("name", "main")
-    protection = _gh_json(["api", f"repos/{repo}/branches/{branch_name}/protection"])
-    return build_profile(Path(".github/workflows"), job_runs, protection)
+    return job_runs
+
+
+def _fetch_protection(repo: str) -> dict | None:
+    view = _gh_json(["repo", "view", repo, "--json", "defaultBranchRef"]) or {}
+    branch = (view.get("defaultBranchRef") or {}).get("name", "main")
+    # Absent or inaccessible protection is normal, not an error: it just means
+    # nothing is required, so nothing can gate a merge.
+    return _gh_json(["api", f"repos/{repo}/branches/{branch}/protection"])
+
+
+def probe(repo: str, runs: int = 50, branch: str | None = None,
+          workflow_dir: Path | None = None,
+          threshold_s: int = DEFAULT_TIER_THRESHOLD_S) -> dict:
+    """Pull real run history off GitHub. Read-only: run list, jobs, protection.
+
+    Job *history* comes from `repo`; job *definitions* come from workflow files
+    on disk. Reading those from different repos yields a profile describing
+    neither, so probing a repo other than the current one requires saying where
+    its workflows are.
+    """
+    if workflow_dir is None:
+        here = current_repo()
+        if here and here.lower() != repo.lower():
+            raise ProfileError(
+                f"refusing to profile {repo} from a checkout of {here}: run history would "
+                f"come from {repo} but job definitions from {here}. Run this inside {repo}, "
+                f"or pass --workflows pointing at its workflow directory."
+            )
+        workflow_dir = Path(".github/workflows")
+
+    workflow_dir = Path(workflow_dir)
+    if not workflow_dir.is_dir():
+        raise ProfileError(f"no workflow directory at {workflow_dir}: nothing to profile")
+
+    profile = build_profile(workflow_dir, _fetch_job_runs(repo, runs, branch),
+                            _fetch_protection(repo), threshold_s)
+    profile["repo"] = repo
+    return profile
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -265,13 +351,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--runs", type=int, default=50)
     p.add_argument("--out", default=".foreman/ci-profile.json")
+    p.add_argument("--workflows", default=None,
+                   help="workflow directory (required when profiling another repo)")
+    p.add_argument("--branch", default=None)
+    p.add_argument("--threshold", type=int, default=DEFAULT_TIER_THRESHOLD_S)
     p = sub.add_parser("impact")
     p.add_argument("--changed", nargs="+", required=True)
     p.add_argument("--root", default=".")
 
     args = parser.parse_args(argv)
     if args.cmd == "probe":
-        profile = probe(args.repo, args.runs)
+        try:
+            profile = probe(args.repo, args.runs, args.branch,
+                            Path(args.workflows) if args.workflows else None,
+                            args.threshold)
+        except ProfileError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(profile, indent=2), encoding="utf-8")
