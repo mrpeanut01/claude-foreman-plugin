@@ -11,6 +11,7 @@ import land  # noqa: E402
 
 PROFILE = {
     "required_checks": ["lint", "unit", "integration"],
+    "protection_known": True,
     "jobs": {
         "lint": {"tier": "cheap", "required": True},
         "unit": {"tier": "cheap", "required": True},
@@ -238,3 +239,51 @@ def test_auto_merge_off_blocks_everything():
 def test_blockers_are_reported_together_not_one_at_a_time():
     batch = ready_batch(review_gate="pending", paths=["src/auth/x.py"])
     assert len(land.merge_blockers(batch, {"labels": ["do-not-merge"]}, CFG)) >= 3
+
+
+# --- issue #1: absent branch protection must not read as "nothing is required" -
+
+UNPROTECTED = {
+    "required_checks": [],
+    "protection_known": False,
+    "jobs": {
+        "lint": {"tier": "cheap", "required": False},
+        "test": {"tier": "cheap", "required": False},
+    },
+}
+
+
+def test_a_red_ci_is_never_green_when_protection_is_unknown():
+    red = [check("lint", "FAILURE"), check("test", "FAILURE")]
+    assert land.classify_checks(red, UNPROTECTED)["failed"] == ["lint", "test"]
+    assert land.ci_gate(red, UNPROTECTED) == "failed"
+
+
+def test_unknown_protection_makes_every_check_required():
+    mixed = [check("lint", "SUCCESS"), check("test", "PENDING")]
+    assert land.classify_checks(mixed, UNPROTECTED)["actionable_pending"] == ["test"]
+    assert land.ci_gate(mixed, UNPROTECTED) == "pending"
+
+
+def test_all_green_under_unknown_protection_is_full_green():
+    green = [check("lint", "SUCCESS"), check("test", "SUCCESS")]
+    assert land.ci_gate(green, UNPROTECTED) == "full_green"
+
+
+def test_advisory_still_means_advisory_when_protection_is_known():
+    known = {**UNPROTECTED, "protection_known": True, "required_checks": ["lint"]}
+    assert land.classify_checks([check("test", "FAILURE")], known)["failed"] == []
+
+
+def test_an_unprotected_repo_with_red_ci_cannot_merge():
+    red_batch = {
+        "id": "b-001",
+        "ci_gate": land.ci_gate([check("lint", "FAILURE")], UNPROTECTED),
+        "review_gate": "clean",
+        "paths": ["scripts/x.py"],
+        "attempts": {"pushes": 1, "review_rounds": 0, "reruns": 0},
+    }
+    blockers = land.merge_blockers(
+        red_batch, {"labels": []}, {"auto_merge": True, "caps": {}, "protected_paths": []}
+    )
+    assert blockers, "a fully red CI must block the merge"

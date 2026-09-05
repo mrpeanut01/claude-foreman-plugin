@@ -38,6 +38,10 @@ class ProfileError(Exception):
 
 DOC_SUFFIXES = {".md", ".rst", ".txt", ".adoc"}
 DOC_DIRS = {"docs", "doc", "documentation"}
+# Test sources only. The `.*` glob otherwise matches compiled bytecode, and a
+# .pyc handed to a test runner is at best an error.
+TEST_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".rb", ".go", ".rs", ".java", ".kt"}
+SKIP_DIRS = {"__pycache__", ".pytest_cache", "node_modules", ".mypy_cache", ".ruff_cache"}
 FINISHED = {"success", "failure"}
 
 
@@ -207,9 +211,21 @@ def required_checks(protection: dict | None) -> list[str]:
 # --- test impact --------------------------------------------------------------
 
 
+def _is_test_source(path: Path) -> bool:
+    """A real test file, not a build artefact that happens to sit beside one."""
+    return path.is_file() and path.suffix in TEST_SUFFIXES and not SKIP_DIRS & set(path.parts)
+
+
 def _is_test(rel: str) -> bool:
-    parts = Path(rel).parts
-    return bool(parts) and parts[0] in {"test", "tests"} and Path(rel).name.startswith("test")
+    path = Path(rel)
+    parts = path.parts
+    return (
+        bool(parts)
+        and parts[0] in {"test", "tests"}
+        and path.name.startswith("test")
+        and path.suffix in TEST_SUFFIXES
+        and not SKIP_DIRS & set(parts)
+    )
 
 
 def _is_doc(rel: str) -> bool:
@@ -234,7 +250,11 @@ def impacted_tests(changed: list[str], repo_root: Path) -> tuple[list[str], bool
             continue  # documentation genuinely maps to no tests
         else:
             stem = Path(rel).stem
-            found = [str(p.relative_to(root)) for p in sorted(root.glob(f"tests/**/test_{stem}.*"))]
+            found = [
+                str(p.relative_to(root))
+                for p in sorted(root.glob(f"tests/**/test_{stem}.*"))
+                if _is_test_source(p)
+            ]
             if found:
                 hits.update(found)
             else:
@@ -286,6 +306,9 @@ def build_profile(
         "tier_threshold_s": threshold_s,
         "jobs": merged,
         "required_checks": sorted(required),
+        # Absent protection means we do not know what is required. Recording
+        # that as a fact stops land.py reading it as "nothing is".
+        "protection_known": bool(protection),
         "cheap_tier_s": tier_cost("cheap"),
         "expensive_tier_s": tier_cost("expensive"),
         "unmeasured_jobs": sorted(unmeasured),

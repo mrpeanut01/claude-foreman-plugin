@@ -281,3 +281,76 @@ def test_the_original_of_a_duplicate_pair_stays_queueable():
     ]
     records = [triage.triage_issue(i, pair, [], AVAILABLE) for i in pair]
     assert [r["verdict"] for r in records] == ["actionable", "duplicate"]
+
+
+# --- issue #2: a triage record must carry the paths batching needs ------------
+
+
+def test_triage_records_carry_the_paths_found_in_the_issue():
+    record = triage.triage_issue(
+        issue(
+            number=7,
+            title="Upload fails",
+            body="Traceback in src/upload.py line 22",
+            labels=["bug"],
+        ),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["paths"] == ["src/upload.py"]
+
+
+def test_triage_output_can_be_batched_without_post_processing():
+    import batch as batch_mod
+
+    issues = [
+        issue(number=n, title=t, body=f"Traceback in src/mod{n}.py line 1", labels=["bug"])
+        for n, t in enumerate(
+            ("Upload retries forever", "Parser drops commas", "Cache never evicts"), start=1
+        )
+    ]
+    records = [triage.triage_issue(i, issues, [], AVAILABLE) for i in issues]
+    groups = batch_mod.group_issues(
+        records, {"limits": {"max_batch_issues": 3, "max_batch_weight": 9}}
+    )
+    assert [g["issues"] for g in groups] == [[1, 2, 3]], "batching must work on raw triage output"
+
+
+# --- issue #5: hints must match words, not substrings ------------------------
+
+
+@pytest.mark.parametrize(
+    "title,body,expected_risk",
+    [
+        ("Update the Dockerfile base image", "Bump to bookworm.", "medium"),
+        ("Documentation for the CLI flags", "Explain each flag.", "low"),
+        ("Tokenizer drops short tokens", "_tokens in the parser.", "medium"),
+        ("Session token never expires", "Auth stays valid.", "high"),
+    ],
+)
+def test_risk_hints_match_whole_words_only(title, body, expected_risk):
+    assert triage.risk_level(issue(title=title, body=body), []) == expected_risk
+
+
+def test_mentioning_a_lint_job_does_not_make_an_issue_small():
+    body = (
+        "The lint job fails because classify_checks treats every failure as advisory "
+        "when branch protection is absent. " * 3
+    )
+    assert triage.classify_size(issue(title="CI gate is wrong", body=body)) != "small"
+
+
+def test_a_path_mentioned_twice_is_listed_once():
+    record = triage.triage_issue(
+        issue(
+            number=8,
+            title="Two mentions",
+            body="See src/a.py and also src/a.py again, plus src/b.py",
+            labels=["bug"],
+        ),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["paths"] == ["src/a.py", "src/b.py"]

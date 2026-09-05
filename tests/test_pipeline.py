@@ -77,11 +77,8 @@ ISSUES = [
 
 @pytest.fixture
 def triaged():
-    records = [triage.triage_issue(i, ISSUES, CONFIG["protected_paths"], LABELS) for i in ISSUES]
-    # paths come from the issue text; batching needs them to prove independence
-    for record, issue in zip(records, ISSUES, strict=True):
-        record["paths"] = triage._paths_in(issue["body"])
-    return records
+    # No post-processing: batching must work on what triage actually emits.
+    return [triage.triage_issue(i, ISSUES, CONFIG["protected_paths"], LABELS) for i in ISSUES]
 
 
 def test_triage_separates_work_from_everything_else(triaged):

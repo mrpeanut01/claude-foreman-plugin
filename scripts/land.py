@@ -51,7 +51,15 @@ CLEAR = {"ci": "full_green", "review": "clean"}
 
 
 def _is_advisory(name: str, profile: dict) -> bool:
-    """Unknown checks count as required: an unknown gate may block the queue."""
+    """Unknown checks count as required: an unknown gate may block the queue.
+
+    When branch protection could not be read, nothing is known to be advisory.
+    Treating an unread protection API as "nothing is required" turns a fully red
+    CI into a green gate, which is the one outcome this whole system exists to
+    prevent.
+    """
+    if not profile.get("protection_known", False):
+        return False
     job = (profile.get("jobs") or {}).get(name)
     return bool(job) and job.get("required") is False
 

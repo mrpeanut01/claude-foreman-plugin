@@ -307,3 +307,21 @@ def test_runs_that_match_no_declared_job_are_reported_not_dropped(workflows):
         workflow_dir=workflows, job_runs=runs, protection={}, threshold_s=300
     )
     assert profile["unattributed_runs"] == ["Publish release"]
+
+
+def test_compiled_bytecode_is_never_offered_as_a_test_to_run(repo):
+    cache = repo / "tests" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "test_ledger.cpython-314-pytest-9.0.3.pyc").touch()
+    hit, complete = ci_profile.impacted_tests(["src/foreman/ledger.py"], repo)
+    assert hit == ["tests/test_ledger.py"]
+    assert complete is True
+
+
+def test_a_non_python_test_suite_still_maps(tmp_path):
+    for p in ["src/parser.ts", "tests/test_parser.ts"]:
+        f = tmp_path / p
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.touch()
+    hit, complete = ci_profile.impacted_tests(["src/parser.ts"], tmp_path)
+    assert hit == ["tests/test_parser.ts"] and complete is True

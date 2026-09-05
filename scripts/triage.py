@@ -23,6 +23,7 @@ import json
 import re
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -149,29 +150,40 @@ from globs import compile_glob as _glob_to_re  # noqa: E402
 
 
 def _paths_in(text: str) -> list[str]:
-    return re.findall(r"[\w][\w./-]*/[\w./-]+\.\w+", text or "")
+    """File paths mentioned in the text, in order, without repeats."""
+    return list(dict.fromkeys(re.findall(r"[\w][\w./-]*/[\w./-]+\.\w+", text or "")))
 
 
 def _text(issue: dict) -> str:
     return f"{issue.get('title') or ''}\n{issue.get('body') or ''}"
 
 
+@lru_cache(maxsize=32)
+def _hint_matcher(needles: tuple) -> re.Pattern:
+    return re.compile(r"\b(" + "|".join(re.escape(n) for n in needles) + r")\b", re.I)
+
+
 def _has(text: str, needles) -> bool:
-    low = text.lower()
-    return any(n in low for n in needles)
+    """Whole words only. `doc` must not match Dockerfile, `token` must not match
+    a tokenizer, and `lint` must not match a mention of the lint job."""
+    return bool(_hint_matcher(tuple(needles)).search(text or ""))
 
 
 # --- sizing -------------------------------------------------------------------
 
 
 def classify_size(issue: dict) -> str:
-    """How much work this looks like. Feeds batch grouping, not scheduling."""
-    text = _text(issue)
+    """How much work this looks like. Feeds batch grouping, not scheduling.
+
+    Hints are read from the title only. A bug report that *mentions* the lint job
+    in passing is not a lint-sized change, and bodies quote error output freely.
+    """
+    title = issue.get("title") or ""
     body = issue.get("body") or ""
     checkboxes = len(re.findall(r"^\s*[-*]\s*\[[ xX]\]", body, re.M))
-    if _has(text, LARGE_HINTS) or checkboxes >= 6 or len(body) > 2000:
+    if _has(title, LARGE_HINTS) or checkboxes >= 6 or len(body) > 2000:
         return "large"
-    if _has(text, SMALL_HINTS) or len(body) < 120:
+    if _has(title, SMALL_HINTS) or len(body) < 120:
         return "small"
     return "medium"
 
@@ -318,6 +330,8 @@ def triage_issue(
         "risk": risk_level(issue, protected),
         "lifecycle": None if duplicates else act["lifecycle"],
         "issue_updated_at": issue.get("updatedAt"),
+        # batch.can_group needs these; without them nothing ever groups.
+        "paths": _paths_in(_text(issue)),
         "rationale": act["reason"],
     }
     if duplicates:
