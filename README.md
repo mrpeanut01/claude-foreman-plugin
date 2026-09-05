@@ -7,9 +7,8 @@ PR with an **independent** agent, and auto-merge on green.
 Built for repos where the test suite is slow enough that how you spend CI is the
 main constraint on throughput.
 
-> **Status: phase 1 of 5.** The ledger, the CI profiler, and `/foreman:status`
-> are implemented and tested. Triage, batching, build, and land are designed but
-> not yet built — see [Roadmap](#roadmap).
+> **Status: all five phases implemented, 191 tests.** Not yet run unattended
+> against a production repo — `auto_merge` ships `false` for that reason.
 
 ## The idea
 
@@ -78,18 +77,27 @@ claude plugin install foreman@claude-foreman-plugin
 
 | Command | Does |
 |---------|------|
+| `/foreman:run` | The whole loop — one action at a time, until idle or out of budget |
+| `/foreman:triage` | Classify, size, risk-score and dedupe open issues. Writes labels only |
+| `/foreman:batch` | Group actionable issues into batches sized by CI cost |
+| `/foreman:build` | Implement one batch in a worktree, test-first, behind a local gate |
+| `/foreman:land` | Open the PR, run review and CI concurrently, merge on green |
 | `/foreman:status` | What is in flight, what is stuck, what needs you |
 | `/foreman:ci-profile` | Measure the repo's real CI costs into `.foreman/ci-profile.json` |
-
-Planned: `/foreman:triage`, `/foreman:batch`, `/foreman:build`, `/foreman:land`,
-`/foreman:run`.
 
 ## Skills
 
 | Skill | Owns |
 |-------|------|
 | `orchestration` | The loop, ledger schema, batch state machine, caps, escalation |
+| `issue-triage` | Verdicts, closed label vocabulary, size and risk taxonomy |
+| `work-batching` | Grouping rules, the amortisation arithmetic, splitting |
+| `issue-implementation` | Worktrees, Red→Green, one commit per issue, the local gate |
+| `pr-landing` | The ladder, check classification, the review gate, merging |
 | `ci-economics` | CI profiling, test impact analysis, the tier ladder, flake budget |
+
+Plus one agent: `reviewer` — the independent pre-merge review, with no `Edit` or
+`Write`.
 
 ## Scripts
 
@@ -100,6 +108,10 @@ All stdlib Python plus PyYAML; no service, no database.
 | `scripts/ledger.py` | Append-only event log, folded state, validated transitions |
 | `scripts/ci_profile.py` | Job graph, measured durations, flake rates, diff→test mapping |
 | `scripts/status.py` | The digest |
+| `scripts/triage.py` | Sizing, risk, actionability, dedupe, label planning |
+| `scripts/batch.py` | Grouping, savings arithmetic, splitting a failed batch |
+| `scripts/land.py` | Check classification, review-verdict validation, merge blockers |
+| `scripts/loop.py` | The scheduler: one next action, WIP limits, the daily CI budget |
 | `scripts/gh_safe.sh` | Allowlisted `gh` wrapper — no deletes, no `--admin`, no protection edits, everything audited |
 
 ## Two rules worth stating plainly
@@ -123,11 +135,25 @@ python3 -m pytest tests/ -q
 
 | Phase | Ships | State |
 |-------|-------|-------|
-| 1 | Ledger, CI profiler, `/foreman:status` | ✅ done |
-| 2 | `issue-triage` + `/foreman:triage` | planned |
-| 3 | `work-batching` + `/foreman:batch` | planned |
-| 4 | `build` + `land` + review gate + auto-merge | planned |
-| 5 | `/foreman:run` — the unattended loop, budgets, escalation routing | planned |
+| 1 | Ledger, CI profiler, `/foreman:status` | ✅ |
+| 2 | `issue-triage` + `/foreman:triage` | ✅ |
+| 3 | `work-batching` + `/foreman:batch` | ✅ |
+| 4 | `build` + `land` + review gate + auto-merge | ✅ |
+| 5 | `/foreman:run` — the unattended loop, budgets, escalation routing | ✅ |
+
+**Not yet done:** run unattended against a real repo for a week and see what
+breaks. Everything above is tested; none of it has been trusted overnight.
+
+## Turning it on
+
+Copy `config.example.json` to `.foreman/config.json`. Three settings decide how
+much rope the loop has:
+
+| Setting | Start at | Why |
+|---------|----------|-----|
+| `auto_merge` | `false` | It will build, review, and go green, but stop at the merge. Watch a few, then flip it. |
+| `limits.max_ci_minutes_per_day` | Your real budget | The only thing between a stuck loop and your CI bill. |
+| `protected_paths` | Generously | Anything listed escalates instead of merging, however green. |
 
 ## Prior art
 

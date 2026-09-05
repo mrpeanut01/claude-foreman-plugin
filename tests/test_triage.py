@@ -1,0 +1,224 @@
+"""Triage: classify, size, risk-score and dedupe issues into the ledger."""
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+import triage  # noqa: E402
+
+
+def issue(**kw):
+    base = {"number": 1, "title": "Something is broken", "body": "It broke.",
+            "labels": [], "state": "open", "updatedAt": "2026-09-01T00:00:00Z",
+            "comments": []}
+    return {**base, **kw}
+
+
+# --- sizing -------------------------------------------------------------------
+
+@pytest.mark.parametrize("title,body,expected", [
+    ("Fix typo in README", "s/teh/the/", "small"),
+    ("Bump requests to 2.32", "Routine dependency bump.", "small"),
+    ("Add retry to the upload client", "Uploads fail on 503. " * 12, "medium"),
+    ("Redesign the auth subsystem", "We should rewrite how sessions work. " * 20, "large"),
+    ("Migrate storage to the new schema", "Multi-step migration.", "large"),
+])
+def test_size_from_title_and_body(title, body, expected):
+    assert triage.classify_size(issue(title=title, body=body)) == expected
+
+
+def test_a_long_checklist_reads_as_large():
+    body = "\n".join(f"- [ ] step {i}" for i in range(9))
+    assert triage.classify_size(issue(title="Improve onboarding", body=body)) == "large"
+
+
+def test_missing_body_does_not_crash_sizing():
+    assert triage.classify_size(issue(body=None)) in {"small", "medium", "large"}
+
+
+# --- risk ---------------------------------------------------------------------
+
+PROTECTED = ["**/auth/**", "**/migrations/**", "**/payments/**"]
+
+
+@pytest.mark.parametrize("title,body,expected", [
+    ("Fix typo in the docs", "Just wording.", "low"),
+    ("Add a test for the parser", "Coverage gap.", "low"),
+    ("Handle empty upload payload", "Returns 500 on empty body.", "medium"),
+    ("Session token never expires", "Anyone with an old token stays logged in.", "high"),
+    ("Add column to users table", "Needs a migration.", "high"),
+])
+def test_risk_level(title, body, expected):
+    assert triage.risk_level(issue(title=title, body=body), PROTECTED) == expected
+
+
+def test_a_security_label_forces_high_risk():
+    got = triage.risk_level(issue(title="Tidy up logging", body="", labels=["security"]), PROTECTED)
+    assert got == "high"
+
+
+def test_a_path_under_protection_forces_high_risk():
+    got = triage.risk_level(issue(title="Tweak helper", body="in src/auth/session.py"), PROTECTED)
+    assert got == "high"
+
+
+# --- actionability ------------------------------------------------------------
+
+def test_a_bug_with_no_repro_signal_needs_repro():
+    verdict = triage.actionability(issue(title="App crashes", body="It crashes sometimes.",
+                                         labels=["bug"]))
+    assert verdict["actionable"] is False
+    assert verdict["lifecycle"] == "needs-repro"
+
+
+@pytest.mark.parametrize("body", [
+    "Traceback (most recent call last):\n  File \"app.py\", line 3",
+    "Steps: 1. run `foo bar` 2. see the error",
+    "It fails in src/parser/lexer.py when the input is empty",
+    "Run `npm test` and the third case fails with ECONNREFUSED",
+])
+def test_evidence_in_the_body_means_no_lifecycle_label(body):
+    """Anthropic's rule: false positives are worse than missing labels."""
+    verdict = triage.actionability(issue(title="Parser fails", body=body, labels=["bug"]))
+    assert verdict["lifecycle"] is None
+    assert verdict["actionable"] is True
+
+
+def test_lifecycle_labels_never_apply_to_questions_or_enhancements():
+    for kind in ("question", "enhancement"):
+        verdict = triage.actionability(issue(title="Could we?", body="thoughts?", labels=[kind]))
+        assert verdict["lifecycle"] is None
+
+
+def test_a_model_behaviour_report_does_not_need_traditional_repro():
+    verdict = triage.actionability(issue(
+        title="Wrong suggestion on empty file",
+        body="When the file is empty it suggests deleting it, which should never happen.",
+        labels=["bug"]))
+    assert verdict["lifecycle"] is None
+
+
+# --- dedupe -------------------------------------------------------------------
+
+def test_near_identical_titles_are_flagged_as_duplicates():
+    new = issue(number=10, title="Upload fails with 503 on large files")
+    others = [issue(number=3, title="Upload fails with 503 for large files"),
+              issue(number=4, title="Dark mode for the settings page")]
+    hits = triage.dedupe(new, others)
+    assert hits and hits[0]["number"] == 3
+    assert hits[0]["score"] >= 0.6
+
+
+def test_unrelated_issues_are_not_flagged():
+    new = issue(number=10, title="Add dark mode")
+    others = [issue(number=3, title="Upload fails with 503 for large files")]
+    assert triage.dedupe(new, others) == []
+
+
+def test_an_issue_never_duplicates_itself():
+    new = issue(number=10, title="Upload fails with 503 on large files")
+    assert triage.dedupe(new, [new]) == []
+
+
+def test_only_open_issues_can_be_duplicated():
+    new = issue(number=10, title="Upload fails with 503 on large files")
+    closed = issue(number=3, title="Upload fails with 503 on large files", state="closed")
+    assert triage.dedupe(new, [closed]) == []
+
+
+# --- labels: a closed vocabulary ---------------------------------------------
+
+AVAILABLE = ["bug", "enhancement", "question", "duplicate", "needs-repro",
+             "needs-info", "security", "size:small", "size:medium", "size:large"]
+
+
+def test_planned_labels_come_only_from_the_repo_vocabulary():
+    record = {"kind": "bug", "size": "small", "lifecycle": "needs-repro", "risk": "high"}
+    planned = triage.plan_labels(record, AVAILABLE)
+    assert set(planned) <= set(AVAILABLE)
+    assert "bug" in planned and "size:small" in planned and "needs-repro" in planned
+
+
+def test_labels_the_repo_does_not_define_are_dropped_silently():
+    record = {"kind": "bug", "size": "small", "lifecycle": None, "risk": "low"}
+    planned = triage.plan_labels(record, ["bug"])
+    assert planned == ["bug"], "never invent a label the repo has not defined"
+
+
+def test_exactly_one_category_label_is_always_planned():
+    for kind in ("bug", "enhancement", "question", "duplicate"):
+        planned = triage.plan_labels({"kind": kind, "size": "medium", "lifecycle": None,
+                                      "risk": "low"}, AVAILABLE)
+        categories = [l for l in planned if l in {"bug", "enhancement", "question", "duplicate"}]
+        assert categories == [kind]
+
+
+# --- skip already-triaged -----------------------------------------------------
+
+def test_an_unchanged_issue_is_skipped():
+    prior = {42: {"issue": 42, "issue_updated_at": "2026-09-01T00:00:00Z"}}
+    assert triage.should_skip(issue(number=42, updatedAt="2026-09-01T00:00:00Z"), prior) is True
+
+
+def test_an_edited_issue_is_retriaged():
+    prior = {42: {"issue": 42, "issue_updated_at": "2026-09-01T00:00:00Z"}}
+    assert triage.should_skip(issue(number=42, updatedAt="2026-09-02T00:00:00Z"), prior) is False
+
+
+def test_an_unseen_issue_is_never_skipped():
+    assert triage.should_skip(issue(number=99), {}) is False
+
+
+# --- the record ---------------------------------------------------------------
+
+def test_triage_builds_a_complete_record():
+    record = triage.triage_issue(
+        issue(number=7, title="Upload fails with 503", body="Traceback in src/upload.py line 22",
+              labels=["bug"]),
+        others=[], protected=PROTECTED, available_labels=AVAILABLE)
+    assert record["issue"] == 7
+    assert record["kind"] == "bug"
+    assert record["size"] in {"small", "medium", "large"}
+    assert record["risk"] in {"low", "medium", "high"}
+    assert record["verdict"] in {"actionable", "needs-info", "needs-repro", "duplicate"}
+    assert record["labels"] and set(record["labels"]) <= set(AVAILABLE)
+    assert record["issue_updated_at"]
+
+
+def test_a_duplicate_is_recorded_as_such_and_not_queued():
+    record = triage.triage_issue(
+        issue(number=10, title="Upload fails with 503 on large files", labels=["bug"]),
+        others=[issue(number=3, title="Upload fails with 503 for large files")],
+        protected=PROTECTED, available_labels=AVAILABLE)
+    assert record["verdict"] == "duplicate"
+    assert record["duplicate_of"] == 3
+    assert "duplicate" in record["labels"]
+
+
+def test_only_actionable_issues_reach_the_work_queue():
+    records = [
+        {"issue": 1, "verdict": "actionable"},
+        {"issue": 2, "verdict": "needs-repro"},
+        {"issue": 3, "verdict": "duplicate"},
+        {"issue": 4, "verdict": "actionable"},
+    ]
+    assert [r["issue"] for r in triage.queueable(records)] == [1, 4]
+
+
+def test_only_the_newer_issue_of_a_pair_is_the_duplicate():
+    """Both sides matching would mark the original a duplicate of its own copy."""
+    original = issue(number=3, title="Upload fails with 503 on large files")
+    copy = issue(number=10, title="Upload fails with 503 for large files")
+    assert triage.dedupe(original, [original, copy]) == []
+    assert triage.dedupe(copy, [original, copy])[0]["number"] == 3
+
+
+def test_the_original_of_a_duplicate_pair_stays_queueable():
+    pair = [issue(number=3, title="Upload fails with 503 on large files", labels=["bug"],
+                  body="Traceback in src/upload.py line 5"),
+            issue(number=10, title="Upload fails with 503 for large files", labels=["bug"],
+                  body="Traceback in src/upload.py line 5")]
+    records = [triage.triage_issue(i, pair, [], AVAILABLE) for i in pair]
+    assert [r["verdict"] for r in records] == ["actionable", "duplicate"]

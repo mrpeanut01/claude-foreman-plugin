@@ -1,0 +1,65 @@
+---
+name: work-batching
+description: Group triaged issues into batches sized by what CI actually costs, so one slow suite run covers several fixes. Use when planning which issues share a PR, deciding a batch is too large, or splitting a batch after a failure.
+---
+
+# Work Batching
+
+On a repo with a 40-minute suite, the suite is the unit of cost. It costs the
+same whether the PR fixes one issue or five, so grouping compatible issues is the
+largest saving available.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" plan --triage /tmp/foreman-triage.json
+```
+
+## The arithmetic
+
+```
+separate PRs:  k × T
+one batch:     T           saves (k−1) × T
+on failure:    T + T       split, then two runs
+```
+
+Break-even sits near `p_fail < (k−1)/k`. At k=3 a batch pays unless more than two
+thirds of batches fail. That holds only because splitting is cheap, and splitting
+is cheap only because **every issue is its own commit**. Lose that and the whole
+case collapses.
+
+## Grouping rules
+
+| Rule | Why |
+|------|-----|
+| No shared file between two issues | A conflict inside a batch is self-inflicted |
+| Both `low` or `medium` risk | One high-risk issue contaminates the batch's blast radius |
+| Path information known for both | Absence of evidence is not evidence of independence |
+| Combined weight ≤ `max_batch_weight` | Bisecting gets worse faster than savings grow |
+| Count ≤ `max_batch_issues` | Same |
+
+A high-risk issue is never dropped — it gets a batch of its own. Solo is not
+exclusion.
+
+## The honest downside
+
+A batch is harder to attribute on failure and has a wider blast radius on merge.
+Three mitigations, and you need all three:
+
+1. **One commit per issue**, message naming the issue.
+2. **`batch.split()` on failure** — peel the failing commit into `b-001a`, let
+   `b-001b` carry on. One extra suite run, not a redo.
+3. **Risk ceiling**, so a batch is never more dangerous than its safest member
+   would suggest.
+
+## When batches come out small
+
+Usually `unknown paths: independence cannot be established` — the issues name no
+files. That is the grouper refusing to batch on a guess, which is correct. The
+fix is upstream: issue templates that ask where the problem is. Until then,
+expect mostly solo batches and a smaller saving.
+
+## Exit criteria
+
+Every actionable issue is in exactly one batch. No batch mixes a high-risk issue
+with anything. The savings block was reported, including `seconds_saved: null`
+when the repo has no CI profile — an unquantified saving is stated as such rather
+than guessed.

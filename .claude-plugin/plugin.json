@@ -1,17 +1,26 @@
 {
   "name": "foreman",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Runs the dev loop end to end: triage issues, batch them by CI cost, build, review independently, and auto-merge on green",
   "commands": [
+    "./commands/run.md",
+    "./commands/triage.md",
+    "./commands/batch.md",
+    "./commands/build.md",
+    "./commands/land.md",
     "./commands/status.md",
     "./commands/ci-profile.md"
   ],
   "skills": [
     "./skills/orchestration",
+    "./skills/issue-triage",
+    "./skills/work-batching",
+    "./skills/issue-implementation",
+    "./skills/pr-landing",
     "./skills/ci-economics"
   ],
-  "agents": [],
+  "agents": ["./agents/reviewer.md"],
   "hooks": [],
-  "keywords": ["github", "issues", "ci", "automation", "triage", "pull-requests", "merge"],
+  "keywords": ["github", "issues", "ci", "automation", "triage", "pull-requests", "merge", "unattended"],
   "license": "MIT"
 }

@@ -195,3 +195,19 @@ def test_counters_track_pushes_reviews_and_reruns(root):
 )
 def test_cap_breach_names_the_counter_that_broke(counters, caps, expected):
     assert ledger.cap_breached({"attempts": counters}, caps) == expected
+
+
+def test_ci_spend_is_recorded_for_the_budget(root):
+    ledger.append(root, "ci.launched", batch="b-001", tier="cheap", seconds=120)
+    ledger.append(root, "ci.launched", batch="b-001", tier="expensive", seconds=2280)
+    state = ledger.fold(ledger.read_events(root))
+    assert [e["seconds"] for e in state.ci_spend] == [120, 2280]
+
+
+def test_a_batch_keeps_the_paths_and_risk_it_was_created_with(root):
+    """merge_blockers reads batch['paths'] to enforce protected paths."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[3],
+                  paths=["src/auth/session.py"], risk="high")
+    batch = ledger.fold(ledger.read_events(root)).batches["b-001"]
+    assert batch["paths"] == ["src/auth/session.py"]
+    assert batch["risk"] == "high"

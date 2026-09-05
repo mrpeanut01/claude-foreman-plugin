@@ -79,6 +79,7 @@ class State:
     flakes: dict[str, int] = field(default_factory=dict)
     reviews: list[dict] = field(default_factory=list)
     reverts: list[dict] = field(default_factory=list)
+    ci_spend: list[dict] = field(default_factory=list)
     skipped_lines: int = 0
 
 
@@ -127,6 +128,10 @@ def _new_batch(event: dict) -> dict:
         "issues": event.get("issues", []),
         "branch": event.get("branch"),
         "pr": event.get("pr"),
+        # merge_blockers reads these; dropping them here would silently
+        # disable the protected-path check.
+        "paths": event.get("paths", []),
+        "risk": event.get("risk"),
         "state": "planned",
         "ci_gate": "pending",
         "review_gate": "pending",
@@ -187,6 +192,9 @@ def fold(events: list[dict]) -> State:
 
         elif kind == "merge.reverted":
             state.reverts.append(event)
+
+        elif kind == "ci.launched":
+            state.ci_spend.append(event)
 
         if batch is not None:
             batch["updated"] = event.get("ts", batch.get("updated"))
