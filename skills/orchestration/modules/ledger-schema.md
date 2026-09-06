@@ -35,6 +35,8 @@ its `--root` belongs to, since from a build worktree that is the main checkout.
 | `flake.observed` | `job`, `test` | Increments the `job::test` counter. |
 | `escalation` | `batch`, `reason` | Adds to NEEDS YOU. `reason` is read by a human — write a sentence, not a code. An escalation about an **issue** rather than a batch carries `issues` (plus `merged_batch` for context) *instead of* `batch` — see below. |
 | `batch.meta` | `batch`, plus fields | Merges arbitrary fields (e.g. `pr`, `branch`) onto the batch. `batch.py paths --apply` writes `paths` (the branch's real diff) and `paths_head` (the commit it was of); `land.merge_blockers` refuses a batch without the second, or whose `paths_head` is not the commit being merged. |
+| `ci.launched` | `batch`, `tier`, `seconds` | Appends to `ci_spend`. `loop.budget_remaining` sums today's `seconds` against `limits.max_ci_minutes_per_day`, so a run never recorded here is CI the loop believes was free. Written whenever a run is started or rerun — see `ci-watch.md` in `pr-landing`. |
+| `finding.filed` | `batch`, `url`, `severity`, `title` | Not folded. The record that `findings.py file` turned a review finding into an issue, so the trail from review to tracker survives the verdict file. |
 
 `ts` and `type` are added by `ledger.append`. Every event carrying `batch` also
 refreshes that batch's `updated`.
