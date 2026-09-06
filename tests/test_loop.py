@@ -126,6 +126,41 @@ def test_a_batch_at_its_cap_is_not_retried():
     assert action["do"] == "escalate" and "pushes" in action["reason"]
 
 
+def test_a_ready_batch_whose_paths_are_unconfirmed_is_merged_via_the_recipe_not_escalated():
+    """Issue #76. `merge_blockers` refuses a list nobody checked against the
+    diff — but the recipe `merge` dispatches is what checks it, so for the loop
+    an unconfirmed list is the next step, not a person's problem."""
+    st = state_with(
+        {"id": "b-002", "state": "ready", "ci_gate": "full_green", "review_gate": "clean"}
+    )
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "merge"
+    assert "confirm" in action["reason"]
+
+
+def test_a_ready_batch_whose_paths_are_confirmed_merges_with_nothing_to_add():
+    st = state_with(
+        {"id": "b-002", "state": "ready", "ci_gate": "full_green", "review_gate": "clean"}
+    )
+    st.batches["b-002"]["paths_head"] = "c" * 40
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "merge"
+    assert "nothing blocks" in action["reason"]
+
+
+def test_a_ready_batch_that_never_gets_merged_escalates_on_the_staleness_window():
+    """`ready` is a wait on the recipe requesting the merge. One it keeps failing
+    to request — `blockers` refusing it at step 5 every time — drew `merge` on
+    every tick with nothing counting, the shape #77 closed for `merging`."""
+    st = state_with(
+        {"id": "b-002", "state": "ready", "ci_gate": "full_green", "review_gate": "clean"}
+    )
+    st.batches["b-002"]["updated"] = _aged(5)
+    cfg = {**CONFIG, "limits": {**CONFIG["limits"], "stale_after_s": 3600}}
+    action = loop.next_action(st, cfg)
+    assert action["do"] == "escalate" and "stale" in action["reason"]
+
+
 def test_a_ready_batch_with_a_blocker_escalates_rather_than_merging():
     st = state_with(
         {

@@ -292,15 +292,25 @@ def next_action(state: ledger.State, config: dict) -> dict:
     for batch in live:
         if batch["state"] != "ready":
             continue
-        blockers = land.merge_blockers(batch, {"labels": []}, config)
+        # The paths are confirmed against the diff by the merge recipe itself
+        # (`commands/land.md` step 5 runs `batch.py paths --apply` before it asks
+        # `blockers`), so a list not yet confirmed is work the `merge` action
+        # does, not a reason to hand the batch to a person.
+        blockers = land.merge_blockers(batch, {"labels": []}, config, observed_paths_required=False)
         if blockers:
             return {"do": "escalate", "batch": batch["id"], "reason": "; ".join(blockers)}
+        # `ready` is a wait too, on the recipe getting the merge requested. A
+        # batch the recipe keeps failing to move — `blockers` refusing it at
+        # step 5 every time, say — would otherwise draw `merge` on every tick
+        # with nothing counting.
+        stale = _stale_reason(batch, limits, "the merge being requested")
+        if stale:
+            return {"do": "escalate", "batch": batch["id"], "reason": stale}
         if can_spend:
-            return {
-                "do": "merge",
-                "batch": batch["id"],
-                "reason": "both gates clear and nothing blocks the merge",
-            }
+            reason = "both gates clear and nothing blocks the merge"
+            if land.paths_unconfirmed(batch):
+                reason = "both gates clear; confirm the batch's paths against its diff, then merge"
+            return {"do": "merge", "batch": batch["id"], "reason": reason}
         budget_blocked = True
 
     for batch in live:

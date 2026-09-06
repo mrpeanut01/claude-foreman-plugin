@@ -213,6 +213,28 @@ def diff_paths(base: str, head: str = "HEAD", repo: Path | str | None = None) ->
     return sorted({line.strip() for line in done.stdout.splitlines() if line.strip()})
 
 
+def head_commit(head: str = "HEAD", repo: Path | str | None = None) -> str:
+    """The full SHA `head` names, so an observation can say which commit it is of.
+
+    A path list is a statement about one commit, exactly as a gate verdict is.
+    `land.merge_blockers` compares this against the commit actually being
+    merged, so a list confirmed before a later push cannot clear the gate for
+    code it never saw (issue #76).
+    """
+    try:
+        done = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{head}^{{commit}}"],
+            cwd=str(repo) if repo else None,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise PathsUnavailable(f"git rev-parse {head} could not be run: {exc}") from exc
+    if done.returncode != 0 or not done.stdout.strip():
+        raise PathsUnavailable(f"git rev-parse {head} failed: {done.stderr.strip() or 'no output'}")
+    return done.stdout.strip()
+
+
 def observed_paths(
     batch: dict, base: str, head: str = "HEAD", repo: Path | str | None = None
 ) -> dict:
@@ -221,6 +243,7 @@ def observed_paths(
     `paths` is the answer — the value that should replace the declared list. The
     other two keys are the drift, and both are worth seeing: `undeclared` is the
     protected file no issue mentioned, `untouched` is the file the prose invented.
+    `head_sha` is the commit the answer is about.
 
     An empty diff is not an answer, so it raises rather than returning one. git
     exiting 0 with no output means "this branch changes nothing", and a batch
@@ -245,6 +268,7 @@ def observed_paths(
         "batch": batch.get("id"),
         "declared": declared,
         "paths": observed,
+        "head_sha": head_commit(head, repo),
         "undeclared": [p for p in observed if p not in set(declared)],
         "untouched": [p for p in declared if p not in set(observed)],
     }
@@ -330,8 +354,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if args.apply:
             # batch.meta is the fold's channel for correcting a batch record, so
-            # the recomputed paths become what land.merge_blockers reads.
-            ledger_mod.append(root, "batch.meta", batch=args.batch, paths=seen["paths"])
+            # the recomputed paths become what land.merge_blockers reads — and
+            # `paths_head` is how it knows they are about the commit it is
+            # merging rather than an earlier one.
+            ledger_mod.append(
+                root,
+                "batch.meta",
+                batch=args.batch,
+                paths=seen["paths"],
+                paths_head=seen["head_sha"],
+            )
         print(json.dumps(seen, indent=2))
         return 0
 

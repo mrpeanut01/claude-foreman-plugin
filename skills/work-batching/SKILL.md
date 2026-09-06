@@ -77,8 +77,13 @@ the path list rather than adding to it, so recording `[]` would clear the list
 the protected-path merge gate reads. The declared paths stay put instead. Point
 `--repo-dir` at the worktree holding the branch and run it again.
 
-**Nothing calls this for you.** Run it after the branch is pushed and before
-asking whether the batch may merge, or the merge gate is still judging prose.
+`/foreman:land` step 5 runs it, immediately before asking `blockers`, and
+`land.merge_blockers` **refuses** a batch whose paths were never confirmed this
+way — or were confirmed against a commit other than the one being merged, which
+is what `paths_head` in the `batch.meta` event is for. So the merge gate never
+judges prose: an unconfirmed list blocks rather than clears, which is the
+difference between "no protected file was mentioned" and "no protected file
+was touched".
 
 ## The honest downside
 

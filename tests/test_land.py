@@ -191,6 +191,9 @@ def test_a_classification_with_no_confidence_is_treated_as_real():
 # --- the merge decision -------------------------------------------------------
 
 
+CONFIRMED = "c" * 40
+
+
 def ready_batch(**kw):
     base = {
         "id": "b-001",
@@ -199,6 +202,8 @@ def ready_batch(**kw):
         "review_gate": "clean",
         "attempts": {"pushes": 1, "review_rounds": 0, "reruns": 0},
         "paths": ["src/upload.py"],
+        # The paths were checked against the branch's diff, at this commit.
+        "paths_head": CONFIRMED,
     }
     return {**base, **kw}
 
@@ -892,7 +897,7 @@ def test_land_says_so_when_it_is_judging_a_merge_with_no_config(worktree, monkey
 
     assert land.main(["blockers", "--batch", "b-001"]) == 2
     captured = capsys.readouterr()
-    assert json.loads(captured.out)["blockers"] == ["auto_merge is disabled in config"]
+    assert "auto_merge is disabled in config" in json.loads(captured.out)["blockers"]
     assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in captured.err
 
 
@@ -1197,3 +1202,58 @@ def test_words_that_merely_end_in_s_are_not_mangled_into_something_else(word):
     """Stemming `status` to `statu` is harmless only because both sides get the
     same treatment; the rule must not turn a word into a different real word."""
     assert land._stem(word) in {word, word[:-1]}
+
+
+# --- issue #76: a path list nobody checked against the diff blocks, not clears --
+
+
+def test_paths_never_confirmed_against_the_diff_block_the_merge():
+    """The reported hole: an issue whose prose named no file yields `paths: []`,
+    the protected-path loop finds nothing in `[]`, and a fix that edits a
+    protected workflow file merges itself. Absence of evidence is not safety."""
+    blockers = land.merge_blockers(ready_batch(paths=[], paths_head=None), {"labels": []}, CFG)
+    assert len(blockers) == 1
+    assert "never confirmed" in blockers[0] and "batch.py paths" in blockers[0]
+
+
+def test_paths_confirmed_against_the_commit_being_merged_do_not_block():
+    pr = {"labels": [], "headRefOid": CONFIRMED}
+    assert land.merge_blockers(ready_batch(), pr, CFG) == []
+
+
+def test_paths_confirmed_against_an_earlier_commit_block_the_merge():
+    """A path list is a statement about one commit, like a gate verdict. One
+    confirmed before a later push describes code that no longer exists."""
+    pr = {"labels": [], "headRefOid": "d" * 40}
+    blockers = land.merge_blockers(ready_batch(), pr, CFG)
+    assert len(blockers) == 1
+    assert "ccccccc" in blockers[0] and "ddddddd" in blockers[0]
+
+
+def test_the_ledger_head_is_the_fallback_when_the_pr_head_is_unknown():
+    """`loop.next_action` and a `blockers` call without --pr have no PR read to
+    hand; the last `batch.pushed` the ledger recorded is what is left."""
+    batch = ready_batch(head_sha="d" * 40)
+    assert land.merge_blockers(batch, {"labels": []}, CFG) != []
+    assert land.merge_blockers(ready_batch(head_sha=CONFIRMED), {"labels": []}, CFG) == []
+
+
+def test_an_abbreviated_head_still_names_the_same_commit():
+    pr = {"labels": [], "headRefOid": CONFIRMED[:7]}
+    assert land.merge_blockers(ready_batch(), pr, CFG) == []
+
+
+def test_a_confirmed_protected_path_still_blocks():
+    """Confirmation says the list is real; it does not say the list is safe."""
+    batch = ready_batch(paths=["src/auth/session.py"])
+    blockers = land.merge_blockers(batch, {"labels": [], "headRefOid": CONFIRMED}, CFG)
+    assert blockers == ["src/auth/session.py is protected by **/auth/**; never auto-merged"]
+
+
+def test_the_loop_may_treat_confirming_the_paths_as_part_of_merging():
+    """The recipe the loop dispatches on `merge` confirms the paths before it
+    asks `blockers`, so for that caller an unconfirmed list is work, not a
+    blocker. The CLI never passes this."""
+    batch = ready_batch(paths_head=None)
+    assert land.merge_blockers(batch, {"labels": []}, CFG) != []
+    assert land.merge_blockers(batch, {"labels": []}, CFG, observed_paths_required=False) == []

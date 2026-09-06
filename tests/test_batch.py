@@ -219,6 +219,20 @@ def repo(tmp_path):
     return root
 
 
+def _head(repo):
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_the_observation_names_the_commit_it_describes(repo):
+    """Issue #76. A path list is a statement about one commit, and `land.py`
+    refuses one confirmed against a commit other than the one being merged."""
+    seen = batch.observed_paths({"id": "b-001", "paths": []}, "main", repo=repo)
+    assert seen["head_sha"] == _head(repo)
+    assert len(seen["head_sha"]) == 40
+
+
 def test_the_paths_of_a_branch_are_read_from_the_diff(repo):
     assert batch.diff_paths("main", repo=repo) == ["src/auth.py", "src/upload.py"]
 
@@ -339,7 +353,9 @@ def test_recomputed_paths_replace_the_prose_ones_in_the_ledger(repo, tmp_path):
         ]
     )
     assert rc == 0
-    assert ledger.load(root).batches["b-001"]["paths"] == ["src/auth.py", "src/upload.py"]
+    recorded = ledger.load(root).batches["b-001"]
+    assert recorded["paths"] == ["src/auth.py", "src/upload.py"]
+    assert recorded["paths_head"] == _head(repo), "the merge gate needs to know which commit"
 
 
 def test_without_apply_the_ledger_is_left_alone(repo, tmp_path, capsys):

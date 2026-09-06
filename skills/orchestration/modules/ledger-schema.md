@@ -34,7 +34,7 @@ its `--root` belongs to, since from a build worktree that is the main checkout.
 | `merge.reverted` | `batch` | The rubber-stamp signal. Pairs against clean verdicts in `/foreman:status`. |
 | `flake.observed` | `job`, `test` | Increments the `job::test` counter. |
 | `escalation` | `batch`, `reason` | Adds to NEEDS YOU. `reason` is read by a human — write a sentence, not a code. An escalation about an **issue** rather than a batch carries `issues` (plus `merged_batch` for context) *instead of* `batch` — see below. |
-| `batch.meta` | `batch`, plus fields | Merges arbitrary fields (e.g. `pr`, `branch`) onto the batch. |
+| `batch.meta` | `batch`, plus fields | Merges arbitrary fields (e.g. `pr`, `branch`) onto the batch. `batch.py paths --apply` writes `paths` (the branch's real diff) and `paths_head` (the commit it was of); `land.merge_blockers` refuses a batch without the second, or whose `paths_head` is not the commit being merged. |
 
 `ts` and `type` are added by `ledger.append`. Every event carrying `batch` also
 refreshes that batch's `updated`.

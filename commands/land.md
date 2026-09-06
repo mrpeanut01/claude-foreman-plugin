@@ -20,14 +20,22 @@ Review and cheap CI start together. The expensive tier waits for both, because a
 
 ## Steps
 
-**1. Open the PR** and record it.
+**1. Push, open the PR, and record both.**
 
 ```bash
+git -C ../foreman-<id> push -u origin foreman/<id>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" append --type batch.pushed \
+  --json '{"batch":"<id>","sha":"<full sha of the pushed head>"}'
 "${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr create --title "..." --body "..."
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" append --type batch.meta \
   --json '{"batch":"<id>","pr":<n>}'
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> open
 ```
+
+`batch.pushed` goes in on **every** push, this one included. It is what resets
+both gates, counts the push, and records the head the merge gate will later
+check the batch's paths against. A push the ledger never heard about leaves a
+stale green in place.
 
 **2. Start the review** — dispatch the `reviewer` agent with the diff, the issue
 text, and repo conventions. Nothing else. See `modules/review-gate.md`.
@@ -89,13 +97,25 @@ current commit; these two rules read the findings across rounds instead:
 A verdict that fails validation is **not** a clean review. Send it back to the
 reviewer with the errors; do not record it and do not argue with the validator.
 
-**5. Merge.**
+**5. Confirm what the batch touches, then merge.**
 
 ```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" paths --batch <id> --base <trunk> \
+  --repo-dir ../foreman-<id> --apply
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> --repo OWNER/NAME
 "${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --squash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> merging
 ```
+
+The first line replaces the batch's `paths` — until now the file names its
+issues' prose happened to mention — with what the branch really changes, and
+records the commit that diff was of. `blockers` **refuses** a batch whose paths
+were never confirmed this way, or were confirmed against a commit other than
+the PR's current head: an issue that names no file yields `paths: []`, and an
+empty list used to clear the protected-path gate for exactly the batch nobody
+had looked at. Point `--repo-dir` at the worktree holding the branch; from a
+checkout without it the diff is empty, the command exits 1, and the declared
+paths are left alone.
 
 `blockers` exits non-zero with a list when anything stands in the way. Fix or
 escalate; never merge past it.
@@ -137,6 +157,8 @@ tracker. Closing it here is the cheap version.
 
 CI failed → classify flake vs bug (`modules/ci-watch.md`), then rerun, fix, or
 escalate as `flake_decision` says. Review requested changes → address the
-findings and push; the gates reset and both run again. Rounds continue while the
+findings, push, and record the push (`batch.pushed`, as in step 1); the gates
+reset and both run again, and step 5 will confirm the paths afresh for the new
+head. Rounds continue while the
 reviewer keeps finding *different* things; the batch escalates when a finding
 survives a round, or at the runaway ceiling of 5.

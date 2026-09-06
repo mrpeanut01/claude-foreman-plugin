@@ -13,7 +13,7 @@ from one that stalls on its first surprise.
 | `stalled_build` returns a reason | Three resumes and the batch still has not reached `built`. Nothing else can see this one — see below. |
 | `merged_leaving_open` returns a batch | A merged batch's issue is still on the tracker, and the ledger cannot say why — see below. |
 | Same test fails identically twice | A second identical failure is evidence, not noise. |
-| Diff touches `protected_paths` | Auth, migrations, payments, and CI config are never auto-merged, however green. |
+| Diff touches `protected_paths` | Auth, migrations, payments, and CI config are never auto-merged, however green. Judged on the branch's **real** diff: `merge_blockers` refuses a batch whose paths were never confirmed against it (`batch.py paths --apply`), so an issue that named no file cannot clear the gate by naming none. |
 | The same finding survives a review round | Builder and reviewer are trading one objection. Rounds elapsed is not the test — see `review-gate.md`. |
 | Issue is ambiguous after triage | Guessing intent produces a plausible PR solving the wrong problem — the most expensive failure mode here. |
 | A merge conflict needs judgment | Mechanical rebase is fine; semantic conflicts are not. |

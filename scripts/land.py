@@ -667,8 +667,62 @@ def flake_decision(classification: dict, batch: dict, config: dict) -> str:
 # --- the merge decision -------------------------------------------------------
 
 
-def merge_blockers(batch: dict, pr: dict, config: dict) -> list[str]:
-    """Everything standing between this batch and a merge, reported at once."""
+def _same_commit(a: str | None, b: str | None) -> bool:
+    """Two SHAs, either possibly abbreviated, naming one commit."""
+    a, b = str(a or ""), str(b or "")
+    if len(a) < MIN_SHA_PREFIX or len(b) < MIN_SHA_PREFIX:
+        return False
+    return a.startswith(b) or b.startswith(a)
+
+
+def paths_unconfirmed(batch: dict, pr: dict | None = None) -> str | None:
+    """Why the batch's path list cannot be trusted at the merge, or None when it can.
+
+    A batch's `paths` start as whatever file names its issues' prose happened
+    to mention. Prose invents files and stays silent about the ones the fix
+    had to touch, and an issue that names no file at all yields `[]` — which
+    `merge_blockers` used to iterate and find nothing protected in. Absence of
+    evidence read as evidence of safety, and a fix that edited
+    `.github/workflows/ci.yml` under a protected glob merged itself (issue #76).
+
+    `batch.py paths --apply` replaces the list with the branch's real diff and
+    records `paths_head`, the commit that diff was of. Without that marker the
+    list is intent, not observation, and the merge waits. With it, the commit
+    still has to be the one being merged: a list confirmed before a later push
+    describes code that no longer exists, the same way a gate verdict does. The
+    PR's own head is the authority when the caller has it; the ledger's last
+    recorded push is the fallback.
+    """
+    observed = batch.get("paths_head")
+    if not observed:
+        declared = ", ".join(batch.get("paths") or []) or "none"
+        return (
+            f"paths never confirmed against the branch's diff: the declared list "
+            f"({declared}) comes from issue prose, which invents files and omits the "
+            f"ones the fix had to touch. Run batch.py paths --batch {batch.get('id')} "
+            "--base <trunk> --repo-dir <worktree> --apply, then ask again"
+        )
+    expected = (pr or {}).get("headRefOid") or batch.get("head_sha")
+    if expected and not _same_commit(observed, expected):
+        return (
+            f"paths were confirmed against {str(observed)[:MIN_SHA_PREFIX]} but the commit "
+            f"being merged is {str(expected)[:MIN_SHA_PREFIX]}; re-run batch.py paths "
+            f"--batch {batch.get('id')} --apply for it"
+        )
+    return None
+
+
+def merge_blockers(
+    batch: dict, pr: dict, config: dict, *, observed_paths_required: bool = True
+) -> list[str]:
+    """Everything standing between this batch and a merge, reported at once.
+
+    `observed_paths_required=False` is for a caller whose next step is the
+    recipe that confirms the paths — `loop.next_action` answering `merge` —
+    so that an unconfirmed list is work to do rather than a reason to escalate.
+    The CLI never passes it: `land.py blockers` is the question asked *after*
+    that step, and there an unconfirmed list blocks.
+    """
     blockers: list[str] = []
 
     if not config.get("auto_merge"):
@@ -687,6 +741,13 @@ def merge_blockers(batch: dict, pr: dict, config: dict) -> list[str]:
         pattern = matches_any(path, config.get("protected_paths"))
         if pattern:
             blockers.append(f"{path} is protected by {pattern}; never auto-merged")
+    # An empty list, or a list nobody checked against the diff, must block rather
+    # than clear: the loop above finds nothing protected in `[]`, and `[]` is
+    # exactly what an issue naming no file produces.
+    if observed_paths_required:
+        unconfirmed = paths_unconfirmed(batch, pr)
+        if unconfirmed:
+            blockers.append(unconfirmed)
 
     caps = config.get("caps") or {}
     attempts = batch.get("attempts") or {}
