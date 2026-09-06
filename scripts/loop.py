@@ -116,6 +116,13 @@ def next_action(state: ledger.State, config: dict) -> dict:
                 "the loop will not retry",
             }
 
+    # Push deadlock is about a failure that keeps coming back, not pushes
+    # elapsed. The caps above are runaway ceilings; this reads progress.
+    for batch in live:
+        stuck = ledger.futile_push_run(batch, caps)
+        if stuck:
+            return {"do": "escalate", "batch": batch["id"], "reason": stuck}
+
     # Review deadlock is about repeating findings, not rounds elapsed.
     for batch in live:
         if batch.get("review_gate") != "changes_requested":

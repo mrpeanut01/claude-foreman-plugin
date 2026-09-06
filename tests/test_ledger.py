@@ -186,7 +186,12 @@ def test_counters_track_pushes_reviews_and_reruns(root):
     ledger.gate(root, "b-001", "review", "changes_requested")
     ledger.append(root, "ci.rerun", batch="b-001", job="integration")
     batch = ledger.fold(ledger.read_events(root)).batches["b-001"]
-    assert batch["attempts"] == {"pushes": 2, "review_rounds": 1, "reruns": 1}
+    assert batch["attempts"] == {
+        "pushes": 2,
+        "review_rounds": 1,
+        "reruns": 1,
+        "futile_pushes": 0,
+    }
 
 
 @pytest.mark.parametrize(
@@ -256,3 +261,59 @@ def test_recreating_an_existing_batch_id_does_not_erase_it():
     )
     assert state.batches["b-001"]["state"] == "merged"
     assert state.batches["b-001"]["issues"] == [1, 2]
+
+
+# --- issue #17: the push cap must measure diagnosis, not volume ---------------
+
+
+def test_a_push_that_leaves_ci_failing_the_same_way_is_counted_as_futile(root):
+    _open_batch(root)
+    ledger.gate(root, "b-001", "ci", "failed")
+    ledger.append(root, "batch.pushed", batch="b-001", sha="a")
+    ledger.gate(root, "b-001", "ci", "failed")
+    attempts = ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]
+    assert attempts["futile_pushes"] == 1
+    assert attempts["pushes"] == 1, "the raw count is still the runaway ceiling"
+
+
+def test_futile_pushes_accumulate_while_ci_keeps_coming_back_red(root):
+    _open_batch(root)
+    for _ in range(3):
+        ledger.gate(root, "b-001", "ci", "failed")
+        ledger.append(root, "batch.pushed", batch="b-001", sha="a")
+    ledger.gate(root, "b-001", "ci", "failed")
+    assert ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]["futile_pushes"] == 3
+
+
+def test_a_push_that_turns_ci_green_ends_the_futile_run(root):
+    _open_batch(root)
+    ledger.gate(root, "b-001", "ci", "failed")
+    ledger.append(root, "batch.pushed", batch="b-001", sha="a")
+    ledger.gate(root, "b-001", "ci", "failed")
+    ledger.append(root, "batch.pushed", batch="b-001", sha="b")
+    ledger.gate(root, "b-001", "ci", "cheap_green")
+    assert ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]["futile_pushes"] == 0
+
+
+def test_pushes_that_answer_review_findings_are_not_futile(root):
+    """PR #7: three pushes, each clearing the previous round's findings.
+
+    CI was green throughout; only the reviewer kept finding new things. That is
+    a PR being reviewed properly, and the push cap must not punish it.
+    """
+    _open_batch(root)
+    for _ in range(3):
+        ledger.gate(root, "b-001", "review", "changes_requested")
+        ledger.append(root, "batch.pushed", batch="b-001", sha="a")
+        ledger.gate(root, "b-001", "ci", "full_green")
+    attempts = ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]
+    assert attempts["pushes"] == 3
+    assert attempts["futile_pushes"] == 0
+
+
+def test_ci_failing_twice_without_a_push_between_is_not_a_futile_push(root):
+    """Nothing was attempted, so nothing failed to fix it."""
+    _open_batch(root)
+    ledger.gate(root, "b-001", "ci", "failed")
+    ledger.gate(root, "b-001", "ci", "failed")
+    assert ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]["futile_pushes"] == 0

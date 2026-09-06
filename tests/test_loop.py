@@ -358,3 +358,66 @@ def test_triage_is_switched_off_on_an_empty_ledger_too():
 def test_an_empty_ledger_still_says_so():
     st = state_with(last_triage_at=None)
     assert loop.next_action(st, CONFIG)["reason"] == "nothing in the ledger yet"
+
+
+# --- issue #17: the push cap counts volume; convergence is what matters -------
+
+# What config.example.json ships: a loose runaway ceiling on raw pushes, with
+# the real judgement made by the convergence check below.
+LOOSE_CAPS = {**CONFIG, "caps": {"pushes": 8, "review_rounds": 5, "reruns": 2}}
+
+
+def _attempts(**counts):
+    return {"pushes": 0, "review_rounds": 0, "reruns": 0, "futile_pushes": 0, **counts}
+
+
+def test_pushes_that_keep_leaving_ci_red_the_same_way_escalate():
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "blocked",
+            "ci_gate": "failed",
+            "attempts": _attempts(pushes=3, futile_pushes=3),
+        }
+    )
+    action = loop.next_action(st, LOOSE_CAPS)
+    assert action["do"] == "escalate" and "diagnosis" in action["reason"]
+
+
+def test_three_pushes_that_each_resolved_review_findings_do_not_escalate():
+    """PR #7: three pushes, three rounds of findings, each one cleared.
+
+    A PR that survives three genuine review rounds is a good PR; counting the
+    pushes it took punishes it for being reviewed properly.
+    """
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "blocked",
+            "ci_gate": "failed",
+            "attempts": _attempts(pushes=3, review_rounds=3),
+        }
+    )
+    assert loop.next_action(st, LOOSE_CAPS)["do"] == "unblock"
+
+
+def test_the_raw_push_count_is_still_a_hard_runaway_ceiling():
+    st = state_with(
+        {"id": "b-001", "state": "blocked", "attempts": _attempts(pushes=8, futile_pushes=0)}
+    )
+    action = loop.next_action(st, LOOSE_CAPS)
+    assert action["do"] == "escalate" and "pushes at cap" in action["reason"]
+
+
+def test_the_futile_push_ceiling_can_be_configured():
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "blocked",
+            "ci_gate": "failed",
+            "attempts": _attempts(pushes=2, futile_pushes=2),
+        }
+    )
+    assert loop.next_action(st, LOOSE_CAPS)["do"] == "unblock"
+    tight = {**LOOSE_CAPS, "caps": {**LOOSE_CAPS["caps"], "futile_pushes": 2}}
+    assert loop.next_action(st, tight)["do"] == "escalate"

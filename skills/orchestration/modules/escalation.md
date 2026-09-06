@@ -8,13 +8,26 @@ from one that stalls on its first surprise.
 
 | Trigger | Why not retry |
 |---------|---------------|
-| `cap_breached` returns a counter | A runaway ceiling was reached. These are loose (`pushes: 8`, `review_rounds: 5`) because they count events elapsed, not progress — see issue #17. |
+| `cap_breached` returns a counter | A runaway ceiling was reached. These are loose (`pushes: 8`, `review_rounds: 5`) because they count events elapsed, not progress. |
+| `futile_push_run` returns a reason | Three pushes in a row left CI red the same way. This, not `caps.pushes`, is the push rule that reads progress — see below. |
 | Same test fails identically twice | A second identical failure is evidence, not noise. |
 | Diff touches `protected_paths` | Auth, migrations, payments, and CI config are never auto-merged, however green. |
 | The same finding survives a review round | Builder and reviewer are trading one objection. Rounds elapsed is not the test — see `review-gate.md`. |
 | Issue is ambiguous after triage | Guessing intent produces a plausible PR solving the wrong problem — the most expensive failure mode here. |
 | A merge conflict needs judgment | Mechanical rebase is fine; semantic conflicts are not. |
 | `gh` returns auth/permission errors | Infrastructure, not code. |
+
+## Pushes: volume is not the measure
+
+`attempts.pushes` counts every push, and every round of review findings needs
+one. Three pushes that each cleared a round of findings are a PR being reviewed
+properly, and escalating it punishes exactly the batch that behaved best. So the
+push rule reads `attempts.futile_pushes` instead: the fold scores each push the
+moment CI answers it, and only a push that left CI failing the way it was
+failing *before* the push counts. Any green ends the run.
+
+The review gate is not scored this way — different findings each round are
+convergence, and `review-gate.md` judges those on the findings themselves.
 
 ## Never escalate
 

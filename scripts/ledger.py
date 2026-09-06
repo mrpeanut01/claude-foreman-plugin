@@ -55,6 +55,16 @@ CLEAR = {"ci": "full_green", "review": "clean"}
 
 COUNTER_ORDER = ("pushes", "review_rounds", "reruns")
 
+# Counters that measure whether a batch is converging rather than how much has
+# happened to it. `cap_breached` deliberately ignores these: a runaway ceiling
+# and a wrong diagnosis are different verdicts read off different numbers.
+PROGRESS_COUNTERS = ("futile_pushes",)
+
+# Three pushes into the same red CI is where "the next attempt will get it"
+# stops being defensible. Loose enough that fixing one failing test and
+# uncovering a different one is not mistaken for a failed diagnosis.
+DEFAULT_FUTILE_PUSH_CEILING = 3
+
 
 class LedgerError(Exception):
     pass
@@ -139,7 +149,7 @@ def _new_batch(event: dict) -> dict:
         "state": "planned",
         "ci_gate": "pending",
         "review_gate": "pending",
-        "attempts": {k: 0 for k in COUNTER_ORDER},
+        "attempts": {k: 0 for k in COUNTER_ORDER + PROGRESS_COUNTERS},
         "created": event.get("ts"),
         "updated": event.get("ts"),
         # `updated` moves on any event; `progress_at` only when something
@@ -147,6 +157,28 @@ def _new_batch(event: dict) -> dict:
         # a stuck batch resets the very clock meant to notice it.
         "progress_at": event.get("ts"),
     }
+
+
+def _score_push(batch: dict, ci_verdict: str) -> None:
+    """Judge the last push the moment CI answers it.
+
+    The push cap exists to catch a wrong diagnosis, not a well-reviewed PR, but
+    counting every push cannot tell them apart: a batch that took three honest
+    review rounds hits the cap alongside one that has been guessing (issue #17).
+    What separates them is whether the push moved anything, and the only thing
+    the ledger can compare a push against is the verdict it was pushed into.
+    CI coming back red the same way it was red before the push means the fix
+    missed; any green means it did not.
+
+    The review gate is deliberately not scored here. Rounds of *different*
+    findings are convergence, not repetition, and `land.review_stalled` already
+    judges those on the findings themselves rather than on how many there were.
+    """
+    was = batch.pop("pushed_against_ci", None)  # each push is judged exactly once
+    if ci_verdict != "failed":
+        batch["attempts"]["futile_pushes"] = 0
+    elif was == "failed":
+        batch["attempts"]["futile_pushes"] = batch["attempts"].get("futile_pushes", 0) + 1
 
 
 def fold(events: list[dict]) -> State:
@@ -176,6 +208,9 @@ def fold(events: list[dict]) -> State:
 
         elif kind == "batch.pushed" and batch:
             # A new commit invalidates every gate verdict about the old one.
+            # Keep the CI verdict this push was answering, though: `_score_push`
+            # needs it to tell a fix that missed from one that landed.
+            batch["pushed_against_ci"] = batch.get("ci_gate")
             batch["ci_gate"] = "pending"
             batch["review_gate"] = "pending"
             batch["attempts"]["pushes"] += 1
@@ -189,6 +224,8 @@ def fold(events: list[dict]) -> State:
             batch[f"{which}_gate"] = value
             if which == "review" and value == "changes_requested":
                 batch["attempts"]["review_rounds"] += 1
+            if which == "ci" and value != "pending":
+                _score_push(batch, value)
             # A gate going red under a batch already declared ready un-declares it.
             if batch["state"] == "ready" and value != CLEAR.get(which):
                 batch["state"] = "blocked"
@@ -246,6 +283,23 @@ def cap_breached(batch: dict, caps: dict[str, int]) -> str | None:
     for name in COUNTER_ORDER:
         if name in caps and attempts.get(name, 0) >= caps[name]:
             return name
+    return None
+
+
+def futile_push_run(batch: dict, caps: dict[str, int]) -> str | None:
+    """Reason to stop pushing at this batch, or None while it is still converging.
+
+    Read this before `caps.pushes`, which is only a runaway ceiling. Pushes that
+    keep leaving CI red in the same place are evidence the diagnosis is wrong;
+    pushes that keep resolving things are just a PR being reviewed properly.
+    """
+    ceiling = caps.get("futile_pushes", DEFAULT_FUTILE_PUSH_CEILING)
+    run = (batch.get("attempts") or {}).get("futile_pushes", 0)
+    if ceiling and run >= ceiling:
+        return (
+            f"{run} consecutive pushes left CI failing the same way; "
+            "the diagnosis is wrong, and another push will not find it"
+        )
     return None
 
 
