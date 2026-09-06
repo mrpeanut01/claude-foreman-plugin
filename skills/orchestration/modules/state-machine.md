@@ -18,7 +18,7 @@ planned ─▶ building ─▶ built ─▶ open ─▶ ready ─▶ merging ─
 | `open` | PR up; CI and review running **concurrently** | A gate resolves |
 | `blocked` | A gate came back red | A new push resets the gates |
 | `ready` | Both gates clear | Merge is requested |
-| `merging` | In the merge queue | GitHub confirms |
+| `merging` | In the merge queue | GitHub confirms. The loop `watch`es it and escalates it on `stale_after_s`, because `--auto` never reports back |
 | `merged` | Terminal | — |
 | `escalated` | Set aside for a human | A human requeues or abandons it |
 | `abandoned` | Terminal | — |
@@ -30,6 +30,12 @@ worktree, a branch or a PR, so all six count against `max_open_prs` in
 `loop.in_flight_count`. `building` is easy to forget because it owns no PR yet,
 but it owns a worktree and a session, and leaving it out lets the loop start
 another batch while a build is already running.
+
+Counting a state as in flight and giving it no action in `next_action` is the
+other half of the same mistake, and `merging` had exactly that shape: it held a
+slot against `max_open_prs` and no branch ever picked it up, so a merge the
+queue refused parked the batch there for good with nothing to escalate it. Every
+state in the list above answers to some branch of `next_action`.
 
 ## Resuming an interrupted build
 

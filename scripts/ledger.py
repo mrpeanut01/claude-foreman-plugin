@@ -249,21 +249,29 @@ def append(root: Path, event_type: str, **fields) -> dict:
     return event
 
 
-def read_events(root: Path) -> list[dict]:
-    path = resolve_root(root) / EVENTS
-    if not path.exists():
-        return []
-    events = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+def _parse_events(text: str) -> tuple[list[dict], int]:
+    """The events in a log, and how many lines were not one."""
+    events, torn = [], 0
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError:
-            continue  # a torn write must not take the whole ledger down
+            torn += 1  # a torn write must not take the whole ledger down
+            continue
         if isinstance(parsed, dict):
             events.append(parsed)
-    return events
+        else:
+            torn += 1
+    return events, torn
+
+
+def read_events(root: Path) -> list[dict]:
+    path = resolve_root(root) / EVENTS
+    if not path.exists():
+        return []
+    return _parse_events(path.read_text(encoding="utf-8"))[0]
 
 
 # --- folding ------------------------------------------------------------------
@@ -314,97 +322,138 @@ def _score_push(batch: dict, ci_verdict: str) -> None:
         batch["attempts"]["futile_pushes"] = batch["attempts"].get("futile_pushes", 0) + 1
 
 
+def _apply(state: State, event: dict) -> None:
+    """Fold one event into the state. Raises on an event it cannot read."""
+    kind = event.get("type")
+    bid = event.get("batch")
+    batch = state.batches.get(bid) if bid else None
+
+    if kind == "triage.completed":
+        # Every issue the pass looked at, including the ones it skipped.
+        # `triage.fetch_issues` asks GitHub for open issues only, so this is
+        # a sighting: proof the issue was still open at this timestamp. Read
+        # in full before anything is written: a wrong-typed field raises here,
+        # and a pass that could not be recorded must not have moved the clock.
+        seen = list(event.get("open_issues") or [])
+        state.last_triage_at = event.get("ts")
+        for number in seen:
+            state.open_seen_at[number] = event.get("ts")
+
+    elif kind == "issue.triaged":
+        state.issues[event["issue"]] = {k: v for k, v in event.items() if k != "type"}
+        state.open_seen_at[event["issue"]] = event.get("ts")
+
+    elif kind == "batch.created":
+        # Ids are meant to be unique. A repeat means an upstream numbering
+        # bug, and replacing the record would silently discard whatever the
+        # first batch of that id did — including a merge. Keep the original.
+        if bid not in state.batches:
+            state.batches[bid] = _new_batch(event)
+
+    elif kind == "batch.state" and batch:
+        # The resume: `building -> building`. It is deliberately not
+        # progress, so nothing else in the fold moves for it — which is
+        # exactly why it needs counting. Without a number here a batch can
+        # be picked up forever and no rule anywhere can see it happening.
+        if batch["state"] == "building" and event["to"] == "building":
+            attempts = batch["attempts"]
+            attempts["build_resumes"] = attempts.get("build_resumes", 0) + 1
+        if batch["state"] != event["to"]:
+            batch["progress_at"] = event.get("ts")
+        batch["state"] = event["to"]
+
+    elif kind == "batch.pushed" and batch:
+        # A new commit invalidates every gate verdict about the old one.
+        # Keep the CI verdict this push was answering, though: `_score_push`
+        # needs it to tell a fix that missed from one that landed.
+        batch["pushed_against_ci"] = batch.get("ci_gate")
+        batch["ci_gate"] = "pending"
+        batch["review_gate"] = "pending"
+        batch["attempts"]["pushes"] += 1
+        batch["head_sha"] = event.get("sha")
+        batch["progress_at"] = event.get("ts")
+
+    elif kind == "gate.set" and batch:
+        which, value = event["gate"], event["value"]
+        if batch.get(f"{which}_gate") != value:
+            batch["progress_at"] = event.get("ts")
+        batch[f"{which}_gate"] = value
+        if which == "review" and value == "changes_requested":
+            batch["attempts"]["review_rounds"] += 1
+        if which == "ci" and value != "pending":
+            _score_push(batch, value)
+        # A gate going red under a batch already declared ready un-declares it.
+        if batch["state"] == "ready" and value != CLEAR.get(which):
+            batch["state"] = "blocked"
+
+    elif kind == "ci.rerun" and batch:
+        batch["attempts"]["reruns"] += 1
+
+    elif kind == "batch.meta" and batch:
+        batch.update({k: v for k, v in event.items() if k not in {"type", "ts", "batch"}})
+
+    elif kind == "escalation":
+        state.escalations.append(event)
+
+    elif kind == "flake.observed":
+        key = f"{event.get('job')}::{event.get('test')}"
+        state.flakes[key] = state.flakes.get(key, 0) + 1
+
+    elif kind == "review.verdict":
+        state.reviews.append(event)
+
+    elif kind == "merge.reverted":
+        state.reverts.append(event)
+
+    elif kind == "ci.launched":
+        state.ci_spend.append(event)
+
+    if batch is not None:
+        batch["updated"] = event.get("ts", batch.get("updated"))
+
+
 def fold(events: list[dict]) -> State:
+    """Every event, in order — minus any single one the fold cannot read.
+
+    `read_events` already survives a torn line, and the same argument applies
+    twice over here: the log is append-only, so a bad line cannot be taken back
+    out, and `fold` is the single reader every script in the pipeline goes
+    through. One `ledger.py append --type triage.completed --json
+    '{"open_issues": 5}'` — a documented CLI any agent can reach — otherwise
+    crashes `loop.py`, `status.py` and `land.py` from that line on, for good.
+
+    Hardened generally rather than field by field, because the field is not what
+    makes this survivable: `batch.state` without `to` and `gate.set` without
+    `gate` raise identically through the same CLI, and a guard per field is one
+    more crash for every field added later. `KeyError` and `TypeError` only —
+    those are what reading a missing or wrong-typed field raises, and every
+    branch reads what it needs before it writes anything, so a skipped event
+    leaves nothing half-applied. `skipped_lines` counts them: quietly dropping
+    events is how a ledger stops matching the repository without anyone noticing.
+    """
     state = State()
     for event in events:
-        kind = event.get("type")
-        bid = event.get("batch")
-        batch = state.batches.get(bid) if bid else None
-
-        if kind == "triage.completed":
-            state.last_triage_at = event.get("ts")
-            # Every issue the pass looked at, including the ones it skipped.
-            # `triage.fetch_issues` asks GitHub for open issues only, so this is
-            # a sighting: proof the issue was still open at this timestamp.
-            for number in event.get("open_issues") or []:
-                state.open_seen_at[number] = event.get("ts")
-
-        elif kind == "issue.triaged":
-            state.issues[event["issue"]] = {k: v for k, v in event.items() if k != "type"}
-            state.open_seen_at[event["issue"]] = event.get("ts")
-
-        elif kind == "batch.created":
-            # Ids are meant to be unique. A repeat means an upstream numbering
-            # bug, and replacing the record would silently discard whatever the
-            # first batch of that id did — including a merge. Keep the original.
-            if bid not in state.batches:
-                state.batches[bid] = _new_batch(event)
-
-        elif kind == "batch.state" and batch:
-            # The resume: `building -> building`. It is deliberately not
-            # progress, so nothing else in the fold moves for it — which is
-            # exactly why it needs counting. Without a number here a batch can
-            # be picked up forever and no rule anywhere can see it happening.
-            if batch["state"] == "building" and event["to"] == "building":
-                attempts = batch["attempts"]
-                attempts["build_resumes"] = attempts.get("build_resumes", 0) + 1
-            if batch["state"] != event["to"]:
-                batch["progress_at"] = event.get("ts")
-            batch["state"] = event["to"]
-
-        elif kind == "batch.pushed" and batch:
-            # A new commit invalidates every gate verdict about the old one.
-            # Keep the CI verdict this push was answering, though: `_score_push`
-            # needs it to tell a fix that missed from one that landed.
-            batch["pushed_against_ci"] = batch.get("ci_gate")
-            batch["ci_gate"] = "pending"
-            batch["review_gate"] = "pending"
-            batch["attempts"]["pushes"] += 1
-            batch["head_sha"] = event.get("sha")
-            batch["progress_at"] = event.get("ts")
-
-        elif kind == "gate.set" and batch:
-            which, value = event["gate"], event["value"]
-            if batch.get(f"{which}_gate") != value:
-                batch["progress_at"] = event.get("ts")
-            batch[f"{which}_gate"] = value
-            if which == "review" and value == "changes_requested":
-                batch["attempts"]["review_rounds"] += 1
-            if which == "ci" and value != "pending":
-                _score_push(batch, value)
-            # A gate going red under a batch already declared ready un-declares it.
-            if batch["state"] == "ready" and value != CLEAR.get(which):
-                batch["state"] = "blocked"
-
-        elif kind == "ci.rerun" and batch:
-            batch["attempts"]["reruns"] += 1
-
-        elif kind == "batch.meta" and batch:
-            batch.update({k: v for k, v in event.items() if k not in {"type", "ts", "batch"}})
-
-        elif kind == "escalation":
-            state.escalations.append(event)
-
-        elif kind == "flake.observed":
-            key = f"{event.get('job')}::{event.get('test')}"
-            state.flakes[key] = state.flakes.get(key, 0) + 1
-
-        elif kind == "review.verdict":
-            state.reviews.append(event)
-
-        elif kind == "merge.reverted":
-            state.reverts.append(event)
-
-        elif kind == "ci.launched":
-            state.ci_spend.append(event)
-
-        if batch is not None:
-            batch["updated"] = event.get("ts", batch.get("updated"))
+        try:
+            _apply(state, event)
+        except (KeyError, TypeError):
+            state.skipped_lines += 1
     return state
 
 
 def load(root: Path) -> State:
-    return fold(read_events(root))
+    """The folded ledger, with every line it could not use counted on it.
+
+    A torn line and a line the fold cannot read are the same event from the
+    outside: the log holds something, the state does not, and nobody said so.
+    `skipped_lines` is where both are said, and `/foreman:status` reads it.
+    """
+    path = resolve_root(root) / EVENTS
+    if not path.exists():
+        return State()
+    events, torn = _parse_events(path.read_text(encoding="utf-8"))
+    state = fold(events)
+    state.skipped_lines += torn
+    return state
 
 
 # --- rules --------------------------------------------------------------------
@@ -455,13 +504,20 @@ def stalled_build(batch: dict, caps: dict[str, int]) -> str | None:
     Resuming an interrupted build is the right behaviour — a worktree that
     already exists beats cutting a new one, and abandoning work in place is the
     failure the durable ledger exists to prevent. But `building` is the one live
-    state whose action does not move the batch: `next_action` answers `build`,
-    the recipe re-enters `building`, and the fold records no progress for the
-    self-loop by design. So none of the other governors can reach it — no
-    counter in `COUNTER_ORDER` moves, `futile_push_run` needs a push, and the
-    staleness window is read against `progress_at`, which stands still. The
-    resume count is the only quantity that actually grows, so it is the one
-    that has to be bounded (issue #62).
+    state whose action re-enters the state it is already in: `next_action`
+    answers `build`, the recipe re-enters `building`, and the fold records no
+    progress for the self-loop by design. So none of the counting governors can
+    reach it — no counter in `COUNTER_ORDER` moves, and `futile_push_run` needs
+    a push. The resume count is the only quantity that actually grows, so it is
+    the one that has to be bounded (issue #62).
+
+    It was not the only live state `loop.next_action` left without an action,
+    though the first draft of this said so. `merging` had no branch there at
+    all — no action, no staleness check, no governor — while still holding a
+    slot against `max_open_prs`. That one the clock can catch, because a batch
+    in the merge queue is waiting on something outside the loop, and
+    `loop._stale_reason` now reads it like any other wait. A resume is not a
+    wait, which is why this counter has to exist instead.
 
     Read only while the batch is still in `building`: a build that was picked
     up four times and then reached `built` converged, and its old resumes are

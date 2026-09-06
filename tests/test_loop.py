@@ -317,6 +317,60 @@ def test_a_batch_with_no_timestamp_is_never_called_stale():
     assert loop.next_action(st, cfg)["do"] == "watch"
 
 
+# --- a batch in the merge queue is live, and had no action at all -------------
+
+
+def _merging(**over):
+    """A batch driven planned -> merging, both gates clear, waiting on GitHub."""
+    return {
+        "id": "b-001",
+        "state": "merging",
+        "pr": 1,
+        "ci_gate": "full_green",
+        "review_gate": "clean",
+        **over,
+    }
+
+
+def test_a_batch_in_the_merge_queue_is_watched():
+    """`merging` is in IN_FLIGHT but had no branch in next_action, so it got no
+    action, no staleness check and no governor — while still holding a slot
+    against max_open_prs."""
+    st = state_with(_merging())
+    st.batches["b-001"]["progress_at"] = _aged(0)
+    cfg = {**CONFIG, "limits": {**CONFIG["limits"], "stale_after_s": 3600}}
+    action = loop.next_action(st, cfg)
+    assert action["do"] == "watch" and action["batch"] == "b-001"
+
+
+def test_a_merge_that_never_completes_escalates():
+    """`gh pr merge --auto` is fire-and-forget: a queue that refuses it, or never
+    fires, leaves the batch here for good and nothing brings it back."""
+    st = state_with(_merging())
+    st.batches["b-001"]["progress_at"] = _aged(68)
+    cfg = {**CONFIG, "limits": {**CONFIG["limits"], "stale_after_s": 3600}}
+    action = loop.next_action(st, cfg)
+    assert action["do"] == "escalate" and action["batch"] == "b-001"
+    assert "stale" in action["reason"].lower()
+
+
+def test_a_merging_batch_with_no_staleness_window_is_still_only_watched():
+    """Same rule as every other wait: no window configured, no escalation."""
+    st = state_with(_merging())
+    st.batches["b-001"]["progress_at"] = _aged(500)
+    assert loop.next_action(st, CONFIG)["do"] == "watch"
+
+
+def test_a_merging_batch_is_drained_before_one_that_is_only_ready():
+    """Nearest the merge first — the merge for this one is already requested."""
+    st = state_with(
+        _merging(),
+        {"id": "b-002", "state": "ready", "ci_gate": "full_green", "review_gate": "clean"},
+    )
+    st.batches["b-001"]["progress_at"] = _aged(0)
+    assert loop.next_action(st, CONFIG)["batch"] == "b-001"
+
+
 # --- issue #53: triage must stay reachable after the first batch --------------
 
 
@@ -434,17 +488,96 @@ def _triaged(number, at):
     return {number: {"issue": number, "verdict": "actionable", "ts": at}}
 
 
-def test_an_issue_its_merged_batch_left_open_is_offered_for_batching_again():
+def test_an_issue_its_merged_batch_left_open_reaches_a_human():
     """b-001 merged as PR #7, but issue #5 is still open on the tracker.
 
-    Triage lists open issues only, so a triage record written after the merge
-    is evidence the merge did not close it.
+    Triage lists open issues only, so a sighting after the merge is evidence
+    the merge did not close it. What that evidence means, though, is not
+    something the ledger can settle: either the PR merged without a closing
+    keyword and the fix is on trunk, or the fix did not fix it. Those want
+    opposite actions, so the loop hands the choice over instead of guessing.
     """
     st = state_with({"id": "b-001", "state": "merged", "issues": [5], "pr": 7})
     st.batches["b-001"]["progress_at"] = _aged(48)
     st.issues = _triaged(5, _aged(1))
     action = loop.next_action(st, CONFIG)
-    assert action["do"] == "batch" and action["issues"] == [5]
+    assert action["do"] == "escalate"
+    assert action["issues"] == [5] and action["merged_batch"] == "b-001"
+
+
+def test_an_issue_its_merged_batch_left_open_is_never_offered_for_batching():
+    """The action a release produced was one nothing could take.
+
+    `batch.py plan` groups `triage_out["triaged"]`, and the issues this rule
+    finds are the ones triage *skips* — `should_skip` refuses to re-triage an
+    issue whose `updatedAt` has not moved, and merging without a closing
+    keyword does not move it. So `do: batch` came back every tick forever, no
+    counter moved, and because that branch sits above `triage_due` the loop
+    stopped looking for new issues at all.
+    """
+    st = state_with({"id": "b-001", "state": "merged", "issues": [5], "pr": 7})
+    st.batches["b-001"]["progress_at"] = _aged(48)
+    st.issues = _triaged(5, _aged(1))
+    assert 5 in loop._grouped_issues(st)
+    assert loop.next_action(st, CONFIG)["do"] != "batch"
+
+
+def test_the_loop_says_it_once_and_then_moves_on():
+    """The bound. A recorded escalation is the end of the loop's involvement.
+
+    Nothing here can be retried into working, so repeating it is pure noise —
+    and an unbounded escalation costs a session every fifteen minutes just as
+    an unbounded `batch` did.
+    """
+    st = state_with({"id": "b-001", "state": "merged", "issues": [5], "pr": 7})
+    st.batches["b-001"]["progress_at"] = _aged(48)
+    st.issues = _triaged(5, _aged(1))
+    st.escalations = [{"type": "escalation", "issues": [5], "reason": "b-001 merged; #5 open"}]
+    assert loop.next_action(st, CONFIG)["do"] == "idle"
+
+
+def test_an_issue_another_batch_is_still_working_on_does_not_escalate():
+    """b-002 merged without closing #5, but b-001 has an open PR for it.
+
+    A live batch will close it. Telling a human about an issue somebody is
+    already fixing is the noise that makes NEEDS YOU unreadable.
+    """
+    st = state_with(
+        {"id": "b-001", "state": "open", "issues": [5], "pr": 7, "ci_gate": "pending"},
+        {"id": "b-002", "state": "merged", "issues": [5], "pr": 6},
+    )
+    st.batches["b-002"]["progress_at"] = _aged(48)
+    st.issues = _triaged(5, _aged(1))
+    assert loop.merged_leaving_open(st) == []
+
+
+def test_a_merged_batch_that_left_two_issues_open_escalates_once_naming_both():
+    st = state_with({"id": "b-001", "state": "merged", "issues": [5, 9], "pr": 7})
+    st.batches["b-001"]["progress_at"] = _aged(48)
+    st.issues = {**_triaged(5, _aged(1)), **_triaged(9, _aged(1))}
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "escalate" and action["issues"] == [5, 9]
+
+
+def test_the_escalation_a_merged_batch_produces_is_shown_in_needs_you():
+    """The whole point of choosing to escalate: somebody reads it in the morning.
+
+    `status._needs_human` drops an escalation whose batch is no longer
+    `escalated`, on the premise that a merged batch needs nobody. This is the
+    case that disproves it, so the record is keyed on the issues that need a
+    person rather than on the batch that is already finished.
+    """
+    import status
+
+    st = state_with({"id": "b-001", "state": "merged", "issues": [5], "pr": 7})
+    st.batches["b-001"]["progress_at"] = _aged(48)
+    st.issues = _triaged(5, _aged(1))
+    action = loop.next_action(st, CONFIG)
+    st.escalations = [
+        {"type": "escalation", "issues": action["issues"], "reason": action["reason"]}
+    ]
+    lines = status._needs_human(st, CONFIG["caps"])
+    assert len(lines) == 1 and "#5" in lines[0]
 
 
 def test_an_issue_whose_merged_batch_closed_it_stays_out_of_the_queue():
@@ -503,22 +636,38 @@ def _triage_pass(at, saw):
     return {"ts": at, "type": "triage.completed", "triaged": 0, "open_issues": list(saw)}
 
 
-def test_a_merged_batch_releases_an_issue_a_later_triage_saw_open_without_re_triaging_it():
-    """The ordering the release rule was written for, played end to end.
+def test_a_merged_batch_escalates_an_issue_a_later_triage_saw_open():
+    """The ordering the rule was written for, played end to end.
 
     #5 is triaged, a PR quotes it, the PR merges without a closing keyword, and
     every triage after that *skips* it — `triage.should_skip` refuses to
     re-triage an issue whose `updatedAt` has not moved, and merging without
     closing does not move it. So no `issue.triaged` newer than the merge is ever
-    written, and the rule that hands the issue back had no producer at all.
-
-    The triage pass itself is the evidence: it asked GitHub for open issues and
-    #5 came back.
+    written; the triage pass itself is the evidence, because it asked GitHub for
+    open issues and #5 came back.
     """
     events = _merged_batch_events(5, triaged_at=_aged(72), merged_at=_aged(48))
     events.append(_triage_pass(_aged(0.2), saw=[5]))
     action = loop.next_action(ledger.fold(events), CONFIG)
-    assert action["do"] == "batch" and action["issues"] == [5]
+    assert action["do"] == "escalate" and action["issues"] == [5]
+    assert "b-001" in action["reason"]
+
+
+def test_the_escalation_ends_it_rather_than_repeating_every_tick():
+    """Folded from the log, not set by hand: the suppression has a producer too."""
+    events = _merged_batch_events(5, triaged_at=_aged(72), merged_at=_aged(48))
+    events.append(_triage_pass(_aged(0.2), saw=[5]))
+    action = loop.next_action(ledger.fold(events), CONFIG)
+    events.append(
+        {
+            "ts": _aged(0.1),
+            "type": "escalation",
+            "issues": action["issues"],
+            "merged_batch": action["merged_batch"],
+            "reason": action["reason"],
+        }
+    )
+    assert loop.next_action(ledger.fold(events), CONFIG)["do"] == "idle"
 
 
 def test_a_triage_pass_that_did_not_see_the_issue_leaves_it_with_its_batch():
