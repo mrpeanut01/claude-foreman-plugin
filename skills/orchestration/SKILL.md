@@ -36,7 +36,10 @@ if it matters, it is an event.
    `review_rounds` is a runaway ceiling only — review deadlock is decided by
    `land.review_stalled`, which asks whether findings are *repeating*.
 5. **Mutations go through the wrapper.** `scripts/gh_safe.sh` only; never raw
-   `gh api -X DELETE`, never `--force` to a protected branch.
+   `gh api -X DELETE`, never `--force` to a protected branch. The plugin's
+   `PreToolUse` hook (`scripts/gh_guard.py`) denies a bare `gh` the wrapper
+   would refuse, in any checkout holding `.foreman/`, so this is a rule the
+   harness keeps rather than one you remember.
 
 ## State
 

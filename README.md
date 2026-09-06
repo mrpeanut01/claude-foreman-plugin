@@ -58,8 +58,10 @@ reviewing an agent's work tends to approve it, so "clean" is made expensive to s
   it still passes, the test guards nothing. A fact, not a judgement.
 - **Evidence-typed verdict** — a `clean` verdict must name the covering tests and
   carry `revert_check: failed_as_expected`, or the schema parser rejects it.
-- **No fix ability** — the reviewer has no `Edit`/`Write`. It must articulate the
-  defect rather than quietly patch and approve.
+- **No edit tools** — the reviewer has no `Edit`/`Write`. It keeps `Bash`,
+  which the revert check needs, and runs that check in a scratch worktree;
+  the instruction not to change the branch is a rule it is given, not one the
+  harness enforces, and the README says so rather than pretending otherwise.
 - **Two lenses on risky diffs** — correctness and blast-radius reviewers must both
   come back clean.
 - **Post-merge measurement** — the ledger tracks clean reviews that were later
@@ -102,6 +104,12 @@ claude plugin install foreman@claude-foreman-plugin
 Plus one agent: `reviewer` — the independent pre-merge review, with no `Edit` or
 `Write`.
 
+Plus one hook: a `PreToolUse` guard on `Bash` that holds any bare `gh` to the
+same rules as `gh_safe.sh`, in any checkout with a `.foreman/` directory.
+Without it the wrapper was advice — every command runs with an unscoped
+`Bash`, and nothing stopped `gh api -X DELETE` typed directly. The hook is
+inert in repositories foreman is not in use on.
+
 ## Scripts
 
 All stdlib Python plus PyYAML; no service, no database.
@@ -118,6 +126,7 @@ All stdlib Python plus PyYAML; no service, no database.
 | `scripts/findings.py` | Turn review findings into issues, deduplicated against the tracker |
 | `scripts/loop.py` | The scheduler: one next action, WIP limits, the daily CI budget |
 | `scripts/gh_safe.sh` | Allowlisted `gh` wrapper — no deletes, no `--admin`, no protection edits, everything audited |
+| `scripts/gh_guard.py` | The `PreToolUse` hook: a bare `gh` in a Bash command is denied if the wrapper would refuse it |
 
 ## Two rules worth stating plainly
 

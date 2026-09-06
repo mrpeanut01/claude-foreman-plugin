@@ -62,6 +62,20 @@ def test_the_agent_that_reviews_cannot_edit():
     assert not granted & {"Edit", "Write", "NotebookEdit"}, "the reviewer must not be able to fix"
 
 
+def test_every_hook_the_manifest_declares_runs_a_script_that_exists():
+    """A hook naming a missing script fails every Bash call in every session
+    the plugin is enabled in, which is a worse day than a missing command."""
+    declared = MANIFEST.get("hooks")
+    assert isinstance(declared, str), "hooks live in a file the manifest points at"
+    hooks = json.loads((ROOT / declared).read_text())["hooks"]
+    commands = [h["command"] for entries in hooks.values() for e in entries for h in e["hooks"]]
+    assert commands, "the manifest points at a hooks file that declares nothing"
+    for command in commands:
+        script = ROOT / command.replace("${CLAUDE_PLUGIN_ROOT}/", "")
+        assert script.exists(), f"hook runs {command}, which is not on disk"
+        assert script.stat().st_mode & 0o111, f"{script.name} is not executable"
+
+
 def test_the_marketplace_and_plugin_versions_agree():
     market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
     assert market["plugins"][0]["version"] == MANIFEST["version"]

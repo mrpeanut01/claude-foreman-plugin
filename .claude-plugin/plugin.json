@@ -23,7 +23,7 @@
   "agents": [
     "./agents/reviewer.md"
   ],
-  "hooks": [],
+  "hooks": "./hooks/hooks.json",
   "keywords": [
     "github",
     "issues",
