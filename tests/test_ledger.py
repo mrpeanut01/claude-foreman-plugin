@@ -1,5 +1,6 @@
 """Ledger: an append-only event log folded into current state."""
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -403,3 +404,58 @@ def test_a_directory_outside_any_repo_still_works(tmp_path, monkeypatch):
     ledger.init(Path("."))
     ledger.append(Path(ledger.LEDGER_DIR), "issue.triaged", issue=1, verdict="actionable")
     assert len(ledger.read_events(outside / ledger.LEDGER_DIR)) == 1
+
+
+# --- issue #70: a config path must not follow the caller around either -------
+
+
+def test_a_relative_config_path_resolves_against_the_repository(worktree, monkeypatch):
+    """The default `.foreman/config.json` names the repo's config, not the caller's."""
+    checkout, linked = worktree
+    root = ledger.init(checkout)
+    (root / ledger.CONFIG_FILE).write_text(json.dumps({"caps": {"pushes": 8}}))
+    monkeypatch.chdir(linked)
+    assert ledger.load_config(None)["caps"]["pushes"] == 8
+    assert ledger.load_config(f"{ledger.LEDGER_DIR}/{ledger.CONFIG_FILE}")["caps"]["pushes"] == 8
+
+
+def test_an_explicit_absolute_config_path_still_wins(worktree, monkeypatch, tmp_path):
+    """An absolute path is how a caller says "this config, not the one you'd pick"."""
+    checkout, linked = worktree
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps({"risk_ceiling": "low"}))
+    ledger.init(checkout)
+    (checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE).write_text(
+        json.dumps({"risk_ceiling": "high"})
+    )
+    monkeypatch.chdir(linked)
+    assert ledger.load_config(elsewhere)["risk_ceiling"] == "low"
+
+
+def test_a_missing_config_says_so_rather_than_defaulting_to_no_limits(
+    worktree, monkeypatch, capsys
+):
+    """Silence was the whole defect: every cap and limit disappeared without a word."""
+    checkout, linked = worktree
+    monkeypatch.chdir(linked)
+    assert ledger.load_config(None) == {}
+    err = capsys.readouterr().err
+    assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in err
+    assert "cap" in err.lower()
+
+
+def test_a_config_that_is_there_is_read_without_complaint(worktree, monkeypatch, capsys):
+    checkout, linked = worktree
+    root = ledger.init(checkout)
+    (root / ledger.CONFIG_FILE).write_text(json.dumps({"auto_merge": True}))
+    monkeypatch.chdir(linked)
+    assert ledger.load_config(None) == {"auto_merge": True}
+    assert capsys.readouterr().err == ""
+
+
+def test_a_config_in_a_directory_outside_any_repository_still_resolves(tmp_path, monkeypatch):
+    outside = tmp_path / "not-a-repo"
+    (outside / ledger.LEDGER_DIR).mkdir(parents=True)
+    (outside / ledger.LEDGER_DIR / ledger.CONFIG_FILE).write_text(json.dumps({"auto_merge": True}))
+    monkeypatch.chdir(outside)
+    assert ledger.load_config(None) == {"auto_merge": True}

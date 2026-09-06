@@ -293,10 +293,16 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("next")
     p.add_argument("--ledger", default=".foreman")
-    p.add_argument("--config", default=".foreman/config.json")
+    p.add_argument(
+        "--config",
+        help=f"foreman config (default {ledger.LEDGER_DIR}/{ledger.CONFIG_FILE} "
+        "in the repository root)",
+    )
 
     args = parser.parse_args(argv)
-    config = json.loads(Path(args.config).read_text()) if Path(args.config).exists() else {}
+    # Anchored, and loud when it is not there: an unfound config leaves this
+    # function with no caps, no budget and no staleness window at all.
+    config = ledger.load_config(args.config)
     state = ledger.load(Path(args.ledger))
     action = next_action(state, config)
     remaining = budget_remaining(state, config)

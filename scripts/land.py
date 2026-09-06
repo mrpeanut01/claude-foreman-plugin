@@ -678,7 +678,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pr", type=int)
     p.add_argument("--repo")
     p.add_argument("--ledger", default=".foreman")
-    p.add_argument("--config", default=".foreman/config.json")
+    p.add_argument(
+        "--config",
+        help="foreman config (default .foreman/config.json in the repository root)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -732,7 +735,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: no batch {args.batch}", file=sys.stderr)
         return 1
     pr = fetch_pr(args.repo, args.pr) if (args.repo and args.pr) else {"labels": []}
-    blockers = merge_blockers(batch, pr, load_json(args.config, {}))
+    # Not `load_json`: a relative config has to be anchored to the repository the
+    # way the ledger already is, and a missing one has to say so rather than
+    # quietly dropping every cap and every protected path.
+    blockers = merge_blockers(batch, pr, ledger_mod.load_config(args.config))
     print(
         json.dumps({"batch": args.batch, "mergeable": not blockers, "blockers": blockers}, indent=2)
     )

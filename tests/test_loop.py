@@ -1,8 +1,12 @@
 """The scheduler: given the ledger, what is the single best next action?"""
 
+import json
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -500,3 +504,82 @@ def test_a_mid_build_batch_is_not_resumed_once_the_ci_budget_is_spent():
     st = state_with({"id": "b-002", "state": "building"}, spend=[_spend(60 * 60)])
     action = loop.next_action(st, CONFIG)
     assert action["do"] == "idle" and "budget" in action["reason"].lower()
+
+
+# --- issue #70: the caps must not vanish when the loop runs from a worktree ---
+
+
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", "-c", "user.email=f@example.com", "-c", "user.name=foreman", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """A checkout holding the real `.foreman/`, plus the build worktree holding none.
+
+    `commands/build.md` prescribes exactly this layout, and the loop is run with
+    its cwd inside the worktree, where `.foreman/config.json` does not exist.
+    """
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    _git(checkout, "init", "-q", "-b", "main")
+    _git(checkout, "commit", "-q", "--allow-empty", "-m", "root")
+    linked = tmp_path / "foreman-b-001"
+    _git(checkout, "worktree", "add", "-q", str(linked), "-b", "foreman/b-001")
+    root = ledger.init(checkout)
+    (root / ledger.CONFIG_FILE).write_text(json.dumps(CONFIG))
+    return checkout, linked
+
+
+def _runaway_batch(root):
+    """A batch that has pushed 99 times: far past any cap anyone would configure."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.transition(root, "b-001", "building")
+    ledger.transition(root, "b-001", "built")
+    ledger.transition(root, "b-001", "open")
+    for _ in range(99):
+        ledger.append(root, "batch.pushed", batch="b-001", sha="deadbee")
+
+
+def test_the_loop_reads_its_caps_from_the_repository_when_run_from_a_worktree(
+    worktree, monkeypatch, capsys
+):
+    """With no config the push cap was absent, so `cap_breached` returned None and
+    a batch at 99 pushes was never escalated — the loop just kept going."""
+    checkout, linked = worktree
+    _runaway_batch(checkout / ledger.LEDGER_DIR)
+    monkeypatch.chdir(linked)
+
+    assert loop.main(["next"]) == 0
+    action = json.loads(capsys.readouterr().out)
+    assert action["do"] == "escalate"
+    assert "pushes at cap" in action["reason"]
+
+
+def test_the_loop_says_so_when_it_is_running_with_no_config_at_all(worktree, monkeypatch, capsys):
+    """A loop with no caps is the failure mode; it must not be a silent one."""
+    checkout, linked = worktree
+    (checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE).unlink()
+    _runaway_batch(checkout / ledger.LEDGER_DIR)
+    monkeypatch.chdir(linked)
+
+    assert loop.main(["next"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["do"] != "escalate", "no config really does mean no caps"
+    assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in captured.err
+
+
+def test_an_explicit_config_path_is_still_obeyed(worktree, monkeypatch, tmp_path, capsys):
+    checkout, linked = worktree
+    elsewhere = tmp_path / "strict.json"
+    elsewhere.write_text(json.dumps({**CONFIG, "caps": {"pushes": 1}}))
+    _runaway_batch(checkout / ledger.LEDGER_DIR)
+    monkeypatch.chdir(linked)
+
+    assert loop.main(["next", "--config", str(elsewhere)]) == 0
+    assert "(99/1)" in json.loads(capsys.readouterr().out)["reason"]

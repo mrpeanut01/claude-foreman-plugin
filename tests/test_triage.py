@@ -818,3 +818,94 @@ def test_a_quoted_traceback_is_evidence_not_surface():
         "Retrying by hand straight afterwards works, so it is the backoff, not the link."
     )
     assert triage.classify_size(issue(title="Upload gives up too early", body=body)) != "large"
+
+
+# --- issue #70: protected paths must not vanish when triage runs elsewhere ----
+
+
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", "-c", "user.email=f@example.com", "-c", "user.name=foreman", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """The layout `commands/build.md` prescribes: the config lives one repo up."""
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    _git(checkout, "init", "-q", "-b", "main")
+    _git(checkout, "commit", "-q", "--allow-empty", "-m", "root")
+    linked = tmp_path / "foreman-b-001"
+    _git(checkout, "worktree", "add", "-q", str(linked), "-b", "foreman/b-001")
+
+    import ledger
+
+    root = ledger.init(checkout)
+    (root / ledger.CONFIG_FILE).write_text(
+        json.dumps({"protected_paths": [".github/workflows/**"]})
+    )
+    return checkout, linked
+
+
+def _workflow_issue():
+    """Deliberately free of every high-risk hint word, so the only thing that can
+    raise it above medium is the protected-path list in the config."""
+    return issue(
+        number=7,
+        title="The build matrix drops one job",
+        body="`.github/workflows/ci.yml` runs three jobs when it should run four.",
+        labels=["bug"],
+    )
+
+
+def _plan_from(monkeypatch, capsys, *args):
+    """Run `triage.py plan` over one issue; return the plan and anything it warned."""
+    monkeypatch.setattr(triage, "fetch_issues", lambda repo, limit=50: [_workflow_issue()])
+    monkeypatch.setattr(triage, "fetch_labels", lambda repo: [])
+    assert triage.main(["plan", "--repo", "me/mine", *args]) == 0
+    captured = capsys.readouterr()
+    return json.loads(captured.out), captured.err
+
+
+def test_triage_reads_its_protected_paths_from_the_repository_when_run_from_a_worktree(
+    worktree, monkeypatch, capsys
+):
+    """With no config `protected_paths` is empty, so an issue touching a workflow
+    path scores medium and slips under the default risk ceiling into a batch."""
+    _checkout, linked = worktree
+    monkeypatch.chdir(linked)
+
+    plan, warnings = _plan_from(monkeypatch, capsys)
+    record = plan["triaged"][0]
+    assert record["risk"] == "high"
+    assert ".github/workflows/ci.yml" in record["risk_reason"]
+    assert warnings == ""
+
+
+def test_triage_says_so_when_it_is_scoring_risk_with_no_protected_paths(
+    worktree, monkeypatch, capsys
+):
+    """Scoring every path as unprotected is a decision; it must be a visible one."""
+    checkout, linked = worktree
+    import ledger
+
+    (checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE).unlink()
+    monkeypatch.chdir(linked)
+
+    plan, warnings = _plan_from(monkeypatch, capsys)
+    assert plan["triaged"][0]["risk"] == "medium", "no config means no protected paths"
+    assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in warnings
+
+
+def test_an_explicit_config_path_is_still_obeyed(worktree, monkeypatch, tmp_path, capsys):
+    checkout, linked = worktree
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps({"protected_paths": []}))
+    monkeypatch.chdir(linked)
+
+    plan, _ = _plan_from(monkeypatch, capsys, "--config", str(elsewhere))
+    assert plan["triaged"][0]["risk"] == "medium"

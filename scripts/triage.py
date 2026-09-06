@@ -554,7 +554,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("plan")
     p.add_argument("--repo", required=True)
     p.add_argument("--limit", type=int, default=50)
-    p.add_argument("--config", default=".foreman/config.json")
+    p.add_argument(
+        "--config",
+        help="foreman config (default .foreman/config.json in the repository root)",
+    )
     p.add_argument("--ledger", default=".foreman")
     p = sub.add_parser("apply")
     p.add_argument("--repo", required=True)
@@ -565,11 +568,13 @@ def main(argv: list[str] | None = None) -> int:
     here = Path(__file__).resolve().parent
 
     if args.cmd == "plan":
-        config = {}
-        if Path(args.config).exists():
-            config = json.loads(Path(args.config).read_text())
         sys.path.insert(0, str(here))
         import ledger as ledger_mod
+
+        # Anchored to the repository, and loud when there is nothing to read:
+        # an empty config means no protected paths, which silently scores every
+        # auth and workflow change as medium and lets it into a batch.
+        config = ledger_mod.load_config(args.config)
 
         prior = ledger_mod.load(Path(args.ledger)).issues if Path(args.ledger).exists() else {}
         issues = fetch_issues(args.repo, args.limit)
