@@ -451,8 +451,9 @@ def test_the_collision_merge_gives_the_same_answer_in_either_file_order(tmp_path
     import land
 
     plain = "name: A\non: {pull_request: }\njobs:\n  test: {steps: [{run: x}]}\n"
-    filtered = ("name: B\non:\n  pull_request:\n    paths: ['src/**']\n"
-                "jobs:\n  test: {steps: [{run: y}]}\n")
+    filtered = (
+        "name: B\non:\n  pull_request:\n    paths: ['src/**']\njobs:\n  test: {steps: [{run: y}]}\n"
+    )
 
     answers = []
     for first, second in (("a", "b"), ("b", "a")):
