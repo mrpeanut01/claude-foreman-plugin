@@ -36,7 +36,8 @@ Act on `gate`, never on the raw list.
 | `advisory_pending` / `advisory_failed` | Not required. Informational only. |
 | `failed` | Required and red. Fix or adjudicate. |
 | `stale` | Reported against a different commit. Proves nothing about this one. |
-| `head_sha` | The commit the verdict is about. |
+| `head_sha` | The commit the verdict is about. `null` means it could not be resolved, and the gate is then `pending` whatever CI says. |
+| `reason` | Why the gate reads as it does when no check could be judged. `null` in the ordinary case. |
 
 An unknown check counts as required. A check the profile has never seen may be a
 new required gate, and optimising it away is how a batch sits in the merge queue

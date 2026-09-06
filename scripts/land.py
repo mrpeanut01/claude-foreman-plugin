@@ -17,6 +17,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import subprocess
@@ -335,7 +336,12 @@ def ci_gate(
     dropped before anything is judged. What is left may be nothing, and nothing
     is `pending`: honest ignorance, never green.
     """
-    checks = checks_for_sha(checks, expected_sha)
+    scoped = checks_for_sha(checks, expected_sha)
+    # A result naming another commit is not evidence about this one — but that it
+    # exists at all is evidence that this pull request runs CI, and that this
+    # commit's own results are still to come.
+    dropped = len(scoped) != len(checks or [])
+    checks = scoped
     summary = classify_checks(checks, profile)
     if summary["failed"]:
         return "failed"
@@ -363,7 +369,18 @@ def ci_gate(
             # Anything that did report counts, requirable or not.
             return "full_green" if not summary["actionable_pending"] else "pending"
 
-        # Protection says nothing is required, so nothing can block.
+        # Protection says nothing is required, so nothing can block a merge.
+        # "Nothing blocks" is not "CI has already spoken", though. When the gate
+        # is scoped to a commit and nothing in the list describes it — every
+        # result belonged to another commit, or none has arrived in the window
+        # after a push — a repo that runs CI at all has simply not reported yet.
+        # Reading that as green is how a batch merges past a suite that never
+        # ran, and it is strictly worse than the `failed` the dropped stale red
+        # used to produce. Nothing declared and nothing dropped is the one case
+        # with nothing to wait for: a repo with no CI, which protection agrees
+        # requires nothing.
+        if expected_sha and not checks and (dropped or profile.get("jobs")):
+            return "pending"
         return "full_green" if not summary["actionable_pending"] else "pending"
 
     done = set(summary["passed"])
@@ -432,8 +449,35 @@ def validate_review(verdict: dict) -> tuple[bool, list[str]]:
 # --- review convergence -------------------------------------------------------
 
 
+def _terms(text: str) -> list[str]:
+    """The content words of a summary, in order, first occurrence only."""
+    seen: dict[str, None] = {}
+    for word in _WORD.findall((text or "").lower()):
+        if word not in _NOISE and len(word) > 1:
+            seen.setdefault(word, None)
+    return list(seen)
+
+
 def _words(text: str) -> set[str]:
-    return {w for w in _WORD.findall((text or "").lower()) if w not in _NOISE and len(w) > 1}
+    return set(_terms(text))
+
+
+def _substitution(a: list[str], b: list[str]) -> bool:
+    """Whether one summary is the other with terms swapped in place.
+
+    A swap keeps the sentence and exchanges words inside it, so the sequences
+    align position for position with nothing inserted and nothing dropped. A
+    rewording does not keep the sentence: it elaborates, compresses, reorders,
+    swaps filler for filler, and its alignment always carries an insertion or a
+    deletion somewhere.
+    """
+    if len(a) != len(b):
+        return False
+    # SequenceMatcher does not promise the same opcodes both ways round, and a
+    # rule that depends on which round was passed first is not a rule.
+    left, right = sorted((a, b))
+    ops = difflib.SequenceMatcher(a=left, b=right, autojunk=False).get_opcodes()
+    return all(tag in ("equal", "replace") for tag, *_ in ops)
 
 
 def same_finding(a: dict, b: dict, threshold: float = REVIEW_MATCH_THRESHOLD) -> bool:
@@ -446,18 +490,35 @@ def same_finding(a: dict, b: dict, threshold: float = REVIEW_MATCH_THRESHOLD) ->
         str(b.get("severity", "")).lower() in SERIOUS
     ):
         return False
-    wa, wb = _words(a.get("summary")), _words(b.get("summary"))
+    ta, tb = _terms(a.get("summary")), _terms(b.get("summary"))
+    wa, wb = set(ta), set(tb)
     if not wa or not wb:
         return False
     if len(wa & wb) / len(wa | wb) < threshold:
         return False
-    # Overlap alone is not enough. Two summaries about the same file share their
-    # locus and their verb for free, so "missing null check in parse_config" and
-    # "missing type check in parse_config" share most of their content words
-    # while naming two unrelated defects. What separates them is that each names
-    # something the other does not. A genuine rewording only elaborates: it adds
-    # or drops filler, so one summary's words still contain the other's.
-    return not (wa - wb and wb - wa)
+    if not (wa - wb) or not (wb - wa):
+        return True  # one summary's words contain the other's: an elaboration
+
+    # Overlap alone cannot finish the job, and no threshold can. Two summaries
+    # about one file share their locus and their verb for free, so "missing null
+    # check in parse_config" and "missing type check in parse_config" name
+    # unrelated defects while overlapping MORE (0.67) than a genuine rewording
+    # does (0.50). Ranking by similarity puts them in the wrong order.
+    #
+    # Shape separates them where size cannot. Those two are one sentence with a
+    # term swapped in place, and the swapped term is the entire content of the
+    # complaint. Requiring containment instead — the first cut at this — rejected
+    # the swap but took every reworded repeat with it, because a reviewer
+    # restating an objection both adds and drops words: "unbounded retry loop in
+    # the fetch helper" and "the retry loop in fetch has no ceiling" are one
+    # objection twice, and read as two rounds of progress.
+    #
+    # The bound worth knowing: a new defect named by swapping a term AND adding
+    # a locator ("...in parse_config on line 12") is structurally a rewording and
+    # reads as a repeat. That escalates a converging review to a human early,
+    # which is the affordable direction — the other one merges on a defect
+    # nobody looked at twice.
+    return not _substitution(ta, tb)
 
 
 def _blocking(round_findings: list[dict]) -> list[dict]:
@@ -695,8 +756,36 @@ def main(argv: list[str] | None = None) -> int:
         # later. Scoping the read to that head is what stops the previous
         # commit's green from being reported as this commit's.
         sha = args.sha or pr.get("headRefOid")
-        checks = fetch_checks(args.repo, args.pr, sha)
         base = pr.get("baseRefName")
+        if not sha:
+            # `gh pr view` returns {} on any non-zero exit — a transient 5xx, a
+            # rate limit, a `gh` too old to know `headRefOid` — and the check
+            # list answers anyway. In the minutes after a push it answers with
+            # the PREVIOUS commit's greens, which is the whole hazard the SHA
+            # scoping exists to close. Falling through to the unscoped read here
+            # would put that green under `gate`, and `gate` is what the caller
+            # acts on. Unprovable is pending.
+            reason = (
+                f"cannot say which commit this gate is about: no --sha, and "
+                f"reading headRefOid for {args.repo}#{args.pr} produced nothing. "
+                "An unscoped check read reports the previous commit's results as "
+                "this commit's, so there is nothing here to judge."
+            )
+            print(
+                json.dumps(
+                    {
+                        **classify_checks([], profile),
+                        "base_branch": base,
+                        "head_sha": None,
+                        "gate": "pending",
+                        "reason": reason,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+
+        checks = fetch_checks(args.repo, args.pr, sha)
         summary = classify_checks(checks, profile, sha)
         print(
             json.dumps(
@@ -705,6 +794,7 @@ def main(argv: list[str] | None = None) -> int:
                     "base_branch": base,
                     "head_sha": sha,
                     "gate": ci_gate(checks, profile, base, sha),
+                    "reason": None,
                 },
                 indent=2,
             )

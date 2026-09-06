@@ -849,3 +849,164 @@ def test_land_says_so_when_it_is_judging_a_merge_with_no_config(worktree, monkey
     captured = capsys.readouterr()
     assert json.loads(captured.out)["blockers"] == ["auto_merge is disabled in config"]
     assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in captured.err
+
+
+# --- review: an unresolvable head SHA must not fall back to the unscoped read -
+
+
+def _profile_file(tmp_path):
+    path = tmp_path / "ci-profile.json"
+    path.write_text(json.dumps(PROFILE))
+    return str(path)
+
+
+def test_a_head_sha_that_cannot_be_resolved_reports_pending_not_a_stale_green(
+    monkeypatch, capsys, tmp_path
+):
+    """`gh pr view` can fail transiently, or be too old to know `headRefOid`.
+
+    The check list still answers, and in the minutes after a push it answers with
+    the PREVIOUS commit's greens. Falling back to it here is the exact hazard the
+    SHA scoping exists to close.
+    """
+    calls = []
+
+    def fake_gh(args):
+        calls.append(args)
+        if args[:2] == ["pr", "view"]:
+            return None
+        return [check(n, "SUCCESS") for n in ("lint", "unit", "integration")]
+
+    monkeypatch.setattr(land, "_gh_json", fake_gh)
+    code = land.main(["checks", "--pr", "7", "--repo", "o/r", "--profile", _profile_file(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert out["head_sha"] is None
+    assert out["gate"] == "pending", "an unprovable gate is pending, never green"
+    assert out["reason"], "the caller acts on `gate`, so the reason must travel with it"
+    assert not any(a[:2] == ["pr", "checks"] for a in calls), (
+        f"the unscoped read must never happen without a SHA: {calls}"
+    )
+
+
+def test_a_pr_read_that_answers_without_a_head_sha_is_also_pending(monkeypatch, capsys, tmp_path):
+    """An older `gh` drops the unknown field rather than failing the whole call."""
+    monkeypatch.setattr(
+        land,
+        "_gh_json",
+        lambda args: (
+            {"number": 7, "baseRefName": "main", "labels": []}
+            if args[:2] == ["pr", "view"]
+            else [check(n, "SUCCESS") for n in ("lint", "unit", "integration")]
+        ),
+    )
+    land.main(["checks", "--pr", "7", "--repo", "o/r", "--profile", _profile_file(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+    assert out["gate"] == "pending" and out["head_sha"] is None
+    assert out["base_branch"] == "main", "what the read did learn is still reported"
+
+
+def test_an_explicit_sha_still_gates_when_the_pr_read_fails(monkeypatch, capsys, tmp_path):
+    """`--sha` is the ledger's own record of what was pushed; it needs no PR read."""
+
+    def fake_gh(args):
+        if args[:2] == ["pr", "view"]:
+            return None
+        if "check-runs" in args[-1]:
+            return {
+                "check_runs": [
+                    {"name": n, "status": "completed", "conclusion": "success", "head_sha": NEW}
+                    for n in ("lint", "unit", "integration")
+                ]
+            }
+        return {"statuses": []}
+
+    monkeypatch.setattr(land, "_gh_json", fake_gh)
+    land.main(
+        ["checks", "--pr", "7", "--repo", "o/r", "--sha", NEW, "--profile", _profile_file(tmp_path)]
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["head_sha"] == NEW and out["gate"] == "full_green"
+
+
+# --- review: dropping a stale result must not leave a green in its place ------
+
+UNREQUIRED = {
+    "required_checks": [],
+    "protection_known": True,
+    "jobs": {"lint": job(required=True)},
+}
+
+
+def test_a_stale_failure_leaves_nothing_to_call_green(monkeypatch):
+    """Protection naming no context still does not make an empty picture green.
+
+    Dropping the previous commit's red is right — it describes another commit.
+    But before the SHA scoping this read `failed`, and reading it `full_green`
+    moves the gate in the one direction that costs a merge.
+    """
+    stale = [sha_check("lint", "FAILURE", OLD)]
+    assert land.ci_gate(stale, UNREQUIRED, None, NEW) == "pending"
+
+
+def test_a_commit_whose_checks_have_not_arrived_is_not_green_either():
+    """The SHA-addressed read returns [] in the window right after a push."""
+    assert land.ci_gate([], UNREQUIRED, None, NEW) == "pending"
+
+
+def test_a_repo_that_declares_no_ci_at_all_is_not_held_pending_forever():
+    """The boundary: nothing declared and nothing dropped means nothing to wait for."""
+    no_ci = {"required_checks": [], "protection_known": True, "jobs": {}}
+    assert land.ci_gate([], no_ci, None, NEW) == "full_green"
+
+
+def test_a_green_for_this_commit_is_still_green_beside_a_dropped_stale_red():
+    """Waiting is for what has not reported, not for what has."""
+    mixed = [sha_check("lint", "FAILURE", OLD), sha_check("lint", "SUCCESS", NEW)]
+    assert land.ci_gate(mixed, UNREQUIRED, None, NEW) == "full_green"
+
+
+# --- review: mutual containment dropped genuine rewordings -------------------
+
+
+def test_a_rewording_that_both_adds_and_drops_words_is_still_a_repeat():
+    """The shape the containment rule lost: neither summary contains the other.
+
+    One objection, stated twice. Requiring one word set to contain the other read
+    it as two rounds of progress and let the review run to the hard ceiling.
+    """
+    a = finding("scripts/fetch.py", "high", "unbounded retry loop in the fetch helper")
+    b = finding("scripts/fetch.py", "high", "the retry loop in fetch has no ceiling")
+    assert land.same_finding(a, b) is True
+    assert land.review_stalled([[a], [b]], hard_ceiling=5) is not None
+
+
+def test_two_terms_swapped_in_place_are_still_two_defects():
+    """#29 stays fixed, and holds for more than a single swapped word."""
+    a = finding("scripts/parse.py", "high", "missing null check in parse_config header")
+    b = finding("scripts/parse.py", "high", "missing type check in parse_config footer")
+    assert land.same_finding(a, b) is False
+
+
+def test_the_same_words_in_another_order_are_the_same_complaint():
+    a = finding("scripts/flush.py", "high", "the flush path races with the queue drain")
+    b = finding("scripts/flush.py", "high", "the queue drain races with the flush path")
+    assert land.same_finding(a, b) is True
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("unbounded retry loop in the fetch helper", "the retry loop in fetch has no ceiling"),
+        ("missing null check in parse_config", "missing type check in parse_config"),
+        ("connection pool leaks handles on timeout", "connection pool leaks handles on shutdown"),
+        ("the retry loop has no ceiling", "retry loop has no upper ceiling at all"),
+    ],
+)
+def test_which_finding_came_first_never_changes_the_answer(left, right):
+    """Rounds are compared in one direction, but a rule that is not symmetric is
+    a rule nobody can reason about."""
+    a = finding("scripts/x.py", "high", left)
+    b = finding("scripts/x.py", "high", right)
+    assert land.same_finding(a, b) is land.same_finding(b, a)
