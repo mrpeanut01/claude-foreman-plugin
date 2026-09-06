@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import ci_profile  # noqa: E402
+import globs  # noqa: E402
 
 # --- workflow parsing ---------------------------------------------------------
 
@@ -466,3 +467,102 @@ def test_the_collision_merge_gives_the_same_answer_in_either_file_order(tmp_path
 
     assert answers[0] == answers[1], "file order changed the gate's behaviour"
     assert answers[0] is True, "one unconditional declaration means a check will appear"
+
+
+# --- issue #48: GitHub's filter-pattern syntax --------------------------------
+#
+# `globs.compile_glob` compiles the branch, tag and path filters read out of the
+# workflows above, so the cheat-sheet cases live here beside the profile that
+# feeds them to the gate.
+
+
+def test_a_character_class_matches_one_alphanumeric_listed_in_the_brackets():
+    assert globs.compile_glob("[CB]at").match("Cat")
+    assert globs.compile_glob("[CB]at").match("Bat")
+    assert not globs.compile_glob("[CB]at").match("Rat")
+
+
+def test_a_range_in_a_character_class_matches_every_character_in_the_range():
+    """GitHub's own example: v[12].[0-9]+.[0-9]+ is major version 1 or 2."""
+    pattern = globs.compile_glob("v[12].[0-9]+.[0-9]+")
+    assert pattern.match("v1.10.1")
+    assert pattern.match("v2.0.0")
+    assert not pattern.match("v3.0.0")
+    assert not pattern.match("v1.10.x")
+
+
+def test_a_question_mark_makes_the_preceding_character_optional():
+    """GitHub's `?` is a quantifier, not fnmatch's match-exactly-one-character."""
+    pattern = globs.compile_glob("*.jsx?")
+    assert pattern.match("page.js")
+    assert pattern.match("page.jsx")
+    assert not pattern.match("page.jsxx")
+
+
+def test_a_plus_repeats_the_preceding_character_one_or_more_times():
+    pattern = globs.compile_glob("release/v1+")
+    assert pattern.match("release/v1")
+    assert pattern.match("release/v111")
+    assert not pattern.match("release/v")
+
+
+def test_a_character_class_never_crosses_a_directory_separator():
+    assert not globs.compile_glob("src/[a-z]/x.py").match("src/a/b/x.py")
+
+
+def test_a_bracket_expression_github_does_not_support_stays_a_literal():
+    """Ranges cover a-z, A-Z and 0-9 only. Inventing a meaning for anything else
+    — a negated class, say — would silently change which paths are protected."""
+    assert globs.compile_glob("release-[!x].txt").match("release-[!x].txt")
+    assert not globs.compile_glob("release-[!x].txt").match("release-y.txt")
+    assert globs.compile_glob("v[9-0]").match("v[9-0]")  # a reversed range is not a range
+    assert globs.compile_glob("logs/[unclosed").match("logs/[unclosed")
+
+
+def test_a_negated_class_branch_filter_keeps_the_job_out_of_the_gate(tmp_path):
+    """#48's repro: GitHub excludes base release/v1, so no check ever appears.
+
+    Reading the negative pattern as a literal leaves the job requirable, and the
+    gate then waits for a check that cannot arrive until the staleness timer
+    escalates it.
+    """
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          pull_request:
+            branches: ['**', '!release/v[12]']
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "release/v1") is False
+    assert land.can_report_on_pr(spec, "release/v3") is True
+
+
+def test_a_positive_class_branch_filter_makes_the_job_requirable(tmp_path):
+    """The other direction from #48: the literal reading under-requires."""
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          pull_request:
+            branches: ['v[12].x']
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "v1.x") is True
+    assert land.can_report_on_pr(spec, "v3.x") is False
