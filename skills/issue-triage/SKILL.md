@@ -35,8 +35,8 @@ time. A wrongly-parked one sits there until someone notices, which may be never.
 |---------|------|-------------|
 | `actionable` | Someone could start now | Enters batching |
 | `needs-repro` | Bug, no evidence, no stated expectation | Parked on the reporter |
-| `needs-info` | Missing environment or version detail | Parked on the reporter |
-| `duplicate` | Title overlap ≥ 0.6 with an **open** issue | Linked, not queued |
+| `needs-info` | Bug that blames an environment it never names | Parked on the reporter |
+| `duplicate` | Title overlap ≥ 0.6 with an **open** issue, on two or more words | Linked, not queued |
 
 ## What counts as evidence
 
@@ -46,8 +46,19 @@ status. So does an expectation stated under a condition — *"when the file is e
 it suggests deleting it, which should never happen"* is a perfectly good bug
 report and must not be asked for steps.
 
+`needs-info` is the other half of that rule, and the narrower half. It is for a
+bug that has shown its failure but pins it on something the report does not
+give: *"works on my machine"*, *"only on Windows"*, *"since upgrading"*, with no
+version, OS or runtime anywhere in the text. Any gesture at a version counts.
+Absence of environment detail on its own never does — most bugs do not depend on
+one, and asking anyway is a round trip that reads as dismissal.
+
 Never mark a duplicate against a closed issue. Pointing someone at a closed
 thread as though it answers them is worse than saying nothing.
+
+One shared word is never a duplicate, however high the ratio. "Bug 1" and
+"Bug 2" overlap completely once the digit is discounted, and a duplicate
+verdict at 1.0 parks the newer issue until someone reads both.
 
 ## Risk drives everything downstream
 
@@ -57,10 +68,23 @@ path, a security-ish keyword, or a `security`/`critical`/`data-loss` label.
 Rounding risk **up** is cheap: the issue still gets fixed, just in a solo PR.
 Rounding it down puts an auth change into a five-issue batch that merges itself.
 
+So it over-scores on purpose, and `risk_reason` on every record says what it
+saw: `"tokens" in the body` on an issue about a tokeniser, `protected path
+src/auth/session.py`, `the security label`. Keyword collisions are expected —
+the body is searched because a real auth bug is often titled neutrally — and
+reading one and downgrading it is part of the job, not a sign the vocabulary is
+wrong. Read the issue before you downgrade; a hit in the *title* almost never
+is one.
+
 See [modules/taxonomy.md](modules/taxonomy.md) for the size and risk vocabularies
 and how to extend them.
 
 ## Exit criteria
 
-Every open issue either has a ledger record or appears in `skipped`. The plan was
-shown before anything was applied. No label outside `gh label list` was used.
+Every open issue either has a ledger record, appears in `skipped`, or appears in
+`failed` with the reason its labels could not be written. The plan was shown
+before anything was applied. No label outside `gh label list` was used.
+
+A non-empty `failed` list is not a partial success to move on from. Nothing in
+it was recorded, so the verdicts are still to be applied; report the reason
+rather than rerunning into the same wall.
