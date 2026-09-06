@@ -901,3 +901,22 @@ def test_an_explicit_config_path_is_still_obeyed(worktree, monkeypatch, tmp_path
 
     assert loop.main(["next", "--config", str(elsewhere)]) == 0
     assert "(99/1)" in json.loads(capsys.readouterr().out)["reason"]
+
+
+def test_an_exhausted_budget_holds_a_ready_batch_short_of_the_merge():
+    """Undocumented until now, and untested: the merge queue runs the full
+    suite against trunk, which is CI the budget has to cover."""
+    st = state_with(
+        {"id": "b-001", "state": "ready", "ci_gate": "full_green", "review_gate": "clean"},
+        spend=[_spend(60 * 60)],
+    )
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "idle" and "budget" in action["reason"].lower()
+
+
+def test_a_ready_batch_merges_while_the_budget_has_room():
+    st = state_with(
+        {"id": "b-001", "state": "ready", "ci_gate": "full_green", "review_gate": "clean"},
+        spend=[_spend(60)],
+    )
+    assert loop.next_action(st, CONFIG)["do"] == "merge"
