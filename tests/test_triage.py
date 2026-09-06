@@ -1,5 +1,7 @@
 """Triage: classify, size, risk-score and dedupe issues into the ledger."""
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -643,3 +645,107 @@ def test_every_record_carries_a_risk_reason_even_when_nothing_scored():
     )
     assert record["risk"] == "medium"
     assert record["risk_reason"]
+
+
+# --- issue #56: a label write that failed must not become a ledger event ------
+
+
+def _plan_file(tmp_path, *records):
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps({"repo": "me/mine", "triaged": list(records)}))
+    return path
+
+
+def _record(number=1, labels=("bug",)):
+    return {"issue": number, "title": "Upload fails", "verdict": "actionable", "labels": [*labels]}
+
+
+def test_apply_labels_returns_the_reason_a_write_failed(monkeypatch):
+    """`gh` explains itself on stderr; returning a bare bool threw it away."""
+
+    def fake(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout="",
+            stderr="GraphQL: does not have the correct permissions to execute "
+            "AddLabelsToLabelable\n",
+        )
+
+    monkeypatch.setattr(triage.subprocess, "run", fake)
+    ok, reason = triage.apply_labels("me/mine", 1, ["bug"], Path("gh_safe.sh"))
+    assert ok is False
+    assert "AddLabelsToLabelable" in reason
+
+
+def _refusing_gh(monkeypatch, message="GraphQL: does not have the correct permissions"):
+    """Every `gh issue edit` fails, the way they did on this repo."""
+
+    def fake(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr=message + "\n")
+
+    monkeypatch.setattr(triage.subprocess, "run", fake)
+
+
+def _apply(tmp_path, plan):
+    return triage.main(
+        ["apply", "--repo", "me/mine", "--plan", str(plan), "--ledger", str(tmp_path / ".foreman")]
+    )
+
+
+def test_a_failed_label_write_never_becomes_a_ledger_event(tmp_path, monkeypatch, capsys):
+    """The ledger claimed 15 triaged issues while no issue carried a label, and
+    because triage skips issues that have not been edited since their last
+    record, the divergence never self-corrected."""
+    import ledger as ledger_mod
+
+    _refusing_gh(monkeypatch)
+    code = _apply(tmp_path, _plan_file(tmp_path, _record(1), _record(2)))
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert [e["type"] for e in events] == ["triage.completed"]
+    assert code == 1
+
+
+def test_the_reason_a_label_write_failed_reaches_the_operator(tmp_path, monkeypatch, capsys):
+    """`{"applied": 0, "failed": [3]}` gives nobody anything to act on."""
+    _refusing_gh(monkeypatch, "GraphQL: does not have the correct permissions")
+    _apply(tmp_path, _plan_file(tmp_path, _record(3)))
+    out = json.loads(capsys.readouterr().out)
+    assert out["applied"] == 0
+    assert "does not have the correct permissions" in json.dumps(out["failed"])
+
+
+def test_a_successful_label_write_is_still_recorded(tmp_path, monkeypatch, capsys):
+    import ledger as ledger_mod
+
+    monkeypatch.setattr(
+        triage.subprocess,
+        "run",
+        lambda args, **kw: subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+    assert _apply(tmp_path, _plan_file(tmp_path, _record(1))) == 0
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert [e["type"] for e in events] == ["issue.triaged", "triage.completed"]
+    assert json.loads(capsys.readouterr().out)["applied"] == 1
+
+
+def test_a_record_with_no_labels_to_write_is_recorded_without_calling_gh(tmp_path, monkeypatch):
+    """A repo that defines none of the taxonomy still gets its verdicts."""
+    import ledger as ledger_mod
+
+    _refusing_gh(monkeypatch)  # any call at all would fail the write
+    assert _apply(tmp_path, _plan_file(tmp_path, _record(1, labels=()))) == 0
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert [e["type"] for e in events] == ["issue.triaged", "triage.completed"]
+
+
+def test_a_pass_that_labelled_nothing_still_records_that_it_ran(tmp_path, monkeypatch):
+    """`loop.triage_due` reads `triage.completed`; without it the loop asks for
+    triage on every tick."""
+    import ledger as ledger_mod
+
+    _refusing_gh(monkeypatch)
+    _apply(tmp_path, _plan_file(tmp_path, _record(1)))
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert events[-1]["type"] == "triage.completed"
+    assert events[-1]["triaged"] == 0 and events[-1]["failed"] == 1

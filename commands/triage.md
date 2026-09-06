@@ -34,8 +34,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/triage.py" apply \
   --repo OWNER/NAME --plan /tmp/foreman-triage.json
 ```
 
-Labels go through `gh_safe.sh`, and every issue's verdict is appended to the
-ledger — so the next run skips anything that has not been edited since.
+Labels go through `gh_safe.sh`, and an issue's verdict is appended to the ledger
+only once its labels are actually written — so the next run skips anything that
+has not been edited since, and retries anything that failed. A failed write is
+reported with the reason `gh` gave (`{"applied": 0, "failed": [{"issue": 3,
+"error": "GraphQL: does not have the correct permissions…"}]}`) and the command
+exits non-zero. Read the reason before rerunning: a token without `issues:write`
+will fail identically every time.
 
 ## The two rules that keep this trustworthy
 

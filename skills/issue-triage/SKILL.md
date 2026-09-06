@@ -81,5 +81,10 @@ and how to extend them.
 
 ## Exit criteria
 
-Every open issue either has a ledger record or appears in `skipped`. The plan was
-shown before anything was applied. No label outside `gh label list` was used.
+Every open issue either has a ledger record, appears in `skipped`, or appears in
+`failed` with the reason its labels could not be written. The plan was shown
+before anything was applied. No label outside `gh label list` was used.
+
+A non-empty `failed` list is not a partial success to move on from. Nothing in
+it was recorded, so the verdicts are still to be applied; report the reason
+rather than rerunning into the same wall.

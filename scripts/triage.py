@@ -504,13 +504,24 @@ def fetch_labels(repo: str) -> list[str]:
     return [item["name"] for item in raw]
 
 
-def apply_labels(repo: str, number: int, labels: list[str], wrapper: Path) -> bool:
+def apply_labels(repo: str, number: int, labels: list[str], wrapper: Path) -> tuple[bool, str]:
+    """Write the labels; on failure, say why.
+
+    The reason is the point. Every write on this repo failed with "GraphQL:
+    does not have the correct permissions to execute AddLabelsToLabelable" and
+    the run reported `{"applied": 0, "failed": [...]}` — a list of numbers with
+    nothing to act on, while the explanation sat in a discarded stderr.
+    """
     if not labels:
-        return True
+        return True, ""
     args = [str(wrapper), "issue", "edit", str(number), "--repo", repo]
     for label in labels:
         args += ["--add-label", label]
-    return subprocess.run(args, capture_output=True, text=True).returncode == 0
+    proc = subprocess.run(args, capture_output=True, text=True)
+    if proc.returncode == 0:
+        return True, ""
+    reason = (proc.stderr or proc.stdout or "").strip() or f"gh exited {proc.returncode}"
+    return False, reason
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -564,14 +575,24 @@ def main(argv: list[str] | None = None) -> int:
 
     root = Path(args.ledger)
     ledger_mod.init(root.parent if root.name == ledger_mod.LEDGER_DIR else root)
-    failed = []
+    failed, applied = [], 0
     for record in plan.get("triaged", []):
-        ok = apply_labels(args.repo, record["issue"], record.get("labels", []), here / "gh_safe.sh")
+        ok, error = apply_labels(
+            args.repo, record["issue"], record.get("labels", []), here / "gh_safe.sh"
+        )
         if not ok:
-            failed.append(record["issue"])
+            # No ledger event for work that did not happen. The next run skips
+            # any issue whose record matches its updatedAt, so a triaged event
+            # written over a failed write is never revisited: the ledger claims
+            # a label the issue does not carry, permanently.
+            failed.append({"issue": record["issue"], "error": error})
+            continue
+        applied += 1
         ledger_mod.append(root, "issue.triaged", **record)
-    ledger_mod.append(root, "triage.completed", triaged=len(plan.get("triaged", [])))
-    print(json.dumps({"applied": len(plan.get("triaged", [])) - len(failed), "failed": failed}))
+    # Written even when it labelled nothing: loop.triage_due reads it to decide
+    # when to look for new issues, and without it the loop asks every tick.
+    ledger_mod.append(root, "triage.completed", triaged=applied, failed=len(failed))
+    print(json.dumps({"applied": applied, "failed": failed}))
     return 1 if failed else 0
 
 
