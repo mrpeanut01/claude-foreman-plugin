@@ -62,14 +62,25 @@ def test_the_agent_that_reviews_cannot_edit():
     assert not granted & {"Edit", "Write", "NotebookEdit"}, "the reviewer must not be able to fix"
 
 
-def test_every_hook_the_manifest_declares_runs_a_script_that_exists():
+def test_the_standard_hooks_file_is_not_also_listed_in_the_manifest():
+    """The loader reads hooks/hooks.json on its own; a manifest entry naming
+    the same file is a duplicate, and the loader fails the whole plugin for
+    it. That is how 0.4.0 installed as "failed to load". The manifest may
+    list additional hook files only."""
+    declared = MANIFEST.get("hooks")
+    listed = [declared] if isinstance(declared, str) else list(declared or [])
+    standard = (ROOT / "hooks" / "hooks.json").resolve()
+    assert all((ROOT / p).resolve() != standard for p in listed), (
+        "plugin.json lists hooks/hooks.json, which is loaded automatically"
+    )
+
+
+def test_every_hook_runs_a_script_that_exists_and_is_executable():
     """A hook naming a missing script fails every Bash call in every session
     the plugin is enabled in, which is a worse day than a missing command."""
-    declared = MANIFEST.get("hooks")
-    assert isinstance(declared, str), "hooks live in a file the manifest points at"
-    hooks = json.loads((ROOT / declared).read_text())["hooks"]
+    hooks = json.loads((ROOT / "hooks" / "hooks.json").read_text())["hooks"]
     commands = [h["command"] for entries in hooks.values() for e in entries for h in e["hooks"]]
-    assert commands, "the manifest points at a hooks file that declares nothing"
+    assert commands, "hooks/hooks.json declares nothing"
     for command in commands:
         script = ROOT / command.replace("${CLAUDE_PLUGIN_ROOT}/", "")
         assert script.exists(), f"hook runs {command}, which is not on disk"
