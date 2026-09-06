@@ -18,6 +18,15 @@ on every push; expensive jobs wait behind the cheap tier *and* the review gate.
 Waiting on an advisory check is pure wall clock; the loop ignores them for
 gating and reads them only for information.
 
+> Protection lists the names GitHub *reports*, not the job keys the workflow
+> declares: a matrix job `test` gates the merge as `test (3.11)` and
+> `test (3.12)`, and a job with a `name:` gates under that display name. So each
+> context is attributed back to the job that declared it, and a job whose cells
+> are required reads `required: true` even though its key appears in no context.
+> Partial coverage rounds **up** — one required cell is enough to block a merge.
+> Which cells those were is still in `required_checks`, which lists the contexts
+> verbatim.
+
 **`protection_known`** — whether branch protection could actually be read.
 
 > This one is load-bearing. When protection is absent or unreadable, every job
