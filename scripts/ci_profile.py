@@ -297,7 +297,14 @@ def build_profile(
         merged[name] = {
             **{
                 k: job[k]
-                for k in ("workflow", "workflow_file", "needs", "triggers", "path_filters")
+                for k in (
+                    "workflow",
+                    "workflow_file",
+                    "needs",
+                    "triggers",
+                    "path_filters",
+                    "pr_path_filters",
+                )
             },
             "display": job.get("display"),
             "p50": stat["p50"] if stat else None,

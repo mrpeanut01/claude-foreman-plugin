@@ -367,3 +367,24 @@ def test_a_pull_request_path_filter_is_recorded_as_one(tmp_path):
     )
     jobs = {j["name"]: j for j in ci_profile.parse_workflows(d)}
     assert jobs["docs"]["pr_path_filters"] == ["docs/**"]
+
+
+def test_build_profile_carries_pr_path_filters_through(tmp_path):
+    """The unit-level fix is worthless if the assembled profile drops the field."""
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          push:
+            paths: ['src/**']
+          pull_request:
+        jobs:
+          lint:
+            steps: [{run: ruff check}]
+    """)
+    )
+    profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
+    assert profile["jobs"]["lint"]["pr_path_filters"] == []
+    assert profile["jobs"]["lint"]["path_filters"] == ["src/**"]
