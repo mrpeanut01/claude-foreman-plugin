@@ -2,7 +2,10 @@
 """Render the ledger as a digest: what is moving, what is stuck, what needs you.
 
 CLI:
-    status.py [--root .foreman] [--config .foreman/config.json]
+    status.py [--ledger .foreman] [--config .foreman/config.json] [--json]
+
+`--root` is accepted as an alias for `--ledger`, for command lines written before
+the two names were reconciled.
 """
 
 from __future__ import annotations
@@ -102,12 +105,16 @@ def render(state: ledger.State, config: dict | None = None) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--root", default=f"./{ledger.LEDGER_DIR}")
+    # --ledger is the name triage.py, batch.py and loop.py use for the same
+    # directory. --root is kept as an alias rather than removed: it is what the
+    # /foreman:status command and every command line written before this fix
+    # pass, and breaking those to tidy a flag name is not a trade worth making.
+    parser.add_argument("--ledger", "--root", default=f"./{ledger.LEDGER_DIR}")
     parser.add_argument("--config", default=None)
     parser.add_argument("--json", action="store_true", help="emit raw state instead of the digest")
     args = parser.parse_args(argv)
 
-    root = Path(args.root)
+    root = Path(args.ledger)
     config = {}
     cfg_path = Path(args.config) if args.config else root / "config.json"
     if cfg_path.exists():

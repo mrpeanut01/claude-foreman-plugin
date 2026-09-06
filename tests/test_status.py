@@ -111,3 +111,21 @@ def test_an_escalation_for_a_batch_still_escalated_is_still_shown(root):
     ledger.transition(root, "b-002", "escalated")
     ledger.append(root, "escalation", batch="b-002", reason="needs a human")
     assert "needs a human" in status.render(ledger.load(root), config={})
+
+
+# --- issue #59: one name for the ledger directory across every script --------
+
+
+def test_the_ledger_is_named_ledger_here_as_it_is_in_every_other_script(root, capsys):
+    """triage.py, batch.py and loop.py all spell it --ledger, so a shared command
+    line has to work here too."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[42])
+    assert status.main(["--ledger", str(root)]) == 0
+    assert "b-001" in capsys.readouterr().out
+
+
+def test_the_older_root_spelling_still_works(root, capsys):
+    """Existing commands and docs pass --root; renaming must not break them."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[42])
+    assert status.main(["--root", str(root)]) == 0
+    assert "b-001" in capsys.readouterr().out
