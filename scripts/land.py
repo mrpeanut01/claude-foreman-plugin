@@ -192,6 +192,34 @@ def can_report_on_pr(spec: dict, base_branch: str | None = None) -> bool:
 _can_report = can_report_on_pr
 
 
+# A check result names the commit it ran against. Anything shorter than this is
+# not enough of a SHA to identify one.
+MIN_SHA_PREFIX = 7
+
+
+def describes_commit(entry: dict, expected_sha: str) -> bool:
+    """Whether this check result provably ran against `expected_sha`.
+
+    A result that names no commit is not evidence about this one. `gh pr checks`
+    reports whatever the pull request last had, so between a push and the new
+    workflow run registering it returns the PREVIOUS commit's results — which is
+    the whole hazard this predicate exists to close.
+    """
+    reported = str(entry.get("head_sha") or entry.get("headSha") or "")
+    if len(reported) < MIN_SHA_PREFIX or len(expected_sha or "") < MIN_SHA_PREFIX:
+        return False
+    # Either side may be abbreviated: `git rev-parse --short HEAD` on one side,
+    # a full API SHA on the other.
+    return reported.startswith(expected_sha) or expected_sha.startswith(reported)
+
+
+def checks_for_sha(checks: list[dict], expected_sha: str | None) -> list[dict]:
+    """The checks that describe `expected_sha`; all of them when no SHA is given."""
+    if not expected_sha:
+        return list(checks or [])
+    return [c for c in (checks or []) if describes_commit(c, expected_sha)]
+
+
 def _shapes(profile: dict) -> list[dict]:
     """The job list `ci_profile.attribute` wants: job key plus declared display name."""
     return [
@@ -237,7 +265,7 @@ def _is_advisory(name: str, profile: dict, shapes: list[dict] | None = None) -> 
     return bool(job) and job.get("required") is False
 
 
-def classify_checks(checks: list[dict], profile: dict) -> dict:
+def classify_checks(checks: list[dict], profile: dict, expected_sha: str | None = None) -> dict:
     shapes = _shapes(profile)
     summary = {
         "passed": [],
@@ -247,9 +275,15 @@ def classify_checks(checks: list[dict], profile: dict) -> dict:
         "advisory_pending": [],
         "human_gate_pending": [],
         "pending": [],
+        "stale": [],
     }
     for entry in checks or []:
         name = entry.get("name", "")
+        if expected_sha and not describes_commit(entry, expected_sha):
+            # Belongs to another commit, or names none at all. Counting it in
+            # either direction lets CI that never saw this code decide its gate.
+            summary["stale"].append(name)
+            continue
         state = (entry.get("state") or entry.get("bucket") or "").upper()
         advisory = _is_advisory(name, profile, shapes)
 
@@ -269,8 +303,21 @@ def classify_checks(checks: list[dict], profile: dict) -> dict:
     return summary
 
 
-def ci_gate(checks: list[dict], profile: dict, base_branch: str | None = None) -> str:
-    """Translate a check list into the ledger's ci_gate value."""
+def ci_gate(
+    checks: list[dict],
+    profile: dict,
+    base_branch: str | None = None,
+    expected_sha: str | None = None,
+) -> str:
+    """Translate a check list into the ledger's ci_gate value.
+
+    `expected_sha` is the commit this verdict is about. A gate verdict is a
+    statement about one commit — that is why the ledger resets both gates on
+    `batch.pushed` — so results that cannot be shown to describe that commit are
+    dropped before anything is judged. What is left may be nothing, and nothing
+    is `pending`: honest ignorance, never green.
+    """
+    checks = checks_for_sha(checks, expected_sha)
     summary = classify_checks(checks, profile)
     if summary["failed"]:
         return "failed"
@@ -475,7 +522,51 @@ def _gh_json(args: list[str]):
         return None
 
 
-def fetch_checks(repo: str, pr: int) -> list[dict]:
+def _from_check_run(run: dict, sha: str) -> dict:
+    """One check run in the shape the classifier reads."""
+    return {
+        "name": run.get("name") or "",
+        # A run still in flight has no conclusion yet; its status is the state.
+        "state": str(run.get("conclusion") or run.get("status") or "").upper(),
+        "description": (run.get("output") or {}).get("title") or "",
+        "workflow": (run.get("check_suite") or {}).get("workflow_name") or "",
+        "link": run.get("html_url") or "",
+        "head_sha": run.get("head_sha") or sha,
+    }
+
+
+def _from_status(status: dict, sha: str) -> dict:
+    """One legacy commit status — external CI that never moved to check runs.
+
+    `gh pr checks` reports these alongside check runs, so reading only check runs
+    would drop a required context and hang the gate.
+    """
+    return {
+        "name": status.get("context") or "",
+        "state": str(status.get("state") or "").upper(),
+        "description": status.get("description") or "",
+        "workflow": "",
+        "link": status.get("target_url") or "",
+        "head_sha": sha,
+    }
+
+
+def fetch_checks(repo: str, pr: int, sha: str | None = None) -> list[dict]:
+    """Check results for this pull request, tagged with the commit they describe.
+
+    Given a `sha`, both reads are SHA-addressed, so anything that comes back
+    provably ran against that commit. `gh pr checks` cannot say that: its output
+    carries no head SHA, and in the window between a push and the new run
+    registering it returns the previous commit's results.
+    """
+    if sha:
+        runs = _gh_json(["api", f"repos/{repo}/commits/{sha}/check-runs?per_page=100"]) or {}
+        combined = _gh_json(["api", f"repos/{repo}/commits/{sha}/status?per_page=100"]) or {}
+        return [
+            *[_from_check_run(run, sha) for run in (runs.get("check_runs") or [])],
+            *[_from_status(st, sha) for st in (combined.get("statuses") or [])],
+        ]
+
     raw = _gh_json(
         [
             "pr",
@@ -500,7 +591,7 @@ def fetch_pr(repo: str, pr: int) -> dict:
                 "--repo",
                 repo,
                 "--json",
-                "number,labels,isDraft,mergeable,reviewDecision,url,baseRefName",
+                "number,labels,isDraft,mergeable,reviewDecision,url,baseRefName,headRefOid",
             ]
         )
         or {}
@@ -518,6 +609,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--repo", required=True)
     p.add_argument("--profile", default=".foreman/ci-profile.json")
+    p.add_argument(
+        "--sha",
+        help="the commit this gate is about; defaults to the PR's current head",
+    )
     p = sub.add_parser("verdict")
     p.add_argument("--file", required=True)
     p = sub.add_parser("blockers")
@@ -534,12 +629,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "checks":
         profile = load_json(args.profile, {})
-        checks = fetch_checks(args.repo, args.pr)
-        base = (fetch_pr(args.repo, args.pr) or {}).get("baseRefName")
-        summary = classify_checks(checks, profile)
+        pr = fetch_pr(args.repo, args.pr) or {}
+        # GitHub knows the new head the moment a push lands; its checks appear
+        # later. Scoping the read to that head is what stops the previous
+        # commit's green from being reported as this commit's.
+        sha = args.sha or pr.get("headRefOid")
+        checks = fetch_checks(args.repo, args.pr, sha)
+        base = pr.get("baseRefName")
+        summary = classify_checks(checks, profile, sha)
         print(
             json.dumps(
-                {**summary, "base_branch": base, "gate": ci_gate(checks, profile, base)},
+                {
+                    **summary,
+                    "base_branch": base,
+                    "head_sha": sha,
+                    "gate": ci_gate(checks, profile, base, sha),
+                },
                 indent=2,
             )
         )

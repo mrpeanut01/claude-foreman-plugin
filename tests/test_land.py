@@ -549,3 +549,94 @@ def test_a_required_context_is_never_advisory_whatever_its_job_key_says():
     s = land.classify_checks([check("e2e (chrome)", "FAILURE")], MATRIX)
     assert s["failed"] == ["e2e (chrome)"]
     assert land.ci_gate([check("e2e (chrome)", "FAILURE")], MATRIX) == "failed"
+
+
+# --- issue #9: a gate verdict is a statement about one commit ----------------
+# The ledger resets both gates on `batch.pushed` for exactly this reason. If the
+# check list read straight afterwards still describes the previous commit, the
+# reset buys nothing.
+
+NEW = "a" * 40
+OLD = "b" * 40
+
+
+def sha_check(name, state, sha, description=""):
+    return {"name": name, "state": state, "description": description, "head_sha": sha}
+
+
+def test_checks_from_the_previous_commit_do_not_make_the_new_one_green():
+    stale = [sha_check(n, "SUCCESS", OLD) for n in ("lint", "unit", "integration")]
+    assert land.ci_gate(stale, PROFILE, expected_sha=NEW) == "pending"
+
+
+def test_checks_carrying_no_commit_at_all_cannot_prove_anything():
+    """`gh pr checks` output has no head SHA, so it can never be attributed."""
+    unattributable = [check(n, "SUCCESS") for n in ("lint", "unit", "integration")]
+    assert land.ci_gate(unattributable, PROFILE, expected_sha=NEW) == "pending"
+
+
+def test_checks_for_the_commit_being_gated_are_read_normally():
+    fresh = [sha_check(n, "SUCCESS", NEW) for n in ("lint", "unit", "integration")]
+    assert land.ci_gate(fresh, PROFILE, expected_sha=NEW) == "full_green"
+
+
+def test_a_failure_on_the_previous_commit_does_not_fail_the_new_one():
+    """Stale evidence is evidence of nothing, in either direction."""
+    mixed = [sha_check("lint", "FAILURE", OLD), sha_check("lint", "SUCCESS", NEW)]
+    s = land.classify_checks(mixed, PROFILE, expected_sha=NEW)
+    assert s["failed"] == [] and s["passed"] == ["lint"] and s["stale"] == ["lint"]
+
+
+def test_an_abbreviated_sha_still_identifies_the_commit():
+    fresh = [sha_check(n, "SUCCESS", NEW) for n in ("lint", "unit", "integration")]
+    assert land.ci_gate(fresh, PROFILE, expected_sha=NEW[:7]) == "full_green"
+
+
+def test_asking_for_no_particular_commit_keeps_the_unscoped_reading():
+    green = [check(n, "SUCCESS") for n in ("lint", "unit", "integration")]
+    assert land.ci_gate(green, PROFILE) == "full_green"
+    assert land.classify_checks(green, PROFILE)["stale"] == []
+
+
+def test_fetching_checks_for_a_sha_uses_the_sha_addressed_endpoints(monkeypatch):
+    calls = []
+
+    def fake_gh(args):
+        calls.append(" ".join(args))
+        if "check-runs" in args[-1]:
+            return {
+                "check_runs": [
+                    {
+                        "name": "test (3.11)",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": NEW,
+                        "output": {"title": "3 passed"},
+                        "html_url": "https://example/run",
+                    }
+                ]
+            }
+        return {
+            "statuses": [
+                {
+                    "context": "buildkite",
+                    "state": "pending",
+                    "description": "waiting for agent",
+                    "target_url": "https://example/status",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(land, "_gh_json", fake_gh)
+    entries = land.fetch_checks("o/r", 7, sha=NEW)
+
+    assert all(f"commits/{NEW}" in call for call in calls), calls
+    assert {e["name"] for e in entries} == {"test (3.11)", "buildkite"}
+    assert {e["state"] for e in entries} == {"SUCCESS", "PENDING"}
+    # Every entry must carry the commit it describes, or the gate cannot check it.
+    assert all(e["head_sha"] == NEW for e in entries)
+
+
+def test_fetching_checks_with_no_sha_still_reads_the_pull_request(monkeypatch):
+    monkeypatch.setattr(land, "_gh_json", lambda args: [{"name": "lint", "state": "SUCCESS"}])
+    assert land.fetch_checks("o/r", 7) == [{"name": "lint", "state": "SUCCESS"}]

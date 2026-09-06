@@ -35,6 +35,8 @@ Act on `gate`, never on the raw list.
 | `human_gate_pending` | Waiting on a person. Never wait — report and move on. |
 | `advisory_pending` / `advisory_failed` | Not required. Informational only. |
 | `failed` | Required and red. Fix or adjudicate. |
+| `stale` | Reported against a different commit. Proves nothing about this one. |
+| `head_sha` | The commit the verdict is about. |
 
 An unknown check counts as required. A check the profile has never seen may be a
 new required gate, and optimising it away is how a batch sits in the merge queue

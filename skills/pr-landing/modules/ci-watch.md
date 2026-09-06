@@ -13,6 +13,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" checks --pr <n> --repo OWNER/NAM
 | `advisory_pending` | No |
 | `advisory_failed` | No — informational |
 | `failed` | No — act now |
+| `stale` | Not this commit's results at all — see below |
+
+## Which commit are these results about?
+
+A gate verdict is a statement about **one commit**, which is why a push resets
+both gates. The read is therefore scoped to a SHA: `checks` resolves the PR's
+current head and asks the SHA-addressed endpoints for it, so a result that
+arrives provably ran against that commit. `--sha <commit>` overrides it — pass
+the batch's `head_sha` from the ledger when you want the gate judged against the
+commit you pushed rather than whatever the PR points at now.
+
+`gh pr checks` cannot do this: its output carries no head SHA, so in the window
+between a push and the new run registering it reports the *previous* commit's
+results. On a repo whose suite takes minutes, that window is minutes long, and a
+`full_green` read inside it merges code CI has never run.
+
+Anything landing in `stale` describes another commit and is ignored. An empty
+check list after that is `pending` — CI has not started on this commit yet —
+never green.
 
 Polling a human approval gate is an unattended loop waiting for someone who is
 asleep. Report `CHECKS_BLOCKED_BY_REVIEW_GATE`, move on, come back later.
