@@ -240,3 +240,19 @@ def test_a_gate_that_actually_changes_is_progress(root):
     before = ledger.fold(ledger.read_events(root)).batches["b-001"]["progress_at"]
     ledger.gate(root, "b-001", "ci", "cheap_green")
     assert ledger.fold(ledger.read_events(root)).batches["b-001"]["progress_at"] != before
+
+
+# --- issue #55: a duplicate batch.created must not destroy merged history -----
+
+
+def test_recreating_an_existing_batch_id_does_not_erase_it():
+    state = ledger.fold(
+        [
+            {"type": "batch.created", "batch": "b-001", "issues": [1, 2]},
+            {"type": "batch.state", "batch": "b-001", "from": "planned", "to": "merged"},
+            {"type": "batch.merged", "batch": "b-001", "pr": 7},
+            {"type": "batch.created", "batch": "b-001", "issues": [3]},
+        ]
+    )
+    assert state.batches["b-001"]["state"] == "merged"
+    assert state.batches["b-001"]["issues"] == [1, 2]

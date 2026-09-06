@@ -157,10 +157,19 @@ STOPWORDS = {
 
 from globs import compile_glob as _glob_to_re  # noqa: E402
 
+# A path may start with a dot (.github/, .claude/), so the leading dot has to be
+# optional rather than absent — dropping it silently unprotects every dotfile
+# directory listed in protected_paths. The optional dot must not be guarded by a
+# lookbehind: that would refuse every path preceded by a separator, which is how
+# relative paths (./infra/deploy.py), traceback paths (File "/app/src/x.py") and
+# permalinks are written, and refusing those re-opens the same hole. A sentence's
+# full stop is excluded already, since \.? must be followed by a word character.
+_PATH_RE = re.compile(r"\.?[\w][\w./-]*/[\w./-]+\.\w+")
+
 
 def _paths_in(text: str) -> list[str]:
     """File paths mentioned in the text, in order, without repeats."""
-    return list(dict.fromkeys(re.findall(r"[\w][\w./-]*/[\w./-]+\.\w+", text or "")))
+    return list(dict.fromkeys(_PATH_RE.findall(text or "")))
 
 
 def _text(issue: dict) -> str:
@@ -477,6 +486,7 @@ def main(argv: list[str] | None = None) -> int:
         if not ok:
             failed.append(record["issue"])
         ledger_mod.append(root, "issue.triaged", **record)
+    ledger_mod.append(root, "triage.completed", triaged=len(plan.get("triaged", [])))
     print(json.dumps({"applied": len(plan.get("triaged", [])) - len(failed), "failed": failed}))
     return 1 if failed else 0
 

@@ -10,7 +10,8 @@
     "max_batch_issues": 5,
     "max_batch_weight": 6,
     "max_ci_minutes_per_day": 400,
-    "stale_after_s": 5400
+    "stale_after_s": 5400,
+    "triage_every_s": 3600
   },
   "risk_ceiling": "medium",
   "protected_paths": [

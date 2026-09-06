@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import ledger  # noqa: E402
 import loop  # noqa: E402
 
+_JUST_NOW = datetime.now(UTC).isoformat()
+
 CONFIG = {
     "auto_merge": True,
     "caps": {"pushes": 3, "review_rounds": 5, "reruns": 2},
@@ -17,7 +19,13 @@ CONFIG = {
 }
 
 
-def state_with(*batches, issues=None, spend=()):
+def state_with(*batches, issues=None, spend=(), last_triage_at=_JUST_NOW):
+    """A world in which triage has just run, unless a test says otherwise.
+
+    Most tests are about what the loop does with work it already knows about,
+    so they need triage to be up to date; the tests that care about picking up
+    new issues pass last_triage_at explicitly.
+    """
     st = ledger.State()
     for b in batches:
         base = {
@@ -33,6 +41,7 @@ def state_with(*batches, issues=None, spend=()):
         st.batches[b["id"]] = base
     st.issues = issues or {}
     st.ci_spend = list(spend)
+    st.last_triage_at = last_triage_at
     return st
 
 
@@ -131,7 +140,7 @@ def test_a_ready_batch_with_a_blocker_escalates_rather_than_merging():
 
 
 def test_untriaged_issues_are_triaged_when_nothing_is_in_flight():
-    st = state_with(issues={})
+    st = state_with(issues={}, last_triage_at=None)
     assert loop.next_action(st, CONFIG)["do"] == "triage"
 
 
@@ -187,7 +196,7 @@ def test_an_exhausted_budget_stops_work_that_would_spend_ci():
 
 
 def test_an_exhausted_budget_still_allows_triage_which_costs_no_ci():
-    st = state_with(issues={}, spend=[_spend(60 * 60)])
+    st = state_with(issues={}, spend=[_spend(60 * 60)], last_triage_at=None)
     assert loop.next_action(st, CONFIG)["do"] == "triage"
 
 
@@ -302,3 +311,50 @@ def test_a_batch_with_no_timestamp_is_never_called_stale():
     st.batches["b-001"]["updated"] = None
     cfg = {**CONFIG, "limits": {**CONFIG["limits"], "stale_after_s": 3600}}
     assert loop.next_action(st, cfg)["do"] == "watch"
+
+
+# --- issue #53: triage must stay reachable after the first batch --------------
+
+
+def test_triage_is_offered_again_once_the_ledger_has_batches():
+    """The only path to triage used to require an empty ledger, so after the
+    first batch was ever created the loop could never pick up new issues."""
+    st = state_with({"id": "b-001", "state": "merged", "pr": 1}, last_triage_at=None)
+    assert loop.next_action(st, CONFIG)["do"] == "triage"
+
+
+def test_a_recent_triage_is_not_immediately_repeated():
+    st = state_with({"id": "b-001", "state": "merged", "pr": 1})
+    assert loop.next_action(st, CONFIG)["do"] == "idle"
+
+
+def test_a_stale_triage_is_offered_again():
+    stale = (datetime.now(UTC) - timedelta(hours=9)).isoformat()
+    st = state_with({"id": "b-001", "state": "merged", "pr": 1}, last_triage_at=stale)
+    assert loop.next_action(st, CONFIG)["do"] == "triage"
+
+
+def test_a_due_triage_outranks_an_exhausted_budget_because_it_costs_no_ci():
+    st = state_with(
+        {"id": "b-001", "state": "planned"}, spend=[_spend(60 * 60)], last_triage_at=None
+    )
+    assert loop.next_action(st, CONFIG)["do"] == "triage"
+
+
+def test_triage_can_be_switched_off_entirely():
+    st = state_with({"id": "b-001", "state": "merged", "pr": 1}, last_triage_at=None)
+    config = {**CONFIG, "limits": {**CONFIG["limits"], "triage_every_s": 0}}
+    assert loop.next_action(st, config)["do"] == "idle"
+
+
+def test_triage_is_switched_off_on_an_empty_ledger_too():
+    """The empty-ledger branch used to sit ahead of the refresh gate, so
+    triage_every_s: 0 was ignored on exactly the repo that has never run."""
+    st = state_with(last_triage_at=None)
+    config = {**CONFIG, "limits": {**CONFIG["limits"], "triage_every_s": 0}}
+    assert loop.next_action(st, config)["do"] == "idle"
+
+
+def test_an_empty_ledger_still_says_so():
+    st = state_with(last_triage_at=None)
+    assert loop.next_action(st, CONFIG)["reason"] == "nothing in the ledger yet"

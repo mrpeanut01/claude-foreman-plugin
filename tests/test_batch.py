@@ -153,3 +153,31 @@ def test_splitting_a_single_issue_batch_is_refused():
 def test_splitting_on_an_issue_outside_the_batch_is_refused():
     with pytest.raises(batch.CannotSplit):
         batch.split({"id": "b-001", "issues": [1, 2]}, failing_issue=9)
+
+
+# --- issue #55: batch ids must not collide with ids already in the ledger -----
+
+
+def _actionable(*numbers):
+    """All on one file, so no two may share a batch and each gets its own id."""
+    return [
+        {"issue": n, "verdict": "actionable", "size": "small", "risk": "low", "paths": ["same.py"]}
+        for n in numbers
+    ]
+
+
+def test_ids_continue_past_the_ones_already_in_the_ledger():
+    """Numbering restarted at b-001 on every run, so a second batching run
+    reused the id of an already-merged batch."""
+    groups = batch.group_issues(_actionable(11, 12), {}, taken={"b-001", "b-002"})
+    assert [g["id"] for g in groups] == ["b-003", "b-004"]
+
+
+def test_numbering_is_unchanged_on_a_fresh_ledger():
+    groups = batch.group_issues(_actionable(11, 12), {})
+    assert [g["id"] for g in groups] == ["b-001", "b-002"]
+
+
+def test_a_gap_in_taken_ids_is_not_reused():
+    groups = batch.group_issues(_actionable(11), {}, taken={"b-003"})
+    assert [g["id"] for g in groups] == ["b-004"]
