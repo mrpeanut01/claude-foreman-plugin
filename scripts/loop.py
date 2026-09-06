@@ -210,7 +210,10 @@ def next_action(state: ledger.State, config: dict) -> dict:
         }
 
     if triage_due(state, limits):
-        return {"do": "triage", "reason": "no triage within the refresh window; look for new issues"}
+        return {
+            "do": "triage",
+            "reason": "no triage within the refresh window; look for new issues",
+        }
 
     if budget_blocked:
         return {

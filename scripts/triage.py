@@ -157,7 +157,6 @@ STOPWORDS = {
 
 from globs import compile_glob as _glob_to_re  # noqa: E402
 
-
 # A path may start with a dot (.github/, .claude/), so the leading dot has to be
 # optional rather than absent — dropping it silently unprotects every dotfile
 # directory listed in protected_paths. The lookbehind keeps a sentence's full
