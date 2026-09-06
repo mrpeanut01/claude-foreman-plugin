@@ -67,10 +67,52 @@ def test_no_call_in_this_suite_writes_to_the_repositorys_own_ledger():
         ("run", "rerun", "123", "--failed"),
         ("run", "view", "123", "--log-failed"),
         ("api", "repos/o/r/branches/main/protection"),
+        ("api", "-X", "GET", "repos/o/r"),
+        ("api", "-XGET", "repos/o/r"),
+        ("api", "--method=GET", "repos/o/r"),
+        ("api", "-H", "Accept: application/vnd.github+json", "repos/o/r"),
+        ("api", "--paginate", "--jq", ".[].name", "repos/o/r/issues"),
+        ("api", "-q", "-.name", "repos/o/r"),
+        ("api", "repos/o/r/commits/abc123/check-runs?per_page=100"),
     ],
 )
 def test_allowed_operations_pass(args):
     assert run(*args).returncode == 0, f"{args} should be allowed"
+
+
+# pflag, which `gh` is built on, reads `--flag=value` and `-Xvalue` exactly as
+# it reads the two-token spellings. The wrapper knew only the two-token ones,
+# so every mutation below went through under another spelling.
+@pytest.mark.parametrize(
+    "args,why",
+    [
+        (("api", "-XDELETE", "repos/o/r/issues/1"), "joined short flag"),
+        (("api", "--method=DELETE", "repos/o/r/issues/1"), "equals form"),
+        (("api", "-X=DELETE", "repos/o/r/issues/1"), "short flag with equals"),
+        (("api", "--method=PUT", "repos/o/r/branches/main/protection"), "rewrites protection"),
+        (("api", "-F", "title=x", "repos/o/r/issues"), "-F is a typed body field"),
+        (("api", "-Ftitle=x", "repos/o/r/issues"), "joined typed field"),
+        (("api", "--field=title=x", "repos/o/r/issues"), "equals typed field"),
+        (("api", "-ftitle=x", "repos/o/r/issues"), "joined raw field"),
+        (("api", "--raw-field=title=x", "repos/o/r/issues"), "equals raw field"),
+        (("api", "--input=body.json", "repos/o/r/issues"), "equals body file"),
+        (("api", "--input", "-", "repos/o/r/issues"), "body from stdin"),
+        (("api", "graphql", "-F", "query=mutation{x}"), "a GraphQL mutation is a write"),
+        (("api", "--no-such-flag", "repos/o/r"), "an unknown flag might carry a body"),
+        (("pr", "merge", "7", "--admin=true"), "equals form of --admin"),
+        (("pr", "merge", "7", "--squash", "--admin=1"), "any value of --admin"),
+    ],
+)
+def test_every_spelling_of_a_mutation_is_refused(args, why):
+    result = run(*args)
+    assert result.returncode != 0, f"{args} must be refused: {why}"
+    assert "refused" in (result.stderr + result.stdout).lower()
+
+
+def test_a_value_that_starts_with_a_dash_is_a_value_not_a_flag():
+    """`--jq -.name` is a legal jq program; refusing its value would refuse the read."""
+    assert run("api", "--jq", "-.name", "repos/o/r").returncode == 0
+    assert run("api", "-H", "-weird-header", "repos/o/r").returncode == 0
 
 
 @pytest.mark.parametrize(
@@ -175,7 +217,11 @@ def test_argument_boundaries_survive_so_two_calls_are_never_confused(tmp_path):
 def test_every_record_keeps_its_utc_timestamp(tmp_path):
     run("issue", "view", "42", ledger=tmp_path)
     run("repo", "delete", "o/r", ledger=tmp_path)
-    for record in records(tmp_path):
+    written = records(tmp_path)
+    # Two calls, two records. Without this line the loop below is vacuous: a
+    # wrapper that stopped writing the log would pass it with nothing to check.
+    assert len(written) == 2
+    for record in written:
         datetime.strptime(record["ts"], "%Y-%m-%dT%H:%M:%SZ")
 
 
