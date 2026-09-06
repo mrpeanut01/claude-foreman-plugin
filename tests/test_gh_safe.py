@@ -9,13 +9,44 @@ from pathlib import Path
 import pytest
 
 WRAPPER = Path(__file__).resolve().parents[1] / "scripts" / "gh_safe.sh"
+REPO = WRAPPER.parents[1]
+
+# `run` used to set FOREMAN_LEDGER only when a test handed it one. Every other
+# call fell back to the wrapper's own default, which is relative, so the suite
+# appended a record to the audit log of whichever checkout pytest was run from:
+# the tests for the audit log were writing into the repository under test.
+# Nothing here may touch a real .foreman/, so a per-test directory is the
+# default and a test that wants another location has to name it.
+_SANDBOX = object()
 
 
-def run(*args, tmp_path=None):
+@pytest.fixture(autouse=True)
+def sandbox_ledger(tmp_path, monkeypatch):
+    """Point every call in this module at a throwaway ledger."""
+    monkeypatch.setenv("FOREMAN_LEDGER", str(tmp_path / "sandbox"))
+
+
+def run(*args, ledger=_SANDBOX, cwd=None):
+    """The wrapper, dry-run, auditing into `ledger` and running from `cwd`."""
     env = {**os.environ, "FOREMAN_DRY_RUN": "1"}
-    if tmp_path:
-        env["FOREMAN_LEDGER"] = str(tmp_path)
-    return subprocess.run([str(WRAPPER), *args], capture_output=True, text=True, env=env)
+    if ledger is not _SANDBOX:
+        env["FOREMAN_LEDGER"] = str(ledger)
+    return subprocess.run([str(WRAPPER), *args], capture_output=True, text=True, env=env, cwd=cwd)
+
+
+def contents(root):
+    """Every file under `root`, so a write nobody asked for is visible."""
+    if not root.is_dir():
+        return None
+    return {p.relative_to(root): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_no_call_in_this_suite_writes_to_the_repositorys_own_ledger():
+    """A call with no ledger of its own, from the repository, is the leaking shape."""
+    before = contents(REPO / ".foreman")
+    run("issue", "view", "42", cwd=REPO)
+    run("repo", "delete", "o/r", cwd=REPO)
+    assert contents(REPO / ".foreman") == before
 
 
 @pytest.mark.parametrize(
@@ -65,8 +96,8 @@ def records(tmp_path):
 
 
 def test_every_call_is_audited(tmp_path):
-    run("issue", "view", "42", tmp_path=tmp_path)
-    run("repo", "delete", "o/r", tmp_path=tmp_path)
+    run("issue", "view", "42", ledger=tmp_path)
+    run("repo", "delete", "o/r", ledger=tmp_path)
     allowed, refused = records(tmp_path)
     assert allowed["decision"] == "ALLOWED"
     assert allowed["argv"] == ["issue", "view", "42"]
@@ -91,19 +122,19 @@ The wrapper refused nothing here.
 
 
 def test_a_multi_line_body_stays_on_one_line_in_the_audit_log(tmp_path):
-    run("issue", "comment", "42", "--body", MARKDOWN_BODY, tmp_path=tmp_path)
+    run("issue", "comment", "42", "--body", MARKDOWN_BODY, ledger=tmp_path)
     assert len((tmp_path / "gh-audit.log").read_text().splitlines()) == 1
     (record,) = records(tmp_path)
     assert record["argv"] == ["issue", "comment", "42", "--body", MARKDOWN_BODY]
 
 
 def test_a_body_cannot_forge_a_record_of_a_call_that_never_happened(tmp_path):
-    run("issue", "comment", "42", "--body", MARKDOWN_BODY, tmp_path=tmp_path)
+    run("issue", "comment", "42", "--body", MARKDOWN_BODY, ledger=tmp_path)
     assert [r["decision"] for r in records(tmp_path)] == ["ALLOWED"]
 
 
 def test_a_refusal_records_the_multi_line_argument_that_provoked_it(tmp_path):
-    run("issue", "delete", "42", "--body", MARKDOWN_BODY, tmp_path=tmp_path)
+    run("issue", "delete", "42", "--body", MARKDOWN_BODY, ledger=tmp_path)
     (record,) = records(tmp_path)
     assert record["decision"] == "REFUSED"
     assert record["argv"] == ["issue", "delete", "42", "--body", MARKDOWN_BODY]
@@ -122,28 +153,28 @@ def test_a_refusal_records_the_multi_line_argument_that_provoked_it(tmp_path):
     ],
 )
 def test_an_argument_round_trips_through_the_audit_log(body, why, tmp_path):
-    run("issue", "comment", "42", "--body", body, tmp_path=tmp_path)
+    run("issue", "comment", "42", "--body", body, ledger=tmp_path)
     (record,) = records(tmp_path)
     assert record["argv"][-1] == body, why
 
 
 def test_argument_boundaries_survive_so_two_calls_are_never_confused(tmp_path):
-    run("issue", "comment", "42", "--body", "one two", tmp_path=tmp_path)
-    run("issue", "comment", "42", "--body", "one", "two", tmp_path=tmp_path)
+    run("issue", "comment", "42", "--body", "one two", ledger=tmp_path)
+    run("issue", "comment", "42", "--body", "one", "two", ledger=tmp_path)
     joined, split = records(tmp_path)
     assert joined["argv"] == ["issue", "comment", "42", "--body", "one two"]
     assert split["argv"] == ["issue", "comment", "42", "--body", "one", "two"]
 
 
 def test_every_record_keeps_its_utc_timestamp(tmp_path):
-    run("issue", "view", "42", tmp_path=tmp_path)
-    run("repo", "delete", "o/r", tmp_path=tmp_path)
+    run("issue", "view", "42", ledger=tmp_path)
+    run("repo", "delete", "o/r", ledger=tmp_path)
     for record in records(tmp_path):
         datetime.strptime(record["ts"], "%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_a_call_with_no_subcommand_is_refused_and_still_audited(tmp_path):
-    result = run(tmp_path=tmp_path)
+    result = run(ledger=tmp_path)
     assert result.returncode != 0
     (record,) = records(tmp_path)
     assert record["decision"] == "REFUSED"
