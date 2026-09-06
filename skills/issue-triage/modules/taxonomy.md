@@ -19,8 +19,9 @@ evidence — a traceback names five files and none of them is being changed. Two
 named files stay `medium`: it could be a move, or a caller and its callee, and
 sizing rounds up for the same reason risk does.
 
-Weight feeds `max_batch_weight`. A batch of two mediums (4) and a small (5) fills
-the default budget of 5; a single large (4) leaves room for one small.
+Weight feeds `max_batch_weight`. The default budget is 6, in `batch.py` and in
+`config.example.json` alike: three mediums fill it, so does a large and a
+medium, and two mediums and a small (5) leave room for one more small.
 
 Size is a rough proxy for how much of a batch's blast radius one issue occupies.
 It is not an estimate, and nothing schedules on it.
