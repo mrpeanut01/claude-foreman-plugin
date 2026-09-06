@@ -84,6 +84,7 @@ claude plugin install foreman@claude-foreman-plugin
 | `/foreman:batch` | Group actionable issues into batches sized by CI cost |
 | `/foreman:build` | Implement one batch in a worktree, test-first, behind a local gate |
 | `/foreman:land` | Open the PR, run review and CI concurrently, merge on green |
+| `/foreman:file-findings` | Turn a review's findings into issues, deduplicated against the tracker |
 | `/foreman:status` | What is in flight, what is stuck, what needs you |
 | `/foreman:ci-profile` | Measure the repo's real CI costs into `.foreman/ci-profile.json` |
 
