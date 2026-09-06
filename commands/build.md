@@ -43,6 +43,12 @@ every cheap-tier CI step, in CI's own words.
 | 1 | a check failed | it names the command and its output — fix that |
 | 2 | the gate could not finish | it names what it could not run — install that, or re-run with `--allow-unrunnable` and accept that CI runs the check first |
 
+`--base` defaults to `main`. On a repo whose trunk is `master`, `develop`, or
+anything else, pass it: `gate.py run --base master`. The gate exits 2 rather
+than guessing, because a diff it could not read is not a diff with nothing in
+it — reading an unreadable diff as empty is what makes an unrun gate report
+green.
+
 Exit 2 is why this is a command rather than a list. A check that never ran looks
 exactly like a check that passed, so the gate refuses to call a missing tool
 green. The last time this section was a list of steps to remember, `ruff format
