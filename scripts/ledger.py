@@ -163,7 +163,11 @@ def fold(events: list[dict]) -> State:
             state.issues[event["issue"]] = {k: v for k, v in event.items() if k != "type"}
 
         elif kind == "batch.created":
-            state.batches[bid] = _new_batch(event)
+            # Ids are meant to be unique. A repeat means an upstream numbering
+            # bug, and replacing the record would silently discard whatever the
+            # first batch of that id did — including a merge. Keep the original.
+            if bid not in state.batches:
+                state.batches[bid] = _new_batch(event)
 
         elif kind == "batch.state" and batch:
             if batch["state"] != event["to"]:

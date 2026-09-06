@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -55,7 +56,13 @@ def can_group(a: dict, b: dict, config: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def group_issues(records: list[dict], config: dict) -> list[dict]:
+def _id_number(batch_id: str) -> int:
+    """The numeric part of a batch id, so ids continue past it. 0 when unreadable."""
+    match = re.match(r"b-(\d+)", str(batch_id))
+    return int(match.group(1)) if match else 0
+
+
+def group_issues(records: list[dict], config: dict, taken: set[str] | None = None) -> list[dict]:
     """Greedily pack actionable issues into batches. Deterministic by issue number."""
     limits = config.get("limits", {})
     max_issues = limits.get("max_batch_issues", DEFAULT_MAX_ISSUES)
@@ -79,12 +86,30 @@ def group_issues(records: list[dict], config: dict) -> list[dict]:
         else:
             packed.append([record])  # incompatible with every open batch, so it starts one
 
+    # Ids must continue past everything the ledger already holds. Numbering from
+    # 1 each run reuses the id of an earlier batch, and the fold keys batches by
+    # id, so a merged batch's history is what gets overwritten.
+    taken = set(taken or ())
+    # Continue past the highest id ever issued rather than filling gaps: a gap
+    # may be an id whose events were pruned or rotated away, and reusing it
+    # would merge two unrelated batches under one key.
+    index = max((_id_number(t) for t in taken), default=0)
+
+    def _next_id() -> str:
+        nonlocal index
+        while True:
+            index += 1
+            candidate = f"b-{index:03d}"
+            if candidate not in taken:
+                taken.add(candidate)
+                return candidate
+
     batches = []
-    for index, group in enumerate(packed, start=1):
+    for group in packed:
         paths = sorted({p for r in group for p in (r.get("paths") or [])})
         batches.append(
             {
-                "id": f"b-{index:03d}",
+                "id": _next_id(),
                 "issues": [r["issue"] for r in group],
                 "paths": paths,
                 "risk": max((r.get("risk", "medium") for r in group), key=_rank),
@@ -143,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("plan")
     p.add_argument("--triage", required=True, help="output of `triage.py plan`")
+    p.add_argument("--ledger", default=".foreman")
     p.add_argument("--config", default=".foreman/config.json")
     p.add_argument("--profile", default=".foreman/ci-profile.json")
     p = sub.add_parser("apply")
@@ -155,7 +181,11 @@ def main(argv: list[str] | None = None) -> int:
         triage_out = json.loads(Path(args.triage).read_text())
         config = json.loads(Path(args.config).read_text()) if Path(args.config).exists() else {}
         profile = json.loads(Path(args.profile).read_text()) if Path(args.profile).exists() else {}
-        batches = group_issues(triage_out.get("triaged", []), config)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import ledger as ledger_mod
+
+        taken = set(ledger_mod.load(Path(args.ledger)).batches)
+        batches = group_issues(triage_out.get("triaged", []), config, taken=taken)
         print(
             json.dumps(
                 {"batches": batches, "savings": estimate_savings(batches, profile)}, indent=2
