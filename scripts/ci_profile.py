@@ -515,8 +515,8 @@ def _gh_json(args: list[str]) -> object:
     try:
         out = subprocess.run(["gh", *args], capture_output=True, text=True, check=True).stdout
         return json.loads(out) if out.strip() else None
-    except (subprocess.CalledProcessError, json.JSONDecodeError):
-        return None
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+        return None  # no gh on PATH is one more way to have no answer
 
 
 def current_repo() -> str | None:

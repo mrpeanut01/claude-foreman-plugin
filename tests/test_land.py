@@ -1,5 +1,6 @@
 """Landing: read CI honestly, judge the reviewer, and refuse to merge on doubt."""
 
+import importlib
 import json
 import subprocess
 import sys
@@ -1377,3 +1378,30 @@ def test_the_recipes_run_the_command_rather_than_stashing():
         assert "git stash push --" not in text.split("```bash")[1].split("```")[0] or (
             "revert-check" in text.split("```bash")[1]
         ), f"{doc} still tells the reviewer to stash"
+
+
+# --- no gh on PATH is one more way to have no answer --------------------------
+
+
+@pytest.mark.parametrize("module_name", ["land", "triage", "findings", "ci_profile"])
+def test_a_missing_gh_binary_reads_as_no_answer_rather_than_a_traceback(module_name, monkeypatch):
+    """Every other failure of the same call already reads as None. A fresh
+    runner without gh raised FileNotFoundError through `checks` and
+    `blockers` instead, where the documented answer is "unprovable is pending"."""
+    module = importlib.import_module(module_name)
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "gh")
+
+    monkeypatch.setattr(module.subprocess, "run", missing)
+    assert module._gh_json(["pr", "view", "1"]) is None
+
+
+def test_checks_without_gh_report_pending_not_a_crash(monkeypatch, capsys):
+    def missing(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "gh")
+
+    monkeypatch.setattr(land.subprocess, "run", missing)
+    assert land.main(["checks", "--pr", "1", "--repo", "o/r"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["gate"] == "pending" and out["head_sha"] is None

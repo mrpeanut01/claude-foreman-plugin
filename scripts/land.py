@@ -881,10 +881,18 @@ def merge_blockers(
 
 
 def _gh_json(args: list[str]):
+    """One `gh` call's JSON, or None for any way it can fail to answer.
+
+    `OSError` is the one `ledger._git_dir` already catches for the same
+    reason: no `gh` on PATH — a fresh runner, a hook that trimmed the PATH —
+    raised FileNotFoundError through `checks` and `blockers` as a traceback,
+    where every other failure of the same call reads as "unprovable is
+    pending".
+    """
     try:
         out = subprocess.run(["gh", *args], capture_output=True, text=True, check=True).stdout
         return json.loads(out) if out.strip() else None
-    except (subprocess.CalledProcessError, json.JSONDecodeError):
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
         return None
 
 
