@@ -720,10 +720,17 @@ def test_the_collision_merge_never_widens_two_declarations_into_no_filter(tmp_pa
     assert land.can_report_on_pr(spec, "develop") is False
 
 
-def test_the_open_pull_request_types_agree_with_the_gate_that_reads_them():
-    """The merge and the gate must mean the same thing by "still open", and they
-    are in different modules because land.py imports ci_profile, not the reverse.
+def test_a_type_that_always_reports_can_also_report_while_the_pull_request_is_open():
+    """The two sets answer different questions and must not be conflated.
+
+    `ci_profile.OPEN_PR_TYPES` is the broad one: can this declaration ever put a
+    check on a live PR, as opposed to `types: [closed]`, which cannot.
+    `land.PR_UNCONDITIONAL_TYPES` is the narrow one: will it report on *every*
+    PR, which is what makes a job safe to require. They were briefly equal, and
+    that was issue #49 — requiring a job gated on `ready_for_review` hangs the
+    gate for every PR that opens ready. The surviving invariant is containment:
+    a type that always reports must at least be able to report while open.
     """
     import land
 
-    assert set(ci_profile.OPEN_PR_TYPES) == set(land.PR_OPEN_TYPES)
+    assert set(land.PR_UNCONDITIONAL_TYPES) <= set(ci_profile.OPEN_PR_TYPES)

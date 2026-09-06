@@ -304,9 +304,10 @@ _FILTERS = _ALLOW_FILTERS + _IGNORE_FILTERS
 
 # Activity types that occur while a pull request is still open. A trigger
 # restricted to any other type — `types: [closed]` — cannot put a check on a live
-# PR at all. land.PR_OPEN_TYPES is the same set, read at the other end of the
-# profile; land.py imports this module, so the constant cannot live there. The
-# two are asserted equal in tests/test_ci_profile.py.
+# PR at all. This is deliberately broader than land.PR_UNCONDITIONAL_TYPES, which
+# asks the stricter question of whether a job reports on *every* PR and so may be
+# required; conflating the two was issue #49. Containment between them is asserted
+# in tests/test_ci_profile.py.
 OPEN_PR_TYPES = frozenset({"opened", "synchronize", "reopened", "ready_for_review", "edited"})
 
 
