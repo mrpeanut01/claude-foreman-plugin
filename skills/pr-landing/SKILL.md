@@ -71,6 +71,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> -
 `auto_merge` — so you fix or escalate in one pass rather than discovering
 obstacles one at a time.
 
+## File the findings before acting on them
+
+Every review verdict, clean or not, goes through:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/findings.py" plan \
+  --verdict /tmp/verdict.json --repo OWNER/NAME --batch <id> --pr <n> --round <r>
+```
+
+High and medium findings get fixed in this PR. Low findings will not be fixed
+here and must become issues, or they are gone — an issue is the only artefact
+`/foreman:triage` reads. See [file-findings](../../commands/file-findings.md).
+
 ## After the merge
 
 Record the verdict for the scoreboard:

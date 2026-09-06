@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from ci_profile import attribute  # noqa: E402
 from globs import matches_any  # noqa: E402
 
 PASSED = {"SUCCESS", "PASS", "NEUTRAL", "SKIPPED"}
@@ -45,6 +46,37 @@ SERIOUS = {"high", "medium", "critical", "blocker"}
 FLAKE_CONFIDENCE = 0.7
 
 CLEAR = {"ci": "full_green", "review": "clean"}
+
+# Two reviewers disagreeing forever is deadlock; two reviewers finding different
+# things each round is progress. Only the first is worth escalating on.
+REVIEW_MATCH_THRESHOLD = 0.5
+DEFAULT_REVIEW_CEILING = 5
+_WORD = re.compile(r"[a-z0-9]+")
+_NOISE = {
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "no",
+    "not",
+    "at",
+    "in",
+    "on",
+    "of",
+    "to",
+    "and",
+    "or",
+    "it",
+    "its",
+    "this",
+    "that",
+    "still",
+    "all",
+    "has",
+    "have",
+}
 
 
 # --- reading the check list ---------------------------------------------------
@@ -103,10 +135,18 @@ def ci_gate(checks: list[dict], profile: dict) -> str:
 
     required = list(profile.get("required_checks") or [])
     if not required:
-        if not profile.get("protection_known", False) and not checks:
-            # No protection to read and nothing has reported yet. Calling that
-            # green merges a PR having run zero CI.
-            return "pending"
+        if not profile.get("protection_known", False):
+            # No protection to read, so nothing is known to be optional. Green
+            # requires every job the workflows declare to have actually passed —
+            # a partially reported list is not a complete one.
+            declared = profile.get("jobs") or {}
+            if not declared:
+                return "full_green" if not summary["actionable_pending"] else "pending"
+            shapes = [
+                {"name": name, "display": spec.get("display")} for name, spec in declared.items()
+            ]
+            covered = {attribute(name, shapes) for name in summary["passed"]}
+            return "full_green" if all(n in covered for n in declared) else "pending"
         # Protection says nothing is required, so nothing can block.
         return "full_green" if not summary["actionable_pending"] else "pending"
 
@@ -165,6 +205,53 @@ def validate_review(verdict: dict) -> tuple[bool, list[str]]:
         errors.append("revert_check=still_passed contradicts behaviour_change=false")
 
     return not errors, errors
+
+
+# --- review convergence -------------------------------------------------------
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in _WORD.findall((text or "").lower()) if w not in _NOISE and len(w) > 1}
+
+
+def same_finding(a: dict, b: dict, threshold: float = REVIEW_MATCH_THRESHOLD) -> bool:
+    """Whether two findings are the same complaint, allowing for rewording."""
+    if a.get("file") != b.get("file"):
+        return False
+    if str(a.get("severity", "")).lower() != str(b.get("severity", "")).lower():
+        return False
+    wa, wb = _words(a.get("summary")), _words(b.get("summary"))
+    if not wa or not wb:
+        return False
+    return len(wa & wb) / len(wa | wb) >= threshold
+
+
+def review_stalled(
+    rounds: list[list[dict]], hard_ceiling: int = DEFAULT_REVIEW_CEILING
+) -> str | None:
+    """Reason to stop reviewing, or None to allow another round.
+
+    Rounds elapsed is the wrong measure. A builder and reviewer who surface a
+    different real defect each round are converging, however many rounds it
+    takes; two who trade the same finding are not. Only blocking severities
+    count — a repeated `low` never stood between the batch and a merge.
+    """
+    if len(rounds) >= hard_ceiling:
+        return f"review reached the hard ceiling of {hard_ceiling} rounds"
+    if len(rounds) < 2:
+        return None
+
+    def blocking(round_findings):
+        return [f for f in round_findings if str(f.get("severity", "")).lower() in SERIOUS]
+
+    previous, current = blocking(rounds[-2]), blocking(rounds[-1])
+    for now in current:
+        if any(same_finding(before, now) for before in previous):
+            return (
+                f"the same finding survived a round (repeat): "
+                f"{now.get('file')} - {str(now.get('summary', ''))[:80]}"
+            )
+    return None
 
 
 # --- flake or bug -------------------------------------------------------------

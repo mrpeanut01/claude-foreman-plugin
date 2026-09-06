@@ -297,3 +297,115 @@ def test_a_pr_with_no_checks_yet_is_not_green_when_protection_is_unknown():
 def test_no_required_checks_under_known_protection_is_a_deliberate_choice():
     known = {"required_checks": [], "protection_known": True, "jobs": {}}
     assert land.ci_gate([], known) == "full_green"
+
+
+# --- convergence, not rounds elapsed -----------------------------------------
+# The cap was justified as "a third round of an agent negotiating with an agent
+# is not going to converge". Rounds elapsed does not measure that. Findings that
+# survive a round do.
+
+
+def finding(file, severity="medium", summary="the retry loop has no ceiling"):
+    return {"file": file, "severity": severity, "summary": summary}
+
+
+def test_a_finding_that_survives_a_round_means_no_convergence():
+    rounds = [[finding("src/a.py")], [finding("src/a.py")]]
+    assert "repeat" in land.review_stalled(rounds, hard_ceiling=5).lower()
+
+
+def test_different_findings_each_round_is_progress_not_deadlock():
+    rounds = [
+        [finding("src/a.py", summary="retry loop has no ceiling")],
+        [finding("src/b.py", summary="token vocabulary lost its plurals")],
+    ]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_rewording_the_same_finding_still_counts_as_a_repeat():
+    rounds = [
+        [finding("src/a.py", summary="the retry loop has no ceiling")],
+        [finding("src/a.py", summary="retry loop has no upper ceiling at all")],
+    ]
+    assert land.review_stalled(rounds, hard_ceiling=5) is not None
+
+
+def test_the_same_file_at_a_different_severity_is_a_different_finding():
+    rounds = [[finding("src/a.py", severity="high")], [finding("src/a.py", severity="low")]]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_a_repeated_low_finding_does_not_stall_the_review():
+    """Low findings never block a clean verdict, so repeating one is not deadlock."""
+    rounds = [[finding("src/a.py", severity="low")], [finding("src/a.py", severity="low")]]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_only_consecutive_rounds_are_compared():
+    rounds = [[finding("src/a.py")], [finding("src/b.py")], [finding("src/a.py")]]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_a_hard_ceiling_still_bounds_an_unattended_loop():
+    rounds = [[finding(f"src/{n}.py")] for n in range(5)]
+    reason = land.review_stalled(rounds, hard_ceiling=5)
+    assert reason and "ceiling" in reason.lower()
+
+
+def test_one_round_is_never_stalled():
+    assert land.review_stalled([[finding("src/a.py")]], hard_ceiling=5) is None
+
+
+def test_no_rounds_is_never_stalled():
+    assert land.review_stalled([], hard_ceiling=5) is None
+
+
+def test_a_clean_round_after_findings_is_not_a_repeat():
+    rounds = [[finding("src/a.py")], []]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_the_stall_reason_names_the_finding_that_survived():
+    rounds = [
+        [finding("scripts/triage.py", summary="auth vocabulary is incomplete")],
+        [finding("scripts/triage.py", summary="the auth vocabulary is still incomplete")],
+    ]
+    assert "scripts/triage.py" in land.review_stalled(rounds, hard_ceiling=5)
+
+
+# --- issue #12: a partial check list is not a complete one --------------------
+
+
+def test_a_partially_reported_check_list_is_not_green_when_protection_is_unknown():
+    """`test` needs `lint`; the window after lint passes and before test registers."""
+    only_lint = [check("lint", "SUCCESS")]
+    assert land.ci_gate(only_lint, UNPROTECTED) == "pending"
+
+
+def test_every_declared_job_must_report_before_green_under_unknown_protection():
+    partial = [check("lint", "SUCCESS"), check("test", "PENDING")]
+    assert land.ci_gate(partial, UNPROTECTED) == "pending"
+
+
+def test_matrix_cells_satisfy_the_job_they_belong_to():
+    """Otherwise the fix above would deadlock every matrix repo."""
+    profile = {
+        "required_checks": [],
+        "protection_known": False,
+        "jobs": {
+            "lint": {"tier": "cheap", "display": None},
+            "test": {"tier": "cheap", "display": None},
+        },
+    }
+    matrix = [
+        check("lint", "SUCCESS"),
+        check("test (3.11)", "SUCCESS"),
+        check("test (3.12)", "SUCCESS"),
+        check("test (3.13)", "SUCCESS"),
+    ]
+    assert land.ci_gate(matrix, profile) == "full_green"
+
+
+def test_a_profile_declaring_no_jobs_falls_back_to_nothing_pending():
+    bare = {"required_checks": [], "protection_known": False, "jobs": {}}
+    assert land.ci_gate([check("something", "SUCCESS")], bare) == "full_green"

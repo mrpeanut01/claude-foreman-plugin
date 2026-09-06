@@ -72,16 +72,18 @@ LOW_RISK_HINTS = (
     r"changelogs?",
 )
 HIGH_RISK_HINTS = (
-    # `authentic|authoriz` rather than `auth`, so "Author" does not score high.
-    r"authentic\w*",
-    r"authoriz\w*",
-    r"unauthentic\w*",
-    r"unauthoriz\w*",
+    # Bare `auth` is safe: the trailing \b already excludes Author and authoring.
+    # The leading \w* catches Reauthentication and Unauthorised. en-GB spellings
+    # matter because this project writes en-GB, so its reporters will too.
+    r"auth",
     r"authn",
     r"authz",
-    r"oauth",
+    r"oauth\d*",
+    r"\w*authentic\w*",
+    r"\w*authoriz\w*",
+    r"\w*authoris\w*",
     r"tokens?",
-    r"passwords?",
+    r"password\w*",
     r"sessions?",
     r"credentials?",
     r"permissions?",

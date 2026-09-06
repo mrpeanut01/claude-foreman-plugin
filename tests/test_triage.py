@@ -407,3 +407,35 @@ def test_lookalike_words_do_not_inflate_risk(title):
 def test_an_empty_hint_list_matches_nothing():
     """`\\b()\\b` compiles to something that matches any word."""
     assert triage._has("anything at all", ()) is False
+
+
+# --- issue #11: the vocabulary lost bare `auth`, en-GB spellings, and oauth2 ---
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "auth bypass on the admin API",
+        "Fix auth middleware ordering",
+        "Unauthorised access to the admin API",
+        "Authorisation header is dropped",
+        "authorisation bypass in the gateway",
+        "oauth2 flow is broken",
+        "Passwordless login never expires",
+        "Reauthentication is skipped after logout",
+    ],
+)
+def test_en_gb_spellings_and_bare_auth_still_score_high(title):
+    assert triage.risk_level(issue(title=title, body="Details."), []) == "high", title
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Author of the commit is wrong",
+        "Authoring guide needs an update",
+        "Co-authored-by trailer is malformed",
+    ],
+)
+def test_author_is_still_not_an_auth_issue(title):
+    assert triage.risk_level(issue(title=title, body="Details."), []) != "high", title

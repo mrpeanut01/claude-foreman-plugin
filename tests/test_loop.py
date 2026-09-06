@@ -11,7 +11,7 @@ import loop  # noqa: E402
 
 CONFIG = {
     "auto_merge": True,
-    "caps": {"pushes": 3, "review_rounds": 2, "reruns": 2},
+    "caps": {"pushes": 3, "review_rounds": 5, "reruns": 2},
     "limits": {"max_open_prs": 2, "max_ci_minutes_per_day": 60},
     "protected_paths": [],
 }
@@ -196,3 +196,73 @@ def test_no_configured_budget_means_no_budget_limit():
     cfg = {**CONFIG, "limits": {"max_open_prs": 2}}
     assert loop.budget_remaining(st, cfg) is None
     assert loop.next_action(st, cfg)["do"] == "build"
+
+
+# --- review convergence, not rounds elapsed ----------------------------------
+
+
+def _with_reviews(st, batch_id, *rounds):
+    st.reviews = [
+        {"batch": batch_id, "verdict": "changes_requested", "findings": list(f)} for f in rounds
+    ]
+    return st
+
+
+def test_repeating_findings_escalate():
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "open",
+            "pr": 1,
+            "ci_gate": "full_green",
+            "review_gate": "changes_requested",
+        }
+    )
+    f = [{"file": "src/a.py", "severity": "high", "summary": "auth vocabulary is incomplete"}]
+    _with_reviews(st, "b-001", f, f)
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "escalate" and "repeat" in action["reason"].lower()
+
+
+def test_different_findings_each_round_keep_the_batch_moving():
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "open",
+            "pr": 1,
+            "ci_gate": "full_green",
+            "review_gate": "changes_requested",
+        }
+    )
+    _with_reviews(
+        st,
+        "b-001",
+        [{"file": "src/a.py", "severity": "high", "summary": "retry loop unbounded"}],
+        [{"file": "src/b.py", "severity": "high", "summary": "plurals lost from vocabulary"}],
+    )
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] != "escalate", "progress is not deadlock"
+
+
+def test_a_batch_whose_review_requested_changes_is_worked_not_watched():
+    """A gate that has already answered is not something to wait on."""
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "open",
+            "pr": 1,
+            "ci_gate": "full_green",
+            "review_gate": "changes_requested",
+        }
+    )
+    _with_reviews(
+        st, "b-001", [{"file": "src/a.py", "severity": "high", "summary": "retry loop unbounded"}]
+    )
+    assert loop.next_action(st, CONFIG)["do"] == "unblock"
+
+
+def test_a_batch_still_awaiting_its_review_is_watched():
+    st = state_with(
+        {"id": "b-001", "state": "open", "pr": 1, "ci_gate": "full_green", "review_gate": "pending"}
+    )
+    assert loop.next_action(st, CONFIG)["do"] == "watch"

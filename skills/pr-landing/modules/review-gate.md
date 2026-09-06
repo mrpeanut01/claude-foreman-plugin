@@ -56,9 +56,26 @@ both clean. Two reviews cost less than one bad merge into an auth path.
 
 ## Rounds
 
-Cap at 2. Builder addresses findings, reviewer re-reviews, twice. A third round
-means they are not converging, and a third round of an agent negotiating with an
-agent is not going to converge either. Escalate.
+**Escalate when findings repeat, not when rounds elapse.**
+
+`land.review_stalled(rounds, hard_ceiling)` compares the blocking findings of the
+last two rounds. A finding that survives a round — same file, same severity,
+substantially the same complaint — means the builder and reviewer are trading the
+same objection, and another round will trade it again. That is deadlock, and it
+escalates.
+
+Different findings each round is the opposite: the reviewer is working through
+layers, and quality is rising. Let it run.
+
+> This rule replaced a flat cap of 2, which was justified as *"a third round of an
+> agent negotiating with an agent is not going to converge."* Dogfooding showed
+> that rounds elapsed does not measure that at all. Two rounds on this repo's own
+> first PR found entirely different real defects and the cap fired anyway, on a
+> case its own rationale did not describe.
+
+`caps.review_rounds` (default 5) remains as a **hard ceiling** — a runaway bound
+for an unattended loop, not the convergence test. A repeated `low` finding never
+stalls anything, since a low finding never blocked a clean verdict to begin with.
 
 Every push resets both gates, so a re-review is a full re-review — a stale clean
 verdict never carries over to new code.
