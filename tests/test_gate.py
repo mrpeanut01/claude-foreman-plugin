@@ -66,6 +66,12 @@ def only_python3(name):
     return None if name == "python" else "/bin/" + name
 
 
+# `run: true` is a step that passes and needs nothing installed — `true` is a
+# shell builtin. It is also, unquoted, a YAML *boolean*, which is why the
+# fixtures below leave it that way: Actions reads `run:` as a string and runs
+# the two characters the author wrote, and a gate that stringifies PyYAML's bool
+# into `True` instead looks for a program no machine has. See
+# `test_a_yaml_boolean_run_step_is_the_command_the_author_wrote`.
 CHECK_ONLY = """
     name: CI
     on: [pull_request]
@@ -335,6 +341,63 @@ def test_the_python_alias_leaves_every_other_word_alone(monkeypatch):
     adapted, note = gate.adapt_command("uses-python3 --python-version=3.11")
     assert adapted == "uses-python3 --python-version=3.11"
     assert note is None
+
+
+# --- what a `run:` value actually says ----------------------------------------
+
+
+def test_a_yaml_boolean_run_step_is_the_command_the_author_wrote(repo):
+    """`run: true` is the shell command `true`, not a program called `True`.
+
+    Unquoted, YAML resolves it to a boolean, because YAML does not know Actions
+    types `run:` as a string. Stringifying that bool the Python way yields
+    `True` — a name no POSIX machine has — so the gate declared an ordinary
+    no-op step unrunnable and refused to go green. It hid on macOS, where the
+    filesystem is case-insensitive and `which("True")` cheerfully answers
+    /usr/bin/true, and only showed up on Linux.
+    """
+    workflow(repo, CHECK_ONLY)
+    report = run(repo, profile=profile(lint={}))
+    assert report["status"] == "green"
+    assert [s["command"] for s in report["steps"] if s["job"] == "lint"] == ["true"]
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (True, "true"),  # `run: true`, and `run: on`, and `run: yes`
+        (False, "false"),  # `run: false`, and `run: off`, and `run: no`
+        ("  ruff check .  ", "ruff check ."),
+        (3, "3"),
+    ],
+)
+def test_a_run_value_renders_as_the_scalar_the_workflow_holds(value, expected):
+    assert gate.run_text(value) == expected
+
+
+@pytest.mark.parametrize("value", [None, ["ruff", "check"], {"shell": "bash"}])
+def test_a_run_value_that_is_no_command_at_all_renders_as_nothing(value):
+    """Not every `run:` denotes a command, and the ones that do not must not be
+    invented into one — a made-up command name reports a missing tool nobody
+    ever asked for, which reads exactly like a real one."""
+    assert gate.run_text(value) == ""
+
+
+def test_a_step_whose_run_block_is_empty_blocks_rather_than_passing(repo):
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        jobs:
+          lint:
+            steps:
+              - run:
+        """,
+    )
+    report = run(repo, profile=profile(lint={}))
+    assert report["status"] == "blocked"
+    assert "run:" in report["unrunnable"][0]["reason"]
 
 
 # --- steps that verify nothing ------------------------------------------------

@@ -365,6 +365,28 @@ def _entry(step_id: str, job: str, **overrides) -> dict:
     }
 
 
+def run_text(value: object) -> str:
+    """The shell command a `run:` value denotes, or "" when it denotes none.
+
+    Actions types `run:` as a string, so `run: true` is the command `true`. YAML
+    does not know that, and PyYAML resolves an unquoted `true`, `on` or `no` to a
+    Python bool; `str()` on one of those yields `True`, which names a program no
+    machine has. The gate then reported an ordinary no-op step as a missing tool
+    — and worse, hid it: on a case-insensitive filesystem `which("True")` finds
+    /usr/bin/true, so this was green on macOS and blocked on Linux.
+
+    So undo the resolution rather than stringify the artefact: a scalar renders
+    the way the author wrote it, booleans lower-case. A list or a mapping is not
+    a command in any shell; it gets "" and the caller blocks, because inventing
+    one would be the gate guessing at what CI runs.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (str, int, float)):
+        return str(value).strip()
+    return ""
+
+
 def plan_step(job_name: str, index: int, step: dict) -> dict:
     entry = _entry(
         f"{job_name}#{index}",
@@ -377,8 +399,10 @@ def plan_step(job_name: str, index: int, step: dict) -> dict:
         uses = step.get("uses") or "no run: block"
         return _skipped(entry, f"{uses} is a GitHub Action; only Actions can run it")
 
-    command = str(step["run"]).strip()
+    command = run_text(step["run"])
     entry["command"] = command
+    if not command:
+        return _blocked(entry, "its `run:` value is empty, or is not a command at all")
     entry["kind"] = "test" if TEST_RUNNER.search(command) else "check"
     if PROVISIONING.search(command):
         return _skipped(
