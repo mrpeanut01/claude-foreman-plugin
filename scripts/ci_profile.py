@@ -97,6 +97,7 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
                 "paths_ignore": list((cfg or {}).get("paths-ignore") or []),
                 "branches": list((cfg or {}).get("branches") or []),
                 "tags": list((cfg or {}).get("tags") or []),
+                "types": list((cfg or {}).get("types") or []),
             }
             for event, cfg in on.items()
             if isinstance(cfg, dict) or cfg is None
@@ -160,7 +161,13 @@ def attribute(reported: str, jobs: list[dict]) -> str | None:
         # A display name built from a matrix expression cannot be reversed.
         if display and not _EXPRESSION.search(display):
             candidates[display] = job["name"]
-    for probe_name in (reported, _MATRIX_SUFFIX.sub("", reported)):
+    # A reusable workflow reports as "caller / called-job"; the caller is the job
+    # the workflow file declares.
+    probes = [reported, _MATRIX_SUFFIX.sub("", reported)]
+    if " / " in reported:
+        head = reported.split(" / ")[0].strip()
+        probes += [head, _MATRIX_SUFFIX.sub("", head)]
+    for probe_name in probes:
         if probe_name in candidates:
             return candidates[probe_name]
     return None
@@ -286,6 +293,11 @@ def impacted_tests(changed: list[str], repo_root: Path) -> tuple[list[str], bool
 # --- assembly -----------------------------------------------------------------
 
 
+def _filter_count(cfg: dict) -> int:
+    """How restricted a trigger is. Fewer filters means it fires more often."""
+    return sum(1 for key in ("paths", "paths_ignore", "branches", "tags", "types") if cfg.get(key))
+
+
 def build_profile(
     workflow_dir: Path,
     job_runs: list[dict],
@@ -308,9 +320,17 @@ def build_profile(
             by_name[job["name"]] = dict(job)
             continue
         seen["triggers"] = sorted(set(seen["triggers"]) | set(job["triggers"]))
-        seen["events"] = {**job.get("events", {}), **seen.get("events", {})}
-        seen["path_filters"] = sorted(set(seen["path_filters"]) & set(job["path_filters"]))
-        seen["pr_path_filters"] = sorted(set(seen["pr_path_filters"]) & set(job["pr_path_filters"]))
+        # One check name, several declarations: if ANY of them fires
+        # unconditionally a check will appear, so keep the most permissive config
+        # per event. Order-independent, unlike overwriting.
+        merged_events = dict(seen.get("events") or {})
+        for event, cfg in (job.get("events") or {}).items():
+            current = merged_events.get(event)
+            if current is None or _filter_count(cfg) < _filter_count(current):
+                merged_events[event] = cfg
+        seen["events"] = merged_events
+        seen["path_filters"] = sorted(set(seen["path_filters"]) | set(job["path_filters"]))
+        seen["pr_path_filters"] = sorted(set(seen["pr_path_filters"]) | set(job["pr_path_filters"]))
     jobs = list(by_name.values())
 
     merged, unmeasured = {}, []

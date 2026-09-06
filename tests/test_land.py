@@ -413,9 +413,10 @@ def test_matrix_cells_satisfy_the_job_they_belong_to():
     assert land.ci_gate(matrix, profile) == "full_green"
 
 
-def test_a_profile_declaring_no_jobs_falls_back_to_nothing_pending():
+def test_a_profile_declaring_no_jobs_is_never_green_on_an_unrelated_check():
+    """Superseded by tests/test_gate_spec.py: an unknown check proves nothing."""
     bare = {"required_checks": [], "protection_known": False, "jobs": {}}
-    assert land.ci_gate([check("something", "SUCCESS")], bare) == "full_green"
+    assert land.ci_gate([check("something", "SUCCESS")], bare) == "pending"
 
 
 # --- issue #18: a job that cannot report must not pin the gate ---------------

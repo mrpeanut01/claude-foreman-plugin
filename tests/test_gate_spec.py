@@ -57,6 +57,13 @@ REQUIRABLE = {
     "no triggers at all": (spec({}), False),
     # A restricted trigger alongside an unrestricted one still reports.
     "push branches + plain PR": (spec({"push": {"branches": ["main"]}, "pull_request": {}}), True),
+    # `types:` decides whether the trigger fires when a PR is opened at all.
+    "pull_request + open types": (
+        spec({"pull_request": {"types": ["opened", "synchronize"]}}),
+        True,
+    ),
+    "pull_request + closed only": (spec({"pull_request": {"types": ["closed"]}}), False),
+    "pull_request + labeled only": (spec({"pull_request": {"types": ["labeled"]}}), False),
 }
 
 
@@ -64,6 +71,33 @@ REQUIRABLE = {
 def test_requirability_of_every_job_shape(shape):
     job_spec, expected = REQUIRABLE[shape]
     assert land.can_report_on_pr(job_spec) is expected, shape
+
+
+# `branches:` on a pull_request trigger matches the PR's BASE branch. When the
+# base is known and matches, the job is unconditional in practice — and this is
+# the single most common CI shape there is.
+
+
+@pytest.mark.parametrize(
+    "base,expected",
+    [
+        ("main", True),  # the filter matches: this job always runs on such PRs
+        ("release/1.x", False),  # it does not match: the job will not report
+        (None, False),  # base unknown: stay conservative
+    ],
+)
+def test_a_branches_filter_is_resolved_against_the_pull_request_base(base, expected):
+    assert land.can_report_on_pr(BRANCHED, base_branch=base) is expected
+
+
+def test_a_wildcard_branches_filter_matches_the_base():
+    spec_ = spec({"pull_request": {"branches": ["release/*"]}})
+    assert land.can_report_on_pr(spec_, base_branch="release/1.x") is True
+
+
+def test_a_paths_filter_stays_conditional_even_when_branches_match():
+    spec_ = spec({"pull_request": {"branches": ["main"], "paths": ["src/**"]}})
+    assert land.can_report_on_pr(spec_, base_branch="main") is False
 
 
 # --- question 2: the gate, given one requirable job plus one other ----------
@@ -80,6 +114,10 @@ def check(name, state):
 
 
 PLAIN = spec({"pull_request": {}})
+# `branches:` on a pull_request trigger matches the PR's BASE branch, so for
+# every PR foreman opens it matches. Excluding these jobs removed a repo's whole
+# CI from the gate, which is how round 6's high finding arose.
+BRANCHED = spec({"pull_request": {"branches": ["main"]}})
 CONDITIONAL = spec({"pull_request": {"paths": ["src/**"]}})
 UNREPORTABLE = spec({"schedule": {}})
 
@@ -125,6 +163,27 @@ GATE = {
         "pending",
     ),
     "no jobs at all, no checks": (profile(), [], "pending"),
+    # An unrelated third-party check is not evidence that this repo's CI ran.
+    "unrelated check only": (
+        profile(lint=BRANCHED, test=BRANCHED),
+        [check("DCO", "SUCCESS")],
+        "pending",
+    ),
+    "unrelated plus profiled": (
+        profile(lint=BRANCHED, test=BRANCHED),
+        [check("DCO", "SUCCESS"), check("lint", "SUCCESS"), check("test", "SUCCESS")],
+        "full_green",
+    ),
+    "unrelated plus one profiled pending": (
+        profile(lint=BRANCHED, test=BRANCHED),
+        [check("DCO", "SUCCESS"), check("lint", "PENDING")],
+        "pending",
+    ),
+    # A reusable workflow reports as "caller / called".
+    "reusable green": (profile(build=PLAIN), [check("build / compile", "SUCCESS")], "full_green"),
+    "reusable pending": (profile(build=PLAIN), [check("build / compile", "PENDING")], "pending"),
+    # STALE is terminal: it will never resolve, so it must not read as pending.
+    "stale check": (profile(lint=PLAIN), [check("lint", "STALE")], "failed"),
     # matrix cells satisfy the job that declared them
     "matrix all green": (
         profile(lint=PLAIN, test=PLAIN),

@@ -25,6 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from fnmatch import fnmatch  # noqa: E402
+
 from ci_profile import attribute  # noqa: E402
 from globs import matches_any  # noqa: E402
 
@@ -40,6 +42,9 @@ FAILED = {
     "STARTUP_FAILURE",
     "CANCELLED",
     "CANCELED",
+    # Terminal: a stale result is never recomputed, so it must not sit in
+    # pending waiting for a resolution that cannot come.
+    "STALE",
 }
 
 # A pending entry matching any of these needs a person, so the loop must not
@@ -99,11 +104,28 @@ _NOISE = {
 
 PR_TRIGGERS = ("pull_request", "pull_request_target")
 FILTER_KEYS = ("paths", "paths_ignore", "branches", "tags")
+# Activity types that fire while a pull request is open. A trigger restricted to
+# `closed` or `labeled` never reports on an open PR.
+PR_OPEN_TYPES = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
 
 
-def _unconditional(cfg: dict) -> bool:
-    """A trigger with no filter of any kind will fire on every pull request."""
-    return not any(cfg.get(key) for key in FILTER_KEYS)
+def _unconditional(cfg: dict, base_branch: str | None = None) -> bool:
+    """Whether this trigger fires on every pull request into `base_branch`.
+
+    A `branches:` filter on a pull_request trigger matches the PR's BASE branch,
+    so when the base is known and matches, the filter is not a restriction at
+    all. Treating it as one excluded the primary CI job of most repos.
+    """
+    branches = cfg.get("branches")
+    if branches:
+        if base_branch is None or not any(fnmatch(base_branch, pattern) for pattern in branches):
+            return False
+    if any(cfg.get(key) for key in ("paths", "paths_ignore", "tags")):
+        return False
+    types = cfg.get("types")
+    if types and not (set(types) & PR_OPEN_TYPES):
+        return False  # e.g. types: [closed] — never fires while the PR is open
+    return True
 
 
 def _legacy_can_report(spec: dict) -> bool:
@@ -116,7 +138,7 @@ def _legacy_can_report(spec: dict) -> bool:
     return not conditional
 
 
-def can_report_on_pr(spec: dict) -> bool:
+def can_report_on_pr(spec: dict, base_branch: str | None = None) -> bool:
     """Whether this job will produce a check on every pull request.
 
     Requirable means *unconditional*: some trigger fires on a PR with no filter
@@ -136,7 +158,7 @@ def can_report_on_pr(spec: dict) -> bool:
         return _legacy_can_report(spec)
     for name in (*PR_TRIGGERS, "push"):
         cfg = events.get(name)
-        if isinstance(cfg, dict) and _unconditional(cfg):
+        if isinstance(cfg, dict) and _unconditional(cfg, base_branch):
             return True
     return False
 
@@ -190,7 +212,7 @@ def classify_checks(checks: list[dict], profile: dict) -> dict:
     return summary
 
 
-def ci_gate(checks: list[dict], profile: dict) -> str:
+def ci_gate(checks: list[dict], profile: dict, base_branch: str | None = None) -> str:
     """Translate a check list into the ledger's ci_gate value."""
     summary = classify_checks(checks, profile)
     if summary["failed"]:
@@ -205,15 +227,17 @@ def ci_gate(checks: list[dict], profile: dict) -> str:
             shapes = [
                 {"name": name, "display": spec.get("display")} for name, spec in declared.items()
             ]
-            requirable = {n: s for n, s in declared.items() if can_report_on_pr(s)}
+            requirable = {n: s for n, s in declared.items() if can_report_on_pr(s, base_branch)}
             covered = {attribute(name, shapes) for name in summary["passed"]}
+            reported = {attribute(c.get("name", ""), shapes) for c in (checks or [])}
 
             if requirable:
                 if not all(n in covered for n in requirable):
                     return "pending"  # a job that always runs has not reported yet
-            elif not checks:
-                # No unconditional job to wait for and nothing has reported.
-                # That is ignorance, not success.
+            elif not (reported & set(declared)):
+                # No unconditional job to wait for, and nothing this repo declares
+                # has reported. A DCO bot or a preview deploy going green says
+                # nothing about whether CI ran. That is ignorance, not success.
                 return "pending"
 
             # Anything that did report counts, requirable or not.
@@ -415,7 +439,7 @@ def fetch_pr(repo: str, pr: int) -> dict:
                 "--repo",
                 repo,
                 "--json",
-                "number,labels,isDraft,mergeable,reviewDecision,url",
+                "number,labels,isDraft,mergeable,reviewDecision,url,baseRefName",
             ]
         )
         or {}
@@ -450,8 +474,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "checks":
         profile = load_json(args.profile, {})
         checks = fetch_checks(args.repo, args.pr)
+        base = (fetch_pr(args.repo, args.pr) or {}).get("baseRefName")
         summary = classify_checks(checks, profile)
-        print(json.dumps({**summary, "gate": ci_gate(checks, profile)}, indent=2))
+        print(
+            json.dumps(
+                {**summary, "base_branch": base, "gate": ci_gate(checks, profile, base)},
+                indent=2,
+            )
+        )
         return 0
 
     if args.cmd == "verdict":
