@@ -33,6 +33,8 @@ if it matters, it is an event.
    the work that was fine.
 4. **Caps are hard.** When `cap_breached` names a counter, stop working that batch.
    Retrying past a cap is how an autonomous loop burns a CI budget overnight.
+   `review_rounds` is a runaway ceiling only — review deadlock is decided by
+   `land.review_stalled`, which asks whether findings are *repeating*.
 5. **Mutations go through the wrapper.** `scripts/gh_safe.sh` only; never raw
    `gh api -X DELETE`, never `--force` to a protected branch.
 
@@ -60,13 +62,27 @@ illegal move should be impossible to record, not merely discouraged.
 
 ```json
 {
-  "caps": { "pushes": 3, "review_rounds": 2, "reruns": 2 },
-  "limits": { "max_open_prs": 3, "max_batch_issues": 5, "max_ci_minutes_per_day": 400 },
+  "caps": { "pushes": 8, "review_rounds": 5, "reruns": 2 },
+  "limits": {
+    "max_open_prs": 3,
+    "max_batch_issues": 5,
+    "max_ci_minutes_per_day": 400,
+    "stale_after_s": 5400
+  },
   "auto_merge": false,
   "protected_paths": ["**/auth/**", "**/migrations/**", ".github/workflows/**", "**/payments/**"],
   "merge_method": "squash"
 }
 ```
+
+`stale_after_s` is not optional: without it a gate that never resolves pins a
+batch on `watch` forever, and watching increments no counter, so nothing else
+would ever surface it.
+
+`caps.pushes` is deliberately loose at 8. It counts every push, including the
+ones that resolved review findings, so a PR that survives several genuine review
+rounds hits it without anything being wrong (see issue #17). Until that counting
+rule is fixed, a tight value escalates healthy work.
 
 `auto_merge` stays `false` until you have watched the review gate work on real
 PRs. Turning it on is the only irreversible decision in the system.

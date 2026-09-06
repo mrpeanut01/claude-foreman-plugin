@@ -71,14 +71,32 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> -
 `auto_merge` — so you fix or escalate in one pass rather than discovering
 obstacles one at a time.
 
-## After the merge
+## File the findings before acting on them
 
-Record the verdict for the scoreboard:
+Every review verdict, clean or not, goes through:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/findings.py" plan \
+  --verdict /tmp/verdict.json --repo OWNER/NAME --batch <id> --pr <n> --round <r>
+```
+
+High and medium findings get fixed in this PR. Low findings will not be fixed
+here and must become issues, or they are gone — an issue is the only artefact
+`/foreman:triage` reads. See [file-findings](../../commands/file-findings.md).
+
+## Record every verdict, as it happens
+
+**Every round**, not once at the end, and always with the findings:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" append --type review.verdict \
-  --json '{"batch":"<id>","verdict":"clean"}'
+  --json '{"batch":"<id>","verdict":"changes_requested","round":2,"findings":[...]}'
 ```
+
+`land.review_stalled` compares the findings of consecutive rounds to decide
+whether the review is converging. Recording only after the merge, or omitting
+`findings`, leaves it reading empty lists — the rule is then inert and only the
+hard ceiling stops a genuine deadlock.
 
 If the merge is later reverted, append `merge.reverted`. That pairing is the only
 honest measure of whether the review gate works, and `/foreman:status` reports it.

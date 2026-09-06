@@ -18,6 +18,14 @@ on every push; expensive jobs wait behind the cheap tier *and* the review gate.
 Waiting on an advisory check is pure wall clock; the loop ignores them for
 gating and reads them only for information.
 
+**`protection_known`** — whether branch protection could actually be read.
+
+> This one is load-bearing. When protection is absent or unreadable, every job
+> lands in the profile with `required: false`. Read literally, that says nothing
+> can block a merge, and a fully red CI becomes a green gate. So `false` here
+> means **unknown**, and `land.py` treats every check as required until proven
+> otherwise. Never "simplify" that back.
+
 **`samples`** — how many finished runs the numbers come from. `samples: 0` yields
 `tier: "unmeasured"`, listed in `unmeasured_jobs`.
 

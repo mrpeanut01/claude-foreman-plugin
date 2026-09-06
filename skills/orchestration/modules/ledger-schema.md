@@ -13,7 +13,7 @@ a fold over the file (`ledger.fold`). Never rewrite a line; correct by appending
 | `batch.pushed` | `batch`, `sha` | **Resets both gates to `pending`** and increments `attempts.pushes`. |
 | `gate.set` | `batch`, `gate`, `value` | Sets `ci_gate`/`review_gate`. A red gate under a `ready` batch drops it to `blocked`. |
 | `ci.rerun` | `batch`, `job` | Increments `attempts.reruns`. |
-| `review.verdict` | `batch`, `verdict` | Appends to the review scoreboard. |
+| `review.verdict` | `batch`, `verdict`, `findings`, `round` | Appends to the review scoreboard. **`findings` is not optional** — `land.review_stalled` reads it to decide whether findings are repeating, and without it the convergence rule is inert. |
 | `merge.reverted` | `batch` | The rubber-stamp signal. Pairs against clean verdicts in `/foreman:status`. |
 | `flake.observed` | `job`, `test` | Increments the `job::test` counter. |
 | `escalation` | `batch`, `reason` | Adds to NEEDS YOU. `reason` is read by a human — write a sentence, not a code. |

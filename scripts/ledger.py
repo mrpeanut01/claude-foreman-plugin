@@ -95,7 +95,7 @@ def init(repo_root: Path | str) -> Path:
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def append(root: Path, event_type: str, **fields) -> dict:
@@ -141,6 +141,10 @@ def _new_batch(event: dict) -> dict:
         "attempts": {k: 0 for k in COUNTER_ORDER},
         "created": event.get("ts"),
         "updated": event.get("ts"),
+        # `updated` moves on any event; `progress_at` only when something
+        # actually changed. Staleness must measure the second, or polling
+        # a stuck batch resets the very clock meant to notice it.
+        "progress_at": event.get("ts"),
     }
 
 
@@ -158,6 +162,8 @@ def fold(events: list[dict]) -> State:
             state.batches[bid] = _new_batch(event)
 
         elif kind == "batch.state" and batch:
+            if batch["state"] != event["to"]:
+                batch["progress_at"] = event.get("ts")
             batch["state"] = event["to"]
 
         elif kind == "batch.pushed" and batch:
@@ -166,9 +172,12 @@ def fold(events: list[dict]) -> State:
             batch["review_gate"] = "pending"
             batch["attempts"]["pushes"] += 1
             batch["head_sha"] = event.get("sha")
+            batch["progress_at"] = event.get("ts")
 
         elif kind == "gate.set" and batch:
             which, value = event["gate"], event["value"]
+            if batch.get(f"{which}_gate") != value:
+                batch["progress_at"] = event.get("ts")
             batch[f"{which}_gate"] = value
             if which == "review" and value == "changes_requested":
                 batch["attempts"]["review_rounds"] += 1

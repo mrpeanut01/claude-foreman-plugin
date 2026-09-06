@@ -307,3 +307,162 @@ def test_runs_that_match_no_declared_job_are_reported_not_dropped(workflows):
         workflow_dir=workflows, job_runs=runs, protection={}, threshold_s=300
     )
     assert profile["unattributed_runs"] == ["Publish release"]
+
+
+def test_compiled_bytecode_is_never_offered_as_a_test_to_run(repo):
+    cache = repo / "tests" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "test_ledger.cpython-314-pytest-9.0.3.pyc").touch()
+    hit, complete = ci_profile.impacted_tests(["src/foreman/ledger.py"], repo)
+    assert hit == ["tests/test_ledger.py"]
+    assert complete is True
+
+
+def test_a_non_python_test_suite_still_maps(tmp_path):
+    for p in ["src/parser.ts", "tests/test_parser.ts"]:
+        f = tmp_path / p
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.touch()
+    hit, complete = ci_profile.impacted_tests(["src/parser.ts"], tmp_path)
+    assert hit == ["tests/test_parser.ts"] and complete is True
+
+
+# --- issue #26: path filters belong to the event that declared them ----------
+
+
+def test_push_only_path_filters_are_not_attributed_to_pull_request(tmp_path):
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          push:
+            branches: [main]
+            paths: ['src/**', 'tests/**']
+          pull_request:
+        jobs:
+          lint:
+            steps: [{run: ruff check}]
+    """)
+    )
+    jobs = {j["name"]: j for j in ci_profile.parse_workflows(d)}
+    assert jobs["lint"]["path_filters"] == ["src/**", "tests/**"], "union kept for reference"
+    assert jobs["lint"]["pr_path_filters"] == [], "the PR trigger carries no filter"
+
+
+def test_a_pull_request_path_filter_is_recorded_as_one(tmp_path):
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "docs.yml").write_text(
+        textwrap.dedent("""
+        name: Docs
+        on:
+          pull_request:
+            paths: ['docs/**']
+        jobs:
+          docs:
+            steps: [{run: make docs}]
+    """)
+    )
+    jobs = {j["name"]: j for j in ci_profile.parse_workflows(d)}
+    assert jobs["docs"]["pr_path_filters"] == ["docs/**"]
+
+
+def test_build_profile_carries_pr_path_filters_through(tmp_path):
+    """The unit-level fix is worthless if the assembled profile drops the field."""
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          push:
+            paths: ['src/**']
+          pull_request:
+        jobs:
+          lint:
+            steps: [{run: ruff check}]
+    """)
+    )
+    profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
+    assert profile["jobs"]["lint"]["pr_path_filters"] == []
+    assert profile["jobs"]["lint"]["path_filters"] == ["src/**"]
+
+
+# --- issues #32/#33: per-event data, and job names that collide -------------
+
+
+def test_each_trigger_records_its_own_filters(tmp_path):
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          push:
+            branches: [main]
+            paths: ['src/**']
+          pull_request:
+            paths-ignore: ['**.md']
+        jobs:
+          lint:
+            steps: [{run: ruff check}]
+    """)
+    )
+    events = {j["name"]: j["events"] for j in ci_profile.parse_workflows(d)}["lint"]
+    assert events["push"]["branches"] == ["main"]
+    assert events["push"]["paths"] == ["src/**"]
+    assert events["pull_request"]["paths_ignore"] == ["**.md"]
+    assert events["pull_request"]["paths"] == []
+
+
+def test_a_job_name_reused_in_another_workflow_does_not_overwrite_the_first(tmp_path):
+    """Otherwise a release-only `test` job makes the real PR `test` job vanish."""
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on: {pull_request: }
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    (d / "release.yml").write_text(
+        textwrap.dedent("""
+        name: Release
+        on: {workflow_dispatch: }
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
+    events = profile["jobs"]["test"]["events"]
+    assert "pull_request" in events, "the PR trigger must survive the collision"
+    assert "workflow_dispatch" in events
+    assert set(profile["jobs"]["test"]["triggers"]) == {"pull_request", "workflow_dispatch"}
+
+
+def test_the_collision_merge_gives_the_same_answer_in_either_file_order(tmp_path):
+    """#40's actual claim: requirability must not depend on filename sorting."""
+    import land
+
+    plain = "name: A\non: {pull_request: }\njobs:\n  test: {steps: [{run: x}]}\n"
+    filtered = (
+        "name: B\non:\n  pull_request:\n    paths: ['src/**']\njobs:\n  test: {steps: [{run: y}]}\n"
+    )
+
+    answers = []
+    for first, second in (("a", "b"), ("b", "a")):
+        d = tmp_path / f"{first}{second}" / ".github" / "workflows"
+        d.mkdir(parents=True)
+        (d / f"{first}.yml").write_text(plain if first == "a" else filtered)
+        (d / f"{second}.yml").write_text(filtered if first == "a" else plain)
+        profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
+        answers.append(land.can_report_on_pr(profile["jobs"]["test"], "main"))
+
+    assert answers[0] == answers[1], "file order changed the gate's behaviour"
+    assert answers[0] is True, "one unconditional declaration means a check will appear"

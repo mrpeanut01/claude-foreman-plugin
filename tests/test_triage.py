@@ -281,3 +281,161 @@ def test_the_original_of_a_duplicate_pair_stays_queueable():
     ]
     records = [triage.triage_issue(i, pair, [], AVAILABLE) for i in pair]
     assert [r["verdict"] for r in records] == ["actionable", "duplicate"]
+
+
+# --- issue #2: a triage record must carry the paths batching needs ------------
+
+
+def test_triage_records_carry_the_paths_found_in_the_issue():
+    record = triage.triage_issue(
+        issue(
+            number=7,
+            title="Upload fails",
+            body="Traceback in src/upload.py line 22",
+            labels=["bug"],
+        ),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["paths"] == ["src/upload.py"]
+
+
+def test_triage_output_can_be_batched_without_post_processing():
+    import batch as batch_mod
+
+    issues = [
+        issue(number=n, title=t, body=f"Traceback in src/mod{n}.py line 1", labels=["bug"])
+        for n, t in enumerate(
+            ("Upload retries forever", "Parser drops commas", "Cache never evicts"), start=1
+        )
+    ]
+    records = [triage.triage_issue(i, issues, [], AVAILABLE) for i in issues]
+    groups = batch_mod.group_issues(
+        records, {"limits": {"max_batch_issues": 3, "max_batch_weight": 9}}
+    )
+    assert [g["issues"] for g in groups] == [[1, 2, 3]], "batching must work on raw triage output"
+
+
+# --- issue #5: hints must match words, not substrings ------------------------
+
+
+@pytest.mark.parametrize(
+    "title,body,expected_risk",
+    [
+        ("Update the Dockerfile base image", "Bump to bookworm.", "medium"),
+        ("Documentation for the CLI flags", "Explain each flag.", "low"),
+        # From issue #5's reproduction list. "schema" is a genuine keyword
+        # collision, not a substring bug: over-scoring is the safe direction.
+        ("Documentation for the schema tool", "Explain the flags.", "high"),
+        # "tokens" is indistinguishable from an auth token, so this scores high.
+        # Over-scoring costs a solo PR; under-scoring auto-merges a security change.
+        ("Tokenizer drops short tokens", "_tokens in the parser.", "high"),
+        ("Tokenizer performance is poor", "Profiling the lexer.", "medium"),
+        ("Session token never expires", "Auth stays valid.", "high"),
+    ],
+)
+def test_risk_hints_match_whole_words_only(title, body, expected_risk):
+    assert triage.risk_level(issue(title=title, body=body), []) == expected_risk
+
+
+def test_mentioning_a_lint_job_does_not_make_an_issue_small():
+    body = (
+        "The lint job fails because classify_checks treats every failure as advisory "
+        "when branch protection is absent. " * 3
+    )
+    assert triage.classify_size(issue(title="CI gate is wrong", body=body)) != "small"
+
+
+def test_a_path_mentioned_twice_is_listed_once():
+    record = triage.triage_issue(
+        issue(
+            number=8,
+            title="Two mentions",
+            body="See src/a.py and also src/a.py again, plus src/b.py",
+            labels=["bug"],
+        ),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["paths"] == ["src/a.py", "src/b.py"]
+
+
+# --- the regression the review gate caught ------------------------------------
+# Word boundaries fixed substring false-positives but silently disabled the
+# security vocabulary: \bauth\b does not match "authentication".
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Authentication bypass on the admin API",
+        "Authorization header is dropped",
+        "Unauthenticated users can read private repos",
+        "OAuth callback leaks the code",
+        "Rotate leaked API tokens",
+        "Bucket permissions are world readable",
+        "Store credentials in the keychain",
+        "Secrets are printed to the log",
+        "Payments are double charged",
+        "Schemas are not migrated",
+        "Passwords are logged in plaintext",
+        "Encrypting the session store",
+        "Privilege escalation via the share link",
+    ],
+)
+def test_inflected_security_words_still_score_high(title):
+    assert triage.risk_level(issue(title=title, body="Details."), []) == "high", title
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Author of the commit is wrong",  # must not match via `auth`
+        "Authoring guide needs an update",
+        "Update the Dockerfile base image",  # must not match via `doc`
+        "Tokenizer performance is poor",  # `tokenizer` is not `token`
+        # NB "Tokenizer drops short tokens" DOES score high, and should: the word
+        # "tokens" cannot be told from an auth token, and over-scoring is safe.
+    ],
+)
+def test_lookalike_words_do_not_inflate_risk(title):
+    assert triage.risk_level(issue(title=title, body="Details."), []) != "high", title
+
+
+def test_an_empty_hint_list_matches_nothing():
+    """`\\b()\\b` compiles to something that matches any word."""
+    assert triage._has("anything at all", ()) is False
+
+
+# --- issue #11: the vocabulary lost bare `auth`, en-GB spellings, and oauth2 ---
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "auth bypass on the admin API",
+        "Fix auth middleware ordering",
+        "Unauthorised access to the admin API",
+        "Authorisation header is dropped",
+        "authorisation bypass in the gateway",
+        "oauth2 flow is broken",
+        "Passwordless login never expires",
+        "Reauthentication is skipped after logout",
+    ],
+)
+def test_en_gb_spellings_and_bare_auth_still_score_high(title):
+    assert triage.risk_level(issue(title=title, body="Details."), []) == "high", title
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Author of the commit is wrong",
+        "Authoring guide needs an update",
+        "Co-authored-by trailer is malformed",
+    ],
+)
+def test_author_is_still_not_an_auth_issue(title):
+    assert triage.risk_level(issue(title=title, body="Details."), []) != "high", title

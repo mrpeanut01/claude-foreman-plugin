@@ -1,27 +1,23 @@
 {
   "auto_merge": false,
-
   "caps": {
-    "pushes": 3,
-    "review_rounds": 2,
+    "pushes": 8,
+    "review_rounds": 5,
     "reruns": 2
   },
-
   "limits": {
     "max_open_prs": 3,
     "max_batch_issues": 5,
     "max_batch_weight": 6,
-    "max_ci_minutes_per_day": 400
+    "max_ci_minutes_per_day": 400,
+    "stale_after_s": 5400
   },
-
   "risk_ceiling": "medium",
-
   "protected_paths": [
     "**/auth/**",
     "**/migrations/**",
     "**/payments/**",
     ".github/workflows/**"
   ],
-
   "merge_method": "squash"
 }

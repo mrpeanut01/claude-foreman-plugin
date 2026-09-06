@@ -25,10 +25,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from globs import matches_any  # noqa: E402
+from ci_profile import attribute  # noqa: E402
+from globs import compile_glob, matches_any  # noqa: E402
 
 PASSED = {"SUCCESS", "PASS", "NEUTRAL", "SKIPPED"}
-FAILED = {"FAILURE", "FAIL", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+# A cancelled check is not a pass. Leaving it in neither set parks it in
+# actionable_pending forever, which is a hang.
+FAILED = {
+    "FAILURE",
+    "FAIL",
+    "ERROR",
+    "TIMED_OUT",
+    "ACTION_REQUIRED",
+    "STARTUP_FAILURE",
+    "CANCELLED",
+    "CANCELED",
+    # Terminal: a stale result is never recomputed, so it must not sit in
+    # pending waiting for a resolution that cannot come.
+    "STALE",
+}
 
 # A pending entry matching any of these needs a person, so the loop must not
 # sit waiting on it.
@@ -46,12 +61,147 @@ FLAKE_CONFIDENCE = 0.7
 
 CLEAR = {"ci": "full_green", "review": "clean"}
 
+# Events that can produce a check on a pull request. A job wired to anything else
+# will never report here, and requiring it would hang the gate forever.
+# merge_group checks report against the merge queue ref, not the pull request,
+# so a merge_group-only job never reports here.
+PR_EVENTS = {"pull_request", "pull_request_target", "push"}
+
+# Two reviewers disagreeing forever is deadlock; two reviewers finding different
+# things each round is progress. Only the first is worth escalating on.
+REVIEW_MATCH_THRESHOLD = 0.5
+DEFAULT_REVIEW_CEILING = 5
+_WORD = re.compile(r"[a-z0-9]+")
+_NOISE = {
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "no",
+    "not",
+    "at",
+    "in",
+    "on",
+    "of",
+    "to",
+    "and",
+    "or",
+    "it",
+    "its",
+    "this",
+    "that",
+    "still",
+    "all",
+    "has",
+    "have",
+}
+
 
 # --- reading the check list ---------------------------------------------------
 
 
+PR_TRIGGERS = ("pull_request", "pull_request_target")
+FILTER_KEYS = ("paths", "paths_ignore", "branches", "tags")
+# Activity types that fire while a pull request is open. A trigger restricted to
+# `closed` or `labeled` never reports on an open PR.
+PR_OPEN_TYPES = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
+
+
+def _branch_allows(branch: str, patterns: list[str]) -> bool:
+    """GitHub branch-filter semantics: `!` excludes, and `*` does not cross `/`.
+
+    fnmatch does neither — it reads `!main` as a literal that never matches, and
+    since inclusion is an any() test, an ignored exclusion reads as permitted.
+    """
+    positives = [p for p in patterns if not p.startswith("!")]
+    negatives = [p[1:] for p in patterns if p.startswith("!")]
+    if positives and not matches_any(branch, positives):
+        return False
+    return not any(compile_glob(p).match(branch) for p in negatives)
+
+
+def _unconditional(
+    cfg: dict, base_branch: str | None = None, resolve_branches: bool = False
+) -> bool:
+    """Whether this trigger fires on every pull request into `base_branch`.
+
+    `branches:` on a pull_request trigger matches the PR's BASE, so a matching
+    base means it is no restriction at all. On a `push` trigger it matches the
+    HEAD — the PR's feature branch — so it stays a restriction whatever the base
+    is, and resolving it against the base marks jobs requirable that can never
+    report. Callers say which meaning applies via `resolve_branches`.
+    """
+    if any(cfg.get(key) for key in ("paths", "paths_ignore", "tags", "tags_ignore")):
+        return False
+
+    branches = list(cfg.get("branches") or [])
+    branches += [f"!{p}" for p in (cfg.get("branches_ignore") or [])]
+    if branches:
+        if not resolve_branches or base_branch is None:
+            return False
+        if not _branch_allows(base_branch, branches):
+            return False
+
+    types = cfg.get("types")
+    if types and not (set(types) & PR_OPEN_TYPES):
+        return False  # e.g. types: [closed] — never fires while the PR is open
+    return True
+
+
+def _legacy_can_report(spec: dict) -> bool:
+    """Profiles written before per-event data. Filters are known only in union."""
+    if not (PR_EVENTS & set(spec.get("triggers") or [])):
+        return False
+    conditional = spec.get("pr_path_filters")
+    if conditional is None:
+        conditional = spec.get("path_filters")
+    return not conditional
+
+
+def can_report_on_pr(spec: dict, base_branch: str | None = None) -> bool:
+    """Whether this job will produce a check on every pull request.
+
+    Requirable means *unconditional*: some trigger fires on a PR with no filter
+    attached. Anything narrower — paths, paths-ignore, branches, tags — is
+    conditional and counts only once it actually reports.
+
+    Being conservative here is safe in both directions, which is the point.
+    Excluding a job that would have reported cannot cause an early merge,
+    because a job that reports lands in `actionable_pending` while it runs and
+    in `failed` if it fails. Including a job that can never report is what hangs
+    the gate forever.
+    """
+    if "${{" in str(spec.get("display") or ""):
+        return False  # a templated name cannot be attributed back to this job
+    events = spec.get("events")
+    if events is None:
+        return _legacy_can_report(spec)
+    for name in PR_TRIGGERS:
+        cfg = events.get(name)
+        if isinstance(cfg, dict) and _unconditional(cfg, base_branch, resolve_branches=True):
+            return True
+    push = events.get("push")
+    if isinstance(push, dict) and _unconditional(push):
+        return True
+    return False
+
+
+# Retained for callers that predate the rename.
+_can_report = can_report_on_pr
+
+
 def _is_advisory(name: str, profile: dict) -> bool:
-    """Unknown checks count as required: an unknown gate may block the queue."""
+    """Unknown checks count as required: an unknown gate may block the queue.
+
+    When branch protection could not be read, nothing is known to be advisory.
+    Treating an unread protection API as "nothing is required" turns a fully red
+    CI into a green gate, which is the one outcome this whole system exists to
+    prevent.
+    """
+    if not profile.get("protection_known", False):
+        return False
     job = (profile.get("jobs") or {}).get(name)
     return bool(job) and job.get("required") is False
 
@@ -87,7 +237,7 @@ def classify_checks(checks: list[dict], profile: dict) -> dict:
     return summary
 
 
-def ci_gate(checks: list[dict], profile: dict) -> str:
+def ci_gate(checks: list[dict], profile: dict, base_branch: str | None = None) -> str:
     """Translate a check list into the ledger's ci_gate value."""
     summary = classify_checks(checks, profile)
     if summary["failed"]:
@@ -95,7 +245,30 @@ def ci_gate(checks: list[dict], profile: dict) -> str:
 
     required = list(profile.get("required_checks") or [])
     if not required:
-        # Nothing is required, so nothing can block: green once nothing is running.
+        if not profile.get("protection_known", False):
+            # Nothing is known to be optional, so decide from what the workflows
+            # declare plus what has actually reported.
+            declared = profile.get("jobs") or {}
+            shapes = [
+                {"name": name, "display": spec.get("display")} for name, spec in declared.items()
+            ]
+            requirable = {n: s for n, s in declared.items() if can_report_on_pr(s, base_branch)}
+            covered = {attribute(name, shapes) for name in summary["passed"]}
+            reported = {attribute(c.get("name", ""), shapes) for c in (checks or [])}
+
+            if requirable:
+                if not all(n in covered for n in requirable):
+                    return "pending"  # a job that always runs has not reported yet
+            elif not (reported & set(declared)):
+                # No unconditional job to wait for, and nothing this repo declares
+                # has reported. A DCO bot or a preview deploy going green says
+                # nothing about whether CI ran. That is ignorance, not success.
+                return "pending"
+
+            # Anything that did report counts, requirable or not.
+            return "full_green" if not summary["actionable_pending"] else "pending"
+
+        # Protection says nothing is required, so nothing can block.
         return "full_green" if not summary["actionable_pending"] else "pending"
 
     jobs = profile.get("jobs") or {}
@@ -153,6 +326,57 @@ def validate_review(verdict: dict) -> tuple[bool, list[str]]:
         errors.append("revert_check=still_passed contradicts behaviour_change=false")
 
     return not errors, errors
+
+
+# --- review convergence -------------------------------------------------------
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in _WORD.findall((text or "").lower()) if w not in _NOISE and len(w) > 1}
+
+
+def same_finding(a: dict, b: dict, threshold: float = REVIEW_MATCH_THRESHOLD) -> bool:
+    """Whether two findings are the same complaint, allowing for rewording."""
+    if a.get("file") != b.get("file"):
+        return False
+    # Compare bands, not exact labels: a complaint drifting high <-> medium is the
+    # same complaint, and both block a clean verdict.
+    if (str(a.get("severity", "")).lower() in SERIOUS) != (
+        str(b.get("severity", "")).lower() in SERIOUS
+    ):
+        return False
+    wa, wb = _words(a.get("summary")), _words(b.get("summary"))
+    if not wa or not wb:
+        return False
+    return len(wa & wb) / len(wa | wb) >= threshold
+
+
+def review_stalled(
+    rounds: list[list[dict]], hard_ceiling: int = DEFAULT_REVIEW_CEILING
+) -> str | None:
+    """Reason to stop reviewing, or None to allow another round.
+
+    Rounds elapsed is the wrong measure. A builder and reviewer who surface a
+    different real defect each round are converging, however many rounds it
+    takes; two who trade the same finding are not. Only blocking severities
+    count — a repeated `low` never stood between the batch and a merge.
+    """
+    if len(rounds) >= hard_ceiling:
+        return f"review reached the hard ceiling of {hard_ceiling} rounds"
+    if len(rounds) < 2:
+        return None
+
+    def blocking(round_findings):
+        return [f for f in round_findings if str(f.get("severity", "")).lower() in SERIOUS]
+
+    previous, current = blocking(rounds[-2]), blocking(rounds[-1])
+    for now in current:
+        if any(same_finding(before, now) for before in previous):
+            return (
+                f"the same finding survived a round (repeat): "
+                f"{now.get('file')} - {str(now.get('summary', ''))[:80]}"
+            )
+    return None
 
 
 # --- flake or bug -------------------------------------------------------------
@@ -240,7 +464,7 @@ def fetch_pr(repo: str, pr: int) -> dict:
                 "--repo",
                 repo,
                 "--json",
-                "number,labels,isDraft,mergeable,reviewDecision,url",
+                "number,labels,isDraft,mergeable,reviewDecision,url,baseRefName",
             ]
         )
         or {}
@@ -275,8 +499,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "checks":
         profile = load_json(args.profile, {})
         checks = fetch_checks(args.repo, args.pr)
+        base = (fetch_pr(args.repo, args.pr) or {}).get("baseRefName")
         summary = classify_checks(checks, profile)
-        print(json.dumps({**summary, "gate": ci_gate(checks, profile)}, indent=2))
+        print(
+            json.dumps(
+                {**summary, "base_branch": base, "gate": ci_gate(checks, profile, base)},
+                indent=2,
+            )
+        )
         return 0
 
     if args.cmd == "verdict":

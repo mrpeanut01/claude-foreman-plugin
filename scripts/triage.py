@@ -23,6 +23,7 @@ import json
 import re
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,64 +31,73 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 CATEGORIES = ("bug", "enhancement", "question", "duplicate")
 DUPLICATE_THRESHOLD = 0.6
 
+# Hint fragments, matched as whole words with \b on both sides. They are regex
+# rather than plain words because a plain-word list silently loses every
+# inflection: \bauth\b does not match "authentication", and a risk gate that
+# stops recognising authentication is worse than the substring bug it replaced.
 LARGE_HINTS = (
-    "redesign",
-    "rewrite",
-    "refactor",
-    "migrate",
-    "migration",
-    "overhaul",
-    "architecture",
-    "epic",
-    "re-architect",
-    "port to",
+    r"redesigns?",
+    r"rewrit\w*",
+    r"refactor\w*",
+    r"migrat\w*",
+    r"overhaul\w*",
+    r"architectur\w*",
+    r"epics?",
+    r"port to",
+    r"re-architect\w*",
 )
 SMALL_HINTS = (
-    "typo",
-    "bump",
-    "rename",
-    "readme",
-    "changelog",
-    "whitespace",
-    "lint",
-    "formatting",
-    "spelling",
-    "docstring",
+    r"typos?",
+    r"bumps?",
+    r"renames?",
+    r"readme",
+    r"changelogs?",
+    r"whitespace",
+    r"lint\w*",
+    r"format\w*",
+    r"spelling",
+    r"docstrings?",
 )
 LOW_RISK_HINTS = (
-    "typo",
-    "doc",
-    "docs",
-    "documentation",
-    "readme",
-    "comment",
-    "test",
-    "tests",
-    "coverage",
-    "lint",
-    "format",
-    "rename",
-    "changelog",
+    r"typos?",
+    r"docs?",
+    r"documentation",
+    r"readme",
+    r"comments?",
+    r"tests?",
+    r"coverage",
+    r"lint\w*",
+    r"format\w*",
+    r"renames?",
+    r"changelogs?",
 )
 HIGH_RISK_HINTS = (
-    "auth",
-    "token",
-    "password",
-    "session",
-    "credential",
-    "permission",
-    "migration",
-    "migrate",
-    "schema",
-    "payment",
-    "billing",
-    "secret",
-    "csrf",
-    "xss",
-    "injection",
-    "encryption",
-    "privilege",
-    "logged in",
+    # Bare `auth` is safe: the trailing \b already excludes Author and authoring.
+    # The leading \w* catches Reauthentication and Unauthorised. en-GB spellings
+    # matter because this project writes en-GB, so its reporters will too.
+    r"auth",
+    r"authn",
+    r"authz",
+    r"oauth\d*",
+    r"\w*authentic\w*",
+    r"\w*authoriz\w*",
+    r"\w*authoris\w*",
+    r"tokens?",
+    r"password\w*",
+    r"sessions?",
+    r"credentials?",
+    r"permissions?",
+    r"migrat\w*",
+    r"schemas?",
+    r"payments?",
+    r"billing",
+    r"secrets?",
+    r"csrf",
+    r"xss",
+    r"injections?",
+    r"encrypt\w*",
+    r"privileges?",
+    r"logged in",
 )
 HIGH_RISK_LABELS = ("security", "critical", "data-loss", "p0")
 
@@ -149,29 +159,47 @@ from globs import compile_glob as _glob_to_re  # noqa: E402
 
 
 def _paths_in(text: str) -> list[str]:
-    return re.findall(r"[\w][\w./-]*/[\w./-]+\.\w+", text or "")
+    """File paths mentioned in the text, in order, without repeats."""
+    return list(dict.fromkeys(re.findall(r"[\w][\w./-]*/[\w./-]+\.\w+", text or "")))
 
 
 def _text(issue: dict) -> str:
     return f"{issue.get('title') or ''}\n{issue.get('body') or ''}"
 
 
+@lru_cache(maxsize=32)
+def _hint_matcher(needles: tuple) -> re.Pattern:
+    return re.compile(r"\b(?:" + "|".join(needles) + r")\b", re.I)
+
+
 def _has(text: str, needles) -> bool:
-    low = text.lower()
-    return any(n in low for n in needles)
+    """Whole words, inflections included.
+
+    `docs?` must not match Dockerfile, but `authentic\\w*` must match
+    authentication. An empty hint list matches nothing — `\\b()\\b` would
+    otherwise match any word at all.
+    """
+    needles = tuple(needles)
+    if not needles:
+        return False
+    return bool(_hint_matcher(needles).search(text or ""))
 
 
 # --- sizing -------------------------------------------------------------------
 
 
 def classify_size(issue: dict) -> str:
-    """How much work this looks like. Feeds batch grouping, not scheduling."""
-    text = _text(issue)
+    """How much work this looks like. Feeds batch grouping, not scheduling.
+
+    Hints are read from the title only. A bug report that *mentions* the lint job
+    in passing is not a lint-sized change, and bodies quote error output freely.
+    """
+    title = issue.get("title") or ""
     body = issue.get("body") or ""
     checkboxes = len(re.findall(r"^\s*[-*]\s*\[[ xX]\]", body, re.M))
-    if _has(text, LARGE_HINTS) or checkboxes >= 6 or len(body) > 2000:
+    if _has(title, LARGE_HINTS) or checkboxes >= 6 or len(body) > 2000:
         return "large"
-    if _has(text, SMALL_HINTS) or len(body) < 120:
+    if _has(title, SMALL_HINTS) or len(body) < 120:
         return "small"
     return "medium"
 
@@ -318,6 +346,8 @@ def triage_issue(
         "risk": risk_level(issue, protected),
         "lifecycle": None if duplicates else act["lifecycle"],
         "issue_updated_at": issue.get("updatedAt"),
+        # batch.can_group needs these; without them nothing ever groups.
+        "paths": _paths_in(_text(issue)),
         "rationale": act["reason"],
     }
     if duplicates:

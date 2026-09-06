@@ -11,6 +11,7 @@ import land  # noqa: E402
 
 PROFILE = {
     "required_checks": ["lint", "unit", "integration"],
+    "protection_known": True,
     "jobs": {
         "lint": {"tier": "cheap", "required": True},
         "unit": {"tier": "cheap", "required": True},
@@ -238,3 +239,274 @@ def test_auto_merge_off_blocks_everything():
 def test_blockers_are_reported_together_not_one_at_a_time():
     batch = ready_batch(review_gate="pending", paths=["src/auth/x.py"])
     assert len(land.merge_blockers(batch, {"labels": ["do-not-merge"]}, CFG)) >= 3
+
+
+# --- issue #1: absent branch protection must not read as "nothing is required" -
+
+
+def job(**kw):
+    """Shaped like what parse_workflows actually emits, triggers included."""
+    base = {
+        "tier": "cheap",
+        "required": False,
+        "display": None,
+        "triggers": ["pull_request", "push"],
+        "path_filters": [],
+    }
+    return {**base, **kw}
+
+
+UNPROTECTED = {
+    "required_checks": [],
+    "protection_known": False,
+    "jobs": {"lint": job(), "test": job()},
+}
+
+
+def test_a_red_ci_is_never_green_when_protection_is_unknown():
+    red = [check("lint", "FAILURE"), check("test", "FAILURE")]
+    assert land.classify_checks(red, UNPROTECTED)["failed"] == ["lint", "test"]
+    assert land.ci_gate(red, UNPROTECTED) == "failed"
+
+
+def test_unknown_protection_makes_every_check_required():
+    mixed = [check("lint", "SUCCESS"), check("test", "PENDING")]
+    assert land.classify_checks(mixed, UNPROTECTED)["actionable_pending"] == ["test"]
+    assert land.ci_gate(mixed, UNPROTECTED) == "pending"
+
+
+def test_all_green_under_unknown_protection_is_full_green():
+    green = [check("lint", "SUCCESS"), check("test", "SUCCESS")]
+    assert land.ci_gate(green, UNPROTECTED) == "full_green"
+
+
+def test_advisory_still_means_advisory_when_protection_is_known():
+    known = {**UNPROTECTED, "protection_known": True, "required_checks": ["lint"]}
+    assert land.classify_checks([check("test", "FAILURE")], known)["failed"] == []
+
+
+def test_an_unprotected_repo_with_red_ci_cannot_merge():
+    red_batch = {
+        "id": "b-001",
+        "ci_gate": land.ci_gate([check("lint", "FAILURE")], UNPROTECTED),
+        "review_gate": "clean",
+        "paths": ["scripts/x.py"],
+        "attempts": {"pushes": 1, "review_rounds": 0, "reruns": 0},
+    }
+    blockers = land.merge_blockers(
+        red_batch, {"labels": []}, {"auto_merge": True, "caps": {}, "protected_paths": []}
+    )
+    assert blockers, "a fully red CI must block the merge"
+
+
+def test_a_pr_with_no_checks_yet_is_not_green_when_protection_is_unknown():
+    """Otherwise a freshly pushed PR merges having run zero CI."""
+    assert land.ci_gate([], UNPROTECTED) == "pending"
+
+
+def test_no_required_checks_under_known_protection_is_a_deliberate_choice():
+    known = {"required_checks": [], "protection_known": True, "jobs": {}}
+    assert land.ci_gate([], known) == "full_green"
+
+
+# --- convergence, not rounds elapsed -----------------------------------------
+# The cap was justified as "a third round of an agent negotiating with an agent
+# is not going to converge". Rounds elapsed does not measure that. Findings that
+# survive a round do.
+
+
+def finding(file, severity="medium", summary="the retry loop has no ceiling"):
+    return {"file": file, "severity": severity, "summary": summary}
+
+
+def test_a_finding_that_survives_a_round_means_no_convergence():
+    rounds = [[finding("src/a.py")], [finding("src/a.py")]]
+    assert "repeat" in land.review_stalled(rounds, hard_ceiling=5).lower()
+
+
+def test_different_findings_each_round_is_progress_not_deadlock():
+    rounds = [
+        [finding("src/a.py", summary="retry loop has no ceiling")],
+        [finding("src/b.py", summary="token vocabulary lost its plurals")],
+    ]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_rewording_the_same_finding_still_counts_as_a_repeat():
+    rounds = [
+        [finding("src/a.py", summary="the retry loop has no ceiling")],
+        [finding("src/a.py", summary="retry loop has no upper ceiling at all")],
+    ]
+    assert land.review_stalled(rounds, hard_ceiling=5) is not None
+
+
+def test_the_same_file_at_a_different_severity_is_a_different_finding():
+    rounds = [[finding("src/a.py", severity="high")], [finding("src/a.py", severity="low")]]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_a_repeated_low_finding_does_not_stall_the_review():
+    """Low findings never block a clean verdict, so repeating one is not deadlock."""
+    rounds = [[finding("src/a.py", severity="low")], [finding("src/a.py", severity="low")]]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_only_consecutive_rounds_are_compared():
+    rounds = [[finding("src/a.py")], [finding("src/b.py")], [finding("src/a.py")]]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_a_hard_ceiling_still_bounds_an_unattended_loop():
+    rounds = [[finding(f"src/{n}.py")] for n in range(5)]
+    reason = land.review_stalled(rounds, hard_ceiling=5)
+    assert reason and "ceiling" in reason.lower()
+
+
+def test_one_round_is_never_stalled():
+    assert land.review_stalled([[finding("src/a.py")]], hard_ceiling=5) is None
+
+
+def test_no_rounds_is_never_stalled():
+    assert land.review_stalled([], hard_ceiling=5) is None
+
+
+def test_a_clean_round_after_findings_is_not_a_repeat():
+    rounds = [[finding("src/a.py")], []]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_the_stall_reason_names_the_finding_that_survived():
+    rounds = [
+        [finding("scripts/triage.py", summary="auth vocabulary is incomplete")],
+        [finding("scripts/triage.py", summary="the auth vocabulary is still incomplete")],
+    ]
+    assert "scripts/triage.py" in land.review_stalled(rounds, hard_ceiling=5)
+
+
+# --- issue #12: a partial check list is not a complete one --------------------
+
+
+def test_a_partially_reported_check_list_is_not_green_when_protection_is_unknown():
+    """`test` needs `lint`; the window after lint passes and before test registers."""
+    only_lint = [check("lint", "SUCCESS")]
+    assert land.ci_gate(only_lint, UNPROTECTED) == "pending"
+
+
+def test_every_declared_job_must_report_before_green_under_unknown_protection():
+    partial = [check("lint", "SUCCESS"), check("test", "PENDING")]
+    assert land.ci_gate(partial, UNPROTECTED) == "pending"
+
+
+def test_matrix_cells_satisfy_the_job_they_belong_to():
+    """Otherwise the fix above would deadlock every matrix repo."""
+    profile = {
+        "required_checks": [],
+        "protection_known": False,
+        "jobs": {"lint": job(), "test": job()},
+    }
+    matrix = [
+        check("lint", "SUCCESS"),
+        check("test (3.11)", "SUCCESS"),
+        check("test (3.12)", "SUCCESS"),
+        check("test (3.13)", "SUCCESS"),
+    ]
+    assert land.ci_gate(matrix, profile) == "full_green"
+
+
+def test_a_profile_declaring_no_jobs_is_never_green_on_an_unrelated_check():
+    """Superseded by tests/test_gate_spec.py: an unknown check proves nothing."""
+    bare = {"required_checks": [], "protection_known": False, "jobs": {}}
+    assert land.ci_gate([check("something", "SUCCESS")], bare) == "pending"
+
+
+# --- issue #18: a job that cannot report must not pin the gate ---------------
+
+
+def _unprotected_with(**extra_jobs):
+    return {
+        "required_checks": [],
+        "protection_known": False,
+        "jobs": {"lint": job(), "test": job(), **extra_jobs},
+    }
+
+
+GREEN = [check("lint", "SUCCESS"), check("test", "SUCCESS")]
+
+
+def test_a_schedule_only_job_does_not_block_a_pull_request():
+    profile = _unprotected_with(nightly=job(triggers=["schedule"]))
+    assert land.ci_gate(GREEN, profile) == "full_green"
+
+
+def test_a_dispatch_only_job_does_not_block():
+    profile = _unprotected_with(release=job(triggers=["workflow_dispatch"]))
+    assert land.ci_gate(GREEN, profile) == "full_green"
+
+
+def test_a_path_filtered_job_that_did_not_report_does_not_block():
+    profile = _unprotected_with(docs=job(path_filters=["docs/**"]))
+    assert land.ci_gate(GREEN, profile) == "full_green"
+
+
+def test_a_job_whose_name_is_a_template_cannot_be_attributed_so_cannot_be_required():
+    profile = _unprotected_with(e2e=job(display="E2E ${{ matrix.browser }}"))
+    assert land.ci_gate(GREEN, profile) == "full_green"
+
+
+def test_an_unconditional_job_that_never_reported_still_blocks():
+    """The #12 fix must survive: a plain PR job going missing is not fine."""
+    profile = _unprotected_with(build=job())
+    assert land.ci_gate(GREEN, profile) == "pending"
+
+
+def test_a_conditional_job_that_did_report_and_failed_still_fails_the_gate():
+    profile = _unprotected_with(docs=job(path_filters=["docs/**"]))
+    assert land.ci_gate([*GREEN, check("docs", "FAILURE")], profile) == "failed"
+
+
+# --- issue #24: a severity that drifts must not defeat the repeat detector ---
+
+
+def test_a_finding_alternating_between_blocking_severities_is_still_a_repeat():
+    a = {
+        "file": "scripts/triage.py",
+        "severity": "high",
+        "summary": "the auth vocabulary is still incomplete",
+    }
+    b = {**a, "severity": "medium"}
+    assert land.review_stalled([[a], [b]], hard_ceiling=5) is not None
+
+
+def test_a_downgrade_out_of_the_blocking_band_is_still_progress():
+    a = {"file": "scripts/triage.py", "severity": "high", "summary": "vocabulary incomplete"}
+    b = {**a, "severity": "low"}
+    assert land.review_stalled([[a], [b]], hard_ceiling=5) is None
+
+
+# --- issue #25: a running job still holds the gate, requirable or not --------
+
+
+def test_a_non_requirable_job_that_is_actually_running_still_holds_the_gate():
+    profile = _unprotected_with(integration=job(path_filters=["src/**"]))
+    checks = [*GREEN, check("integration", "PENDING")]
+    assert land.classify_checks(checks, profile)["actionable_pending"] == ["integration"]
+    assert land.ci_gate(checks, profile) == "pending"
+
+
+def test_a_templated_matrix_job_that_is_running_still_holds_the_gate():
+    profile = _unprotected_with(e2e=job(display="E2E ${{ matrix.browser }}"))
+    assert land.ci_gate([*GREEN, check("E2E chrome", "PENDING")], profile) == "pending"
+
+
+# --- issue #26: path filters are per event ----------------------------------
+
+
+def test_a_push_only_path_filter_does_not_excuse_a_pull_request_job():
+    """`on: push: {paths: [...]}` plus an unconditional `pull_request` trigger."""
+    spec = job(path_filters=["src/**"], pr_path_filters=[])
+    assert land._can_report(spec) is True
+
+
+def test_a_pull_request_path_filter_still_makes_a_job_conditional():
+    spec = job(path_filters=["docs/**"], pr_path_filters=["docs/**"])
+    assert land._can_report(spec) is False

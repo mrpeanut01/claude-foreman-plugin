@@ -20,17 +20,35 @@ It is not an estimate, and nothing schedules on it.
 |------|----------|--------------|---------|
 | `low` | yes | yes | docs, tests, comments, formatting, renames |
 | `medium` | yes | yes | anything not otherwise classified |
-| `high` | **never** | **never** | protected paths; auth, token, session, credential, permission, migration, schema, payment, billing, secret, csrf, xss, injection, encryption; or a `security`/`critical`/`data-loss`/`p0` label |
+| `high` | **never** | **never** | protected paths; auth (any inflection, en-GB included), token, password, session, credential, permission, migration, schema, payment, billing, secret, csrf, xss, injection, encryption, privilege; or a `security`/`critical`/`data-loss`/`p0` label |
 
 `medium` is the default because most issues are ordinary, and defaulting to
 `high` would mean nothing ever batches.
 
 ## Extending the vocabularies
 
-Both live at the top of `scripts/triage.py` as plain tuples. Add to them when a
-repo has its own dangerous words — `tenant`, `quota`, `pricing`, `pii` — rather
-than correcting the same issue by hand every run. A correction you make twice
-belongs in the list.
+The lists live at the top of `scripts/triage.py`. **They are regex fragments, not
+plain words** — `_hint_matcher` joins them into `\b(?:…)\b` without escaping.
+
+Add to them when a repo has its own dangerous words — `tenant`, `quota`,
+`pricing`, `pii` — rather than correcting the same issue by hand every run. A
+correction you make twice belongs in the list.
+
+> **Escape anything that is not a plain word.** A `.` becomes a wildcard, so
+> `.env` matches `aXb`. An unbalanced parenthesis raises `re.PatternError` and
+> crashes every triage run. Use `re.escape("...")` for literal strings.
+
+Match inflections deliberately, because a risk gate that stops recognising a word
+is worse than the substring bug plain matching would cause:
+
+| Want | Write | Not |
+|------|-------|-----|
+| authentication, unauthorised, Reauthentication | `r"\w*authentic\w*"`, `r"\w*authoris\w*"` | `r"auth\w*"` — matches Author |
+| token, tokens | `r"tokens?"` | `r"token"` — misses the plural |
+| doc, docs — but never Dockerfile | `r"docs?"` | `r"doc"` with substring matching |
+
+Both spellings, always: this project writes en-GB, so `authorise` and
+`authorisation` are what its reporters type.
 
 If the repo defines `risk:low` / `risk:medium` / `risk:high` or `size:*` labels,
 they will be applied. If it does not, the scores still land in the ledger and the

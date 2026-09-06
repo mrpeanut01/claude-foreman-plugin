@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Unattended issue-to-merge development loop with CI cost awareness",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "foreman",
       "source": "./",
       "description": "Runs the dev loop end to end: triage issues, batch them by CI cost, build, review independently, and auto-merge on green",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "keywords": [
         "github",
         "issues",

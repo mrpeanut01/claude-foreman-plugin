@@ -38,6 +38,10 @@ class ProfileError(Exception):
 
 DOC_SUFFIXES = {".md", ".rst", ".txt", ".adoc"}
 DOC_DIRS = {"docs", "doc", "documentation"}
+# Test sources only. The `.*` glob otherwise matches compiled bytecode, and a
+# .pyc handed to a test runner is at best an error.
+TEST_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".rb", ".go", ".rs", ".java", ".kt"}
+SKIP_DIRS = {"__pycache__", ".pytest_cache", "node_modules", ".mypy_cache", ".ruff_cache"}
 FINISHED = {"success", "failure"}
 
 
@@ -54,9 +58,17 @@ def _on_block(doc: dict) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def _path_filters(on: dict) -> list[str]:
+def _path_filters(on: dict, events: set[str] | None = None) -> list[str]:
+    """Path filters declared by the given events (all of them when None).
+
+    Filters belong to the event that declared them. A `paths:` on `push` says
+    nothing about whether a job runs on a pull request, and treating the union as
+    if it did marks unconditional PR jobs conditional.
+    """
     paths: list[str] = []
-    for cfg in on.values():
+    for event, cfg in on.items():
+        if events is not None and str(event) not in events:
+            continue
         if isinstance(cfg, dict):
             paths.extend(cfg.get("paths", []) or [])
     return sorted(dict.fromkeys(paths))
@@ -78,6 +90,20 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
         on = _on_block(doc)
         triggers = sorted(str(k) for k in on)
         filters = _path_filters(on)
+        pr_filters = _path_filters(on, {"pull_request", "pull_request_target"})
+        events = {
+            str(event): {
+                "paths": list((cfg or {}).get("paths") or []),
+                "paths_ignore": list((cfg or {}).get("paths-ignore") or []),
+                "branches": list((cfg or {}).get("branches") or []),
+                "tags": list((cfg or {}).get("tags") or []),
+                "types": list((cfg or {}).get("types") or []),
+                "branches_ignore": list((cfg or {}).get("branches-ignore") or []),
+                "tags_ignore": list((cfg or {}).get("tags-ignore") or []),
+            }
+            for event, cfg in on.items()
+            if isinstance(cfg, dict) or cfg is None
+        }
         for name, spec in (doc.get("jobs") or {}).items():
             spec = spec if isinstance(spec, dict) else {}
             needs = spec.get("needs", [])
@@ -90,6 +116,8 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
                     "needs": [needs] if isinstance(needs, str) else list(needs or []),
                     "triggers": triggers,
                     "path_filters": filters,
+                    "pr_path_filters": pr_filters,
+                    "events": events,
                 }
             )
     return (jobs, problems) if report_problems else jobs
@@ -135,7 +163,13 @@ def attribute(reported: str, jobs: list[dict]) -> str | None:
         # A display name built from a matrix expression cannot be reversed.
         if display and not _EXPRESSION.search(display):
             candidates[display] = job["name"]
-    for probe_name in (reported, _MATRIX_SUFFIX.sub("", reported)):
+    # A reusable workflow reports as "caller / called-job"; the caller is the job
+    # the workflow file declares.
+    probes = [reported, _MATRIX_SUFFIX.sub("", reported)]
+    if " / " in reported:
+        head = reported.split(" / ")[0].strip()
+        probes += [head, _MATRIX_SUFFIX.sub("", head)]
+    for probe_name in probes:
         if probe_name in candidates:
             return candidates[probe_name]
     return None
@@ -207,9 +241,21 @@ def required_checks(protection: dict | None) -> list[str]:
 # --- test impact --------------------------------------------------------------
 
 
+def _is_test_source(path: Path) -> bool:
+    """A real test file, not a build artefact that happens to sit beside one."""
+    return path.is_file() and path.suffix in TEST_SUFFIXES and not SKIP_DIRS & set(path.parts)
+
+
 def _is_test(rel: str) -> bool:
-    parts = Path(rel).parts
-    return bool(parts) and parts[0] in {"test", "tests"} and Path(rel).name.startswith("test")
+    path = Path(rel)
+    parts = path.parts
+    return (
+        bool(parts)
+        and parts[0] in {"test", "tests"}
+        and path.name.startswith("test")
+        and path.suffix in TEST_SUFFIXES
+        and not SKIP_DIRS & set(parts)
+    )
 
 
 def _is_doc(rel: str) -> bool:
@@ -234,7 +280,11 @@ def impacted_tests(changed: list[str], repo_root: Path) -> tuple[list[str], bool
             continue  # documentation genuinely maps to no tests
         else:
             stem = Path(rel).stem
-            found = [str(p.relative_to(root)) for p in sorted(root.glob(f"tests/**/test_{stem}.*"))]
+            found = [
+                str(p.relative_to(root))
+                for p in sorted(root.glob(f"tests/**/test_{stem}.*"))
+                if _is_test_source(p)
+            ]
             if found:
                 hits.update(found)
             else:
@@ -243,6 +293,20 @@ def impacted_tests(changed: list[str], repo_root: Path) -> tuple[list[str], bool
 
 
 # --- assembly -----------------------------------------------------------------
+
+
+def _filter_count(cfg: dict) -> int:
+    """How restricted a trigger is. Fewer filters means it fires more often."""
+    keys = (
+        "paths",
+        "paths_ignore",
+        "branches",
+        "branches_ignore",
+        "tags",
+        "tags_ignore",
+        "types",
+    )
+    return sum(1 for key in keys if cfg.get(key))
 
 
 def build_profile(
@@ -258,6 +322,28 @@ def build_profile(
     flakes = flake_rates(attributed)
     required = set(required_checks(protection))
 
+    # A job name reused across workflows is one check name, so merge rather than
+    # overwrite: a release-only `test` job must not erase the PR `test` job.
+    by_name: dict[str, dict] = {}
+    for job in jobs:
+        seen = by_name.get(job["name"])
+        if seen is None:
+            by_name[job["name"]] = dict(job)
+            continue
+        seen["triggers"] = sorted(set(seen["triggers"]) | set(job["triggers"]))
+        # One check name, several declarations: if ANY of them fires
+        # unconditionally a check will appear, so keep the most permissive config
+        # per event. Order-independent, unlike overwriting.
+        merged_events = dict(seen.get("events") or {})
+        for event, cfg in (job.get("events") or {}).items():
+            current = merged_events.get(event)
+            if current is None or _filter_count(cfg) < _filter_count(current):
+                merged_events[event] = cfg
+        seen["events"] = merged_events
+        seen["path_filters"] = sorted(set(seen["path_filters"]) | set(job["path_filters"]))
+        seen["pr_path_filters"] = sorted(set(seen["pr_path_filters"]) | set(job["pr_path_filters"]))
+    jobs = list(by_name.values())
+
     merged, unmeasured = {}, []
     for job in jobs:
         name = job["name"]
@@ -267,7 +353,15 @@ def build_profile(
         merged[name] = {
             **{
                 k: job[k]
-                for k in ("workflow", "workflow_file", "needs", "triggers", "path_filters")
+                for k in (
+                    "workflow",
+                    "workflow_file",
+                    "needs",
+                    "triggers",
+                    "path_filters",
+                    "pr_path_filters",
+                    "events",
+                )
             },
             "display": job.get("display"),
             "p50": stat["p50"] if stat else None,
@@ -286,6 +380,9 @@ def build_profile(
         "tier_threshold_s": threshold_s,
         "jobs": merged,
         "required_checks": sorted(required),
+        # Absent protection means we do not know what is required. Recording
+        # that as a fact stops land.py reading it as "nothing is".
+        "protection_known": bool(protection),
         "cheap_tier_s": tier_cost("cheap"),
         "expensive_tier_s": tier_cost("expensive"),
         "unmeasured_jobs": sorted(unmeasured),
@@ -348,8 +445,9 @@ def _fetch_job_runs(repo: str, runs: int, branch: str | None) -> list[dict]:
 def _fetch_protection(repo: str) -> dict | None:
     view = _gh_json(["repo", "view", repo, "--json", "defaultBranchRef"]) or {}
     branch = (view.get("defaultBranchRef") or {}).get("name", "main")
-    # Absent or inaccessible protection is normal, not an error: it just means
-    # nothing is required, so nothing can gate a merge.
+    # Absent or inaccessible protection is normal, not an error — but it means
+    # UNKNOWN, not "nothing is required". build_profile records that as
+    # protection_known, and land.py then treats every check as required.
     return _gh_json(["api", f"repos/{repo}/branches/{branch}/protection"])
 
 
