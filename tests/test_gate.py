@@ -9,10 +9,19 @@ exactly like a lint step that passed.
 So these tests describe a gate that cannot be half-run. Every command CI would
 run on this change is either executed here or reported as not executed, and
 green requires that nothing was left unaccounted for.
+
+They also own their PATH. The gate's entire subject is which commands this
+machine can reach, so a test of it that inherits the developer's PATH is not
+testing the gate, it is testing the laptop — and it passed on the laptop while
+failing in CI, which is the same "an unrun check looked like a passing one"
+this file exists to stop, aimed at itself. Every test here runs against a
+toolbox holding a shell and whatever that test installed by name, so what is
+available is an argument rather than an accident.
 """
 
 import importlib
 import json
+import shutil
 import sys
 import textwrap
 from pathlib import Path
@@ -22,6 +31,39 @@ import pytest
 # scripts/ is not an installed package: put it on the path, then load by name.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 gate = importlib.import_module("gate")
+
+
+@pytest.fixture(autouse=True)
+def toolbox(tmp_path, monkeypatch):
+    """The only PATH any test in this file sees.
+
+    A shell goes in because the gate cannot execute a single step without one —
+    that is the substrate, not a check under test. Nothing else does: `ruff`,
+    `uvx`, `touch` and the rest are installed by the tests that mean to have
+    them, so that "the tool is missing" and "the tool is there" are two states a
+    test chooses between, on every machine, rather than two machines.
+    """
+    directory = tmp_path / "toolbox"
+    directory.mkdir()
+    for shell in ("bash", "sh"):
+        found = shutil.which(shell)
+        if found:
+            (directory / shell).symlink_to(found)
+    monkeypatch.setenv("PATH", str(directory))
+    return directory
+
+
+def install_tool(toolbox, name, script=":\n"):
+    """Put an executable of that name where the gate will find it, for one test."""
+    path = toolbox / name
+    path.write_text(f"#!/bin/sh\n{script}")
+    path.chmod(0o755)
+    return path
+
+
+def install_marker_tool(toolbox, name="touch"):
+    """A program that records having run, so "it never ran" is an observation."""
+    return install_tool(toolbox, name, ': > "$1"\n')
 
 
 @pytest.fixture
@@ -66,6 +108,12 @@ def only_python3(name):
     return None if name == "python" else "/bin/" + name
 
 
+# `run: true` is a step that passes and needs nothing installed — `true` is a
+# shell builtin. It is also, unquoted, a YAML *boolean*, which is why the
+# fixtures below leave it that way: Actions reads `run:` as a string and runs
+# the two characters the author wrote, and a gate that stringifies PyYAML's bool
+# into `True` instead looks for a program no machine has. See
+# `test_a_yaml_boolean_run_step_is_the_command_the_author_wrote`.
 CHECK_ONLY = """
     name: CI
     on: [pull_request]
@@ -249,7 +297,8 @@ def test_a_missing_tool_is_reported_as_unrunnable_and_not_as_a_failure(repo):
     assert ids(report["unrunnable"]) == ["lint#1"]
 
 
-def test_a_step_whose_tool_is_missing_is_never_executed(repo):
+def test_a_step_whose_tool_is_missing_is_never_executed(repo, toolbox):
+    install_marker_tool(toolbox)  # so only the gate's refusal keeps the file away
     workflow(
         repo,
         """
@@ -301,6 +350,55 @@ def test_a_waiver_does_not_hide_a_real_failure(repo):
     assert report["exit_code"] == 1
 
 
+LINT_STEP = """
+    name: CI
+    on: [pull_request]
+    jobs:
+      lint:
+        steps:
+          - run: foreman-linter check .
+"""
+
+
+def test_installing_the_tool_is_the_only_difference_between_blocked_and_green(repo, toolbox):
+    """Both outcomes, one machine, one command.
+
+    This is the assertion the suite was missing. It used to test the first half
+    against a name nothing could have (`foreman-no-such-linter`) and the second
+    half against whatever the developer happened to have installed — which is
+    how it came to pass on a laptop with ruff and fail in CI without one. Here
+    the only thing that moves is whether the program exists.
+    """
+    workflow(repo, LINT_STEP)
+    assert run(repo, profile=profile(lint={}))["status"] == "blocked"
+
+    install_tool(toolbox, "foreman-linter")
+    assert run(repo, profile=profile(lint={}))["status"] == "green"
+
+
+def test_a_tool_the_machine_has_but_the_test_did_not_install_is_out_of_reach(repo):
+    """The CI condition, written down.
+
+    CI installs pytest and pyyaml and nothing else, so `uvx` is not there. A
+    developer's machine has it. If that difference can reach these tests, they
+    are measuring the machine.
+    """
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        jobs:
+          lint:
+            steps:
+              - run: uvx ruff check .
+        """,
+    )
+    report = run(repo, profile=profile(lint={}))
+    assert report["status"] == "blocked"
+    assert report["unrunnable"][0]["reason"] == "`uvx` is not on PATH"
+
+
 def test_an_executable_that_is_absent_from_path_counts_as_missing():
     assert gate.missing_requirements("foreman-no-such-linter check .")
     assert gate.missing_requirements("true && foreman-no-such-linter")
@@ -335,6 +433,63 @@ def test_the_python_alias_leaves_every_other_word_alone(monkeypatch):
     adapted, note = gate.adapt_command("uses-python3 --python-version=3.11")
     assert adapted == "uses-python3 --python-version=3.11"
     assert note is None
+
+
+# --- what a `run:` value actually says ----------------------------------------
+
+
+def test_a_yaml_boolean_run_step_is_the_command_the_author_wrote(repo):
+    """`run: true` is the shell command `true`, not a program called `True`.
+
+    Unquoted, YAML resolves it to a boolean, because YAML does not know Actions
+    types `run:` as a string. Stringifying that bool the Python way yields
+    `True` — a name no POSIX machine has — so the gate declared an ordinary
+    no-op step unrunnable and refused to go green. It hid on macOS, where the
+    filesystem is case-insensitive and `which("True")` cheerfully answers
+    /usr/bin/true, and only showed up on Linux.
+    """
+    workflow(repo, CHECK_ONLY)
+    report = run(repo, profile=profile(lint={}))
+    assert report["status"] == "green"
+    assert [s["command"] for s in report["steps"] if s["job"] == "lint"] == ["true"]
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (True, "true"),  # `run: true`, and `run: on`, and `run: yes`
+        (False, "false"),  # `run: false`, and `run: off`, and `run: no`
+        ("  ruff check .  ", "ruff check ."),
+        (3, "3"),
+    ],
+)
+def test_a_run_value_renders_as_the_scalar_the_workflow_holds(value, expected):
+    assert gate.run_text(value) == expected
+
+
+@pytest.mark.parametrize("value", [None, ["ruff", "check"], {"shell": "bash"}])
+def test_a_run_value_that_is_no_command_at_all_renders_as_nothing(value):
+    """Not every `run:` denotes a command, and the ones that do not must not be
+    invented into one — a made-up command name reports a missing tool nobody
+    ever asked for, which reads exactly like a real one."""
+    assert gate.run_text(value) == ""
+
+
+def test_a_step_whose_run_block_is_empty_blocks_rather_than_passing(repo):
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        jobs:
+          lint:
+            steps:
+              - run:
+        """,
+    )
+    report = run(repo, profile=profile(lint={}))
+    assert report["status"] == "blocked"
+    assert "run:" in report["unrunnable"][0]["reason"]
 
 
 # --- steps that verify nothing ------------------------------------------------
@@ -467,7 +622,7 @@ def test_a_step_runs_in_the_working_directory_it_declares(repo):
           lint:
             steps:
               - working-directory: src
-                run: test "$(basename "$PWD")" = src
+                run: 'test "${PWD##*/}" = src'
         """,
     )
     assert run(repo, profile=profile(lint={}))["status"] == "green"
@@ -476,9 +631,10 @@ def test_a_step_runs_in_the_working_directory_it_declares(repo):
 # --- which jobs the gate is entitled to run -----------------------------------
 
 
-def test_a_job_a_pull_request_does_not_trigger_is_never_run_locally(repo):
+def test_a_job_a_pull_request_does_not_trigger_is_never_run_locally(repo, toolbox):
     """A cheap push-only job can be a deploy. Running one on a laptop is not a
     gate, it is an accident."""
+    install_marker_tool(toolbox)
     workflow(
         repo,
         """
@@ -501,7 +657,8 @@ def test_a_job_a_pull_request_does_not_trigger_is_never_run_locally(repo):
     assert {s["job"] for s in report["steps"]} == {"impact", "lint"}
 
 
-def test_an_expensive_job_is_left_to_ci_and_named_in_the_report(repo):
+def test_an_expensive_job_is_left_to_ci_and_named_in_the_report(repo, toolbox):
+    install_marker_tool(toolbox)
     workflow(
         repo,
         """
@@ -664,7 +821,8 @@ def out(capsys):
     return json.loads(capsys.readouterr().out)
 
 
-def test_plan_says_what_would_run_without_running_any_of_it(repo, capsys):
+def test_plan_says_what_would_run_without_running_any_of_it(repo, toolbox, capsys):
+    install_marker_tool(toolbox)  # the step is runnable; plan still must not run it
     workflow(
         repo,
         """
