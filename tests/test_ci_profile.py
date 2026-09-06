@@ -906,3 +906,23 @@ def test_a_mapping_where_a_filter_belongs_reads_as_no_filter(tmp_path):
     (job,) = ci_profile.parse_workflows(d)
     assert job["path_filters"] == []
     assert job["events"]["pull_request"]["paths"] == []
+
+
+def test_the_collision_merge_unions_needs_whichever_file_sorts_first(tmp_path):
+    """`triggers` and the filters were merged; `needs` was whichever
+    declaration was read first, so renaming a workflow file changed the job
+    graph the profile reported."""
+    answers = []
+    for names in (("a", "b"), ("b", "a")):
+        d = tmp_path / "".join(names) / ".github" / "workflows"
+        d.mkdir(parents=True)
+        (d / f"{names[0]}.yml").write_text(
+            "name: x\non: {pull_request: }\njobs:\n  lint: {steps: [{run: ruff}]}\n"
+            "  test: {needs: [lint], steps: [{run: pytest}]}\n"
+        )
+        (d / f"{names[1]}.yml").write_text(
+            "name: y\non: {workflow_dispatch: }\njobs:\n  test: {steps: [{run: pytest}]}\n"
+        )
+        profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
+        answers.append(profile["jobs"]["test"]["needs"])
+    assert answers == [["lint"], ["lint"]]

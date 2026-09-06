@@ -435,6 +435,10 @@ def build_profile(
         seen["triggers"] = sorted(set(seen["triggers"]) | set(job["triggers"]))
         seen["path_filters"] = sorted(set(seen["path_filters"]) | set(job["path_filters"]))
         seen["pr_path_filters"] = sorted(set(seen["pr_path_filters"]) | set(job["pr_path_filters"]))
+        # The graph edges too: a `test` that needs `lint` in one workflow and
+        # nothing in another still needs `lint` to be `test`, and which file
+        # sorted first must not decide whether the profile says so.
+        seen["needs"] = sorted(set(seen["needs"]) | set(job["needs"]))
     # Every declaration of an event is collected before any of them is merged, so
     # the result depends on what the workflows say and not on the order the files
     # happened to be read in.
