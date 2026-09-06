@@ -642,3 +642,88 @@ def test_a_tags_ignore_push_trigger_keeps_the_job_out_of_the_gate(tmp_path):
     )
     spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
     assert land.can_report_on_pr(spec, "main") is False
+
+
+# --- issue #51: merging two declarations of one job name ----------------------
+
+
+def _two_workflows(tmp_path, first_on: str, second_on: str) -> list[bool]:
+    """Requirability of job `test` on a PR into main, with the two workflow
+    files written in both filename orders."""
+    import land
+
+    answers = []
+    for names in (("a", "b"), ("b", "a")):
+        d = tmp_path / "".join(names) / ".github" / "workflows"
+        d.mkdir(parents=True)
+        for name, on in zip(names, (first_on, second_on), strict=True):
+            (d / f"{name}.yml").write_text(
+                f"name: {name}\non:\n{textwrap.indent(textwrap.dedent(on).strip(), '  ')}\n"
+                "jobs:\n  test: {steps: [{run: pytest}]}\n"
+            )
+        profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
+        answers.append(land.can_report_on_pr(profile["jobs"]["test"], "main"))
+    return answers
+
+
+def test_the_collision_merge_keeps_the_declaration_that_can_still_report(tmp_path):
+    """#51's repro. Both declarations carry exactly one filter, so a filter-count
+    proxy cannot separate them and the answer falls to filename order. Only the
+    branch-filtered one produces a check while the PR is open, and it does so on
+    every PR into main, so the job is requirable however the files are named.
+    """
+    answers = _two_workflows(
+        tmp_path,
+        "pull_request:\n  types: [closed]",
+        "pull_request:\n  branches: [main]",
+    )
+    assert answers == [True, True]
+
+
+def test_two_branch_filtered_declarations_merge_into_the_union_of_their_branches(tmp_path):
+    """Neither declaration covers the other, but their disjunction is exactly
+    one branch list, so nothing has to be thrown away."""
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    for name, branch in (("a", "main"), ("b", "develop")):
+        (d / f"{name}.yml").write_text(
+            f"name: {name}\non:\n  pull_request:\n    branches: [{branch}]\n"
+            "jobs:\n  test: {steps: [{run: pytest}]}\n"
+        )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "main") is True
+    assert land.can_report_on_pr(spec, "develop") is True
+    assert land.can_report_on_pr(spec, "release") is False
+
+
+def test_the_collision_merge_never_widens_two_declarations_into_no_filter(tmp_path):
+    """`branches: [main]` OR `paths: [src/**]` is not "unconditional": a PR into
+    develop touching only docs runs neither. Merging key by key would say
+    otherwise and hang the gate on a check that never appears.
+    """
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "a.yml").write_text(
+        "name: a\non:\n  pull_request:\n    branches: [main]\n"
+        "jobs:\n  test: {steps: [{run: pytest}]}\n"
+    )
+    (d / "b.yml").write_text(
+        "name: b\non:\n  pull_request:\n    paths: ['src/**']\n"
+        "jobs:\n  test: {steps: [{run: pytest}]}\n"
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "main") is True
+    assert land.can_report_on_pr(spec, "develop") is False
+
+
+def test_the_open_pull_request_types_agree_with_the_gate_that_reads_them():
+    """The merge and the gate must mean the same thing by "still open", and they
+    are in different modules because land.py imports ci_profile, not the reverse.
+    """
+    import land
+
+    assert set(ci_profile.OPEN_PR_TYPES) == set(land.PR_OPEN_TYPES)
