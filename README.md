@@ -145,6 +145,33 @@ overrides it.
 python3 -m pytest tests/ -q
 ```
 
+## Releasing
+
+A release is the plugin tree at a tag, packaged so it installs without cloning.
+
+```bash
+claude plugin validate --strict .
+claude plugin tag --dry-run     # foreman--v<version>; checks plugin.json and marketplace.json agree
+claude plugin tag --push
+python3 scripts/package.py --ref foreman--v<version> --expect-version <version>
+gh release create foreman--v<version> dist/foreman-<version>.tar.gz dist/foreman-<version>.zip dist/SHA256SUMS
+```
+
+The version lives in `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`,
+and a test keeps the two equal; bump both on the change that ships the release.
+`package.py` builds with `git archive`, so only tracked files ship — no tests, no
+CI config, no `.foreman/` — and then verifies each archive the way an installer
+reads it: every path the manifest declares is present, the hook's script is there
+and executable, and the version is the one expected.
+
+Installing a release:
+
+| How | Command |
+|-----|---------|
+| From the tag, through the marketplace | `claude plugin marketplace add https://github.com/mrpeanut01/claude-foreman-plugin.git#foreman--v<version>` then `claude plugin install foreman@claude-foreman-plugin` |
+| From the archive, for one session | `claude --plugin-dir ./foreman-<version>.zip` |
+| From the archive, in a marketplace of your own | a plugin entry whose source is `{"source": "archive", "url": "<release asset URL>", "sha256": "<from SHA256SUMS>"}` |
+
 ## Roadmap
 
 | Phase | Ships | State |

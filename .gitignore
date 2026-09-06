@@ -4,3 +4,4 @@ __pycache__/
 .foreman/
 .venv/
 .DS_Store
+dist/
