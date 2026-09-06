@@ -243,13 +243,23 @@ def test_blockers_are_reported_together_not_one_at_a_time():
 
 # --- issue #1: absent branch protection must not read as "nothing is required" -
 
+
+def job(**kw):
+    """Shaped like what parse_workflows actually emits, triggers included."""
+    base = {
+        "tier": "cheap",
+        "required": False,
+        "display": None,
+        "triggers": ["pull_request", "push"],
+        "path_filters": [],
+    }
+    return {**base, **kw}
+
+
 UNPROTECTED = {
     "required_checks": [],
     "protection_known": False,
-    "jobs": {
-        "lint": {"tier": "cheap", "required": False},
-        "test": {"tier": "cheap", "required": False},
-    },
+    "jobs": {"lint": job(), "test": job()},
 }
 
 
@@ -392,10 +402,7 @@ def test_matrix_cells_satisfy_the_job_they_belong_to():
     profile = {
         "required_checks": [],
         "protection_known": False,
-        "jobs": {
-            "lint": {"tier": "cheap", "display": None},
-            "test": {"tier": "cheap", "display": None},
-        },
+        "jobs": {"lint": job(), "test": job()},
     }
     matrix = [
         check("lint", "SUCCESS"),
@@ -409,3 +416,67 @@ def test_matrix_cells_satisfy_the_job_they_belong_to():
 def test_a_profile_declaring_no_jobs_falls_back_to_nothing_pending():
     bare = {"required_checks": [], "protection_known": False, "jobs": {}}
     assert land.ci_gate([check("something", "SUCCESS")], bare) == "full_green"
+
+
+# --- issue #18: a job that cannot report must not pin the gate ---------------
+
+
+def _unprotected_with(**extra_jobs):
+    return {
+        "required_checks": [],
+        "protection_known": False,
+        "jobs": {"lint": job(), "test": job(), **extra_jobs},
+    }
+
+
+GREEN = [check("lint", "SUCCESS"), check("test", "SUCCESS")]
+
+
+def test_a_schedule_only_job_does_not_block_a_pull_request():
+    profile = _unprotected_with(nightly=job(triggers=["schedule"]))
+    assert land.ci_gate(GREEN, profile) == "full_green"
+
+
+def test_a_dispatch_only_job_does_not_block():
+    profile = _unprotected_with(release=job(triggers=["workflow_dispatch"]))
+    assert land.ci_gate(GREEN, profile) == "full_green"
+
+
+def test_a_path_filtered_job_that_did_not_report_does_not_block():
+    profile = _unprotected_with(docs=job(path_filters=["docs/**"]))
+    assert land.ci_gate(GREEN, profile) == "full_green"
+
+
+def test_a_job_whose_name_is_a_template_cannot_be_attributed_so_cannot_be_required():
+    profile = _unprotected_with(e2e=job(display="E2E ${{ matrix.browser }}"))
+    assert land.ci_gate(GREEN, profile) == "full_green"
+
+
+def test_an_unconditional_job_that_never_reported_still_blocks():
+    """The #12 fix must survive: a plain PR job going missing is not fine."""
+    profile = _unprotected_with(build=job())
+    assert land.ci_gate(GREEN, profile) == "pending"
+
+
+def test_a_conditional_job_that_did_report_and_failed_still_fails_the_gate():
+    profile = _unprotected_with(docs=job(path_filters=["docs/**"]))
+    assert land.ci_gate([*GREEN, check("docs", "FAILURE")], profile) == "failed"
+
+
+# --- issue #24: a severity that drifts must not defeat the repeat detector ---
+
+
+def test_a_finding_alternating_between_blocking_severities_is_still_a_repeat():
+    a = {
+        "file": "scripts/triage.py",
+        "severity": "high",
+        "summary": "the auth vocabulary is still incomplete",
+    }
+    b = {**a, "severity": "medium"}
+    assert land.review_stalled([[a], [b]], hard_ceiling=5) is not None
+
+
+def test_a_downgrade_out_of_the_blocking_band_is_still_progress():
+    a = {"file": "scripts/triage.py", "severity": "high", "summary": "vocabulary incomplete"}
+    b = {**a, "severity": "low"}
+    assert land.review_stalled([[a], [b]], hard_ceiling=5) is None

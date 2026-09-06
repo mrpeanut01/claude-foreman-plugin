@@ -47,6 +47,10 @@ FLAKE_CONFIDENCE = 0.7
 
 CLEAR = {"ci": "full_green", "review": "clean"}
 
+# Events that can produce a check on a pull request. A job wired to anything else
+# will never report here, and requiring it would hang the gate forever.
+PR_EVENTS = {"pull_request", "pull_request_target", "push", "merge_group"}
+
 # Two reviewers disagreeing forever is deadlock; two reviewers finding different
 # things each round is progress. Only the first is worth escalating on.
 REVIEW_MATCH_THRESHOLD = 0.5
@@ -80,6 +84,22 @@ _NOISE = {
 
 
 # --- reading the check list ---------------------------------------------------
+
+
+def _can_report(spec: dict) -> bool:
+    """Whether this job is expected to produce a check on a pull request.
+
+    Requiring a job that cannot report is worse than the early-merge bug the
+    requirement was added to prevent: the gate never clears, and a loop that
+    neither merges nor escalates is a silent hang.
+    """
+    if not (PR_EVENTS & set(spec.get("triggers") or [])):
+        return False  # schedule, workflow_dispatch, release...
+    if spec.get("path_filters"):
+        return False  # conditional on the diff; counts only if it actually reports
+    if "${{" in str(spec.get("display") or ""):
+        return False  # a templated name cannot be attributed back to this job
+    return True
 
 
 def _is_advisory(name: str, profile: dict) -> bool:
@@ -145,8 +165,11 @@ def ci_gate(checks: list[dict], profile: dict) -> str:
             shapes = [
                 {"name": name, "display": spec.get("display")} for name, spec in declared.items()
             ]
+            requirable = {n: s for n, s in declared.items() if _can_report(s)}
+            if not requirable:
+                return "full_green" if not summary["actionable_pending"] else "pending"
             covered = {attribute(name, shapes) for name in summary["passed"]}
-            return "full_green" if all(n in covered for n in declared) else "pending"
+            return "full_green" if all(n in covered for n in requirable) else "pending"
         # Protection says nothing is required, so nothing can block.
         return "full_green" if not summary["actionable_pending"] else "pending"
 
@@ -218,7 +241,11 @@ def same_finding(a: dict, b: dict, threshold: float = REVIEW_MATCH_THRESHOLD) ->
     """Whether two findings are the same complaint, allowing for rewording."""
     if a.get("file") != b.get("file"):
         return False
-    if str(a.get("severity", "")).lower() != str(b.get("severity", "")).lower():
+    # Compare bands, not exact labels: a complaint drifting high <-> medium is the
+    # same complaint, and both block a clean verdict.
+    if (str(a.get("severity", "")).lower() in SERIOUS) != (
+        str(b.get("severity", "")).lower() in SERIOUS
+    ):
         return False
     wa, wb = _words(a.get("summary")), _words(b.get("summary"))
     if not wa or not wb:

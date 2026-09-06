@@ -47,6 +47,20 @@ def budget_remaining(state: ledger.State, config: dict) -> float | None:
     return minutes * 60 - spent_today(state)
 
 
+def age_seconds(batch: dict, now: datetime | None = None) -> float | None:
+    """Seconds since anything happened to this batch, or None if unknown."""
+    stamp = batch.get("updated")
+    if not stamp:
+        return None
+    try:
+        seen = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=UTC)
+    return ((now or datetime.now(UTC)) - seen).total_seconds()
+
+
 def review_rounds(state: ledger.State, batch_id: str) -> list[list[dict]]:
     """Findings from each review round for one batch, oldest first."""
     return [r.get("findings", []) for r in state.reviews if r.get("batch") == batch_id]
@@ -119,6 +133,18 @@ def next_action(state: ledger.State, config: dict) -> dict:
         ]
         if answered:
             return {"do": "unblock", "batch": batch["id"], "reason": "; ".join(answered)}
+        # No gate may pin a batch indefinitely. Watching forever is invisible:
+        # no counter increments, so no cap ever fires and nothing reaches a human.
+        stale_after = limits.get("stale_after_s")
+        age = age_seconds(batch)
+        if stale_after and age is not None and age > stale_after:
+            return {
+                "do": "escalate",
+                "batch": batch["id"],
+                "reason": (
+                    f"stale: waiting on {', '.join(pending)} for {age / 3600:.1f}h with no change"
+                ),
+            }
         return {
             "do": "watch",
             "batch": batch["id"],

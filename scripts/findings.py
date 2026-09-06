@@ -29,7 +29,7 @@ TITLE_LIMIT = 100
 # stops two short titles matching on a single common word.
 DUPLICATE_THRESHOLD = 0.6
 MIN_SHARED_TOKENS = 3
-SEVERITY_ORDER = ["high", "critical", "blocker", "medium", "low"]
+SEVERITY_ORDER = ["critical", "blocker", "high", "medium", "low"]
 
 # Severity chooses the label; a finding about a doc file overrides it.
 SEVERITY_LABEL = {
@@ -69,8 +69,10 @@ def _label(finding: dict, available: list[str]) -> list[str]:
 def to_issue(finding: dict, context: dict, available_labels: list[str]) -> dict:
     """One finding, one issue. Provenance in the body so it can be traced back."""
     summary = " ".join(str(finding.get("summary") or "").split())
-    if not summary:
-        raise UnusableFinding(f"finding has no summary: {finding!r}")
+    if not _tokens(summary):
+        # Punctuation is not a summary, and an issue titled "...!?" can never be
+        # matched against anything, so it would be refiled every round.
+        raise UnusableFinding(f"finding has no usable summary: {finding!r}")
 
     where = finding.get("file") or "unknown file"
     if finding.get("line"):
@@ -110,7 +112,9 @@ def _duplicate_of(title: str, open_issues: list[dict]) -> int | None:
         if not theirs:
             continue
         shared = mine & theirs
-        if len(shared) < MIN_SHARED_TOKENS:
+        # Two-word titles can never reach a flat floor of 3, which would make
+        # "Race condition" permanently undedupable. Scale the floor down instead.
+        if len(shared) < min(MIN_SHARED_TOKENS, len(mine), len(theirs)):
             continue
         score = len(shared) / min(len(mine), len(theirs))
         if score >= DUPLICATE_THRESHOLD and score > best_score:
@@ -129,7 +133,13 @@ def plan(
         except UnusableFinding as exc:
             unusable.append({"finding": finding, "reason": str(exc)})
             continue
-        duplicate = _duplicate_of(issue["title"], open_issues)
+        # Compare against the tracker AND against what this run already queued,
+        # or one defect reported at two call sites files two identical issues.
+        seen = list(open_issues or []) + [
+            {"number": f"pending:{i['title'][:40]}", "title": i["title"], "state": "open"}
+            for i in to_file
+        ]
+        duplicate = _duplicate_of(issue["title"], seen)
         if duplicate:
             skipped.append({**issue, "duplicate_of": duplicate})
         else:
@@ -155,23 +165,25 @@ def _gh_json(args: list[str]):
 
 
 def fetch_open_issues(repo: str, limit: int = 100) -> list[dict]:
-    raw = (
-        _gh_json(
-            [
-                "issue",
-                "list",
-                "--repo",
-                repo,
-                "--state",
-                "all",
-                "--limit",
-                str(limit),
-                "--json",
-                "number,title,state",
-            ]
-        )
-        or []
-    )
+    """Only open issues are used for duplicate detection, so only fetch those.
+
+    Asking for `--state all` spends the window on closed rows that are discarded,
+    and on a repo whose newest issues are mostly closed the open ones needed here
+    fall outside it entirely.
+    """
+    args = [
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "open",
+        "--limit",
+        str(limit),
+        "--json",
+        "number,title,state",
+    ]
+    raw = _gh_json(args) or []
     for item in raw:
         item["state"] = str(item.get("state", "open")).lower()
     return raw

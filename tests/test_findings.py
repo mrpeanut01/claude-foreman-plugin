@@ -170,3 +170,79 @@ def test_a_terser_phrasing_of_a_tracked_issue_is_still_a_duplicate():
         [f(summary="Audit log corrupted by multi-line argument")], CONTEXT, LABELS, existing
     )
     assert plan["file"] == [] and plan["skipped"][0]["duplicate_of"] == 21
+
+
+# --- issue #20: duplicates within a single run -------------------------------
+
+
+def test_the_same_defect_twice_in_one_verdict_is_filed_once():
+    plan = findings.plan([f(), f()], CONTEXT, LABELS, [])
+    assert len(plan["file"]) == 1
+    assert len(plan["skipped"]) == 1
+
+
+def test_two_genuinely_different_findings_are_both_filed():
+    plan = findings.plan(
+        [
+            f(file="a.py", summary="Retry loop has no ceiling at all"),
+            f(file="b.py", summary="Audit log corrupted by newlines"),
+        ],
+        CONTEXT,
+        LABELS,
+        [],
+    )
+    assert len(plan["file"]) == 2
+
+
+# --- issue #21: short titles and unusable summaries --------------------------
+
+
+def test_two_word_titles_can_still_be_recognised_as_duplicates():
+    existing = [{"number": 9, "title": "Race condition", "state": "open"}]
+    plan = findings.plan([f(summary="Race condition")], CONTEXT, LABELS, existing)
+    assert plan["file"] == [] and plan["skipped"][0]["duplicate_of"] == 9
+
+
+def test_short_titles_sharing_only_one_word_are_still_distinct():
+    existing = [{"number": 9, "title": "Cache is broken", "state": "open"}]
+    plan = findings.plan([f(summary="Parser is broken")], CONTEXT, LABELS, existing)
+    assert len(plan["file"]) == 1
+
+
+@pytest.mark.parametrize("summary", ["...!?", "   ", "---", "###"])
+def test_a_summary_with_no_words_is_refused(summary):
+    with pytest.raises(findings.UnusableFinding):
+        findings.to_issue(f(summary=summary), CONTEXT, LABELS)
+
+
+# --- issue #22: worst really means worst -------------------------------------
+
+
+def test_critical_and_blocker_outrank_high():
+    verdict = {
+        "findings": [
+            f(severity="low", file="a.py", summary="Stale docstring here"),
+            f(severity="high", file="b.py", summary="Gate green on red CI"),
+            f(severity="blocker", file="c.py", summary="Data loss on retry"),
+            f(severity="critical", file="d.py", summary="Secrets in the log"),
+            f(severity="medium", file="e.py", summary="Partial list reads full"),
+        ]
+    }
+    plan = findings.from_verdict(verdict, CONTEXT, LABELS, [])
+    assert [i["severity"] for i in plan["file"]] == ["critical", "blocker", "high", "medium", "low"]
+
+
+# --- issue #23: spend the fetch window on rows that are used -----------------
+
+
+def test_the_tracker_fetch_asks_only_for_open_issues(monkeypatch):
+    seen = {}
+
+    def fake(args):
+        seen["args"] = args
+        return []
+
+    monkeypatch.setattr(findings, "_gh_json", fake)
+    findings.fetch_open_issues("o/r")
+    assert "--state" in seen["args"]
+    assert seen["args"][seen["args"].index("--state") + 1] == "open"
