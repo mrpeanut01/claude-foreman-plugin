@@ -498,3 +498,39 @@ def test_plan_reads_its_config_and_profile_from_the_repository_when_run_from_a_w
     assert [b["issues"] for b in plan["batches"]] == [[1], [2]], "max_batch_issues was read"
     assert plan["savings"]["suite_seconds"] == 1000, "the profile was read"
     assert "warning" not in captured.err, captured.err
+
+
+# --- an unrecognised risk ceiling fails closed --------------------------------
+
+
+def test_a_misspelled_risk_ceiling_refuses_to_group_rather_than_grouping_everything():
+    """An unknown ceiling ranked above `high`, so `"Medium"` switched the risk
+    gate off: two high-risk issues shared a PR and nothing said a word."""
+    a, b = rec(1, risk="high", paths=["a.py"]), rec(2, risk="high", paths=["b.py"])
+    for ceiling in ("Medium", "strict", "", None):
+        ok, why = batch.can_group(a, b, {"risk_ceiling": ceiling})
+        assert not ok, ceiling
+        assert "risk_ceiling" in why
+
+
+def test_a_misspelled_risk_ceiling_is_said_out_loud_when_planning(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    triage_file = tmp_path / "triage.json"
+    triage_file.write_text(json.dumps({"triaged": _actionable(11, 12)}))
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"risk_ceiling": "strict"}))
+    rc = batch.main(
+        [
+            "plan",
+            "--triage",
+            str(triage_file),
+            "--ledger",
+            str(tmp_path / ".foreman"),
+            "--config",
+            str(config),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "risk_ceiling" in captured.err and "strict" in captured.err
+    assert [b["issues"] for b in json.loads(captured.out)["batches"]] == [[11], [12]]

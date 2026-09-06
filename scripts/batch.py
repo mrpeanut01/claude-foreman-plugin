@@ -44,8 +44,28 @@ def _rank(risk: str) -> int:
     return RISK_ORDER.index(risk) if risk in RISK_ORDER else len(RISK_ORDER)
 
 
+def ceiling_problem(config: dict) -> str | None:
+    """Why the configured risk ceiling cannot be applied, or None when it can.
+
+    Fails closed. `_rank` puts an unknown value above `high`, which is right
+    for an issue's risk (unknown rounds up) and exactly wrong for the ceiling:
+    a misspelling — `"Medium"`, `"strict"`, a trailing space — ranked above
+    every real risk, so nothing ever exceeded it and two high-risk issues
+    shared a PR without a word said.
+    """
+    ceiling = config.get("risk_ceiling", "medium")
+    if ceiling in RISK_ORDER:
+        return None
+    return (
+        f"risk_ceiling {ceiling!r} is not one of {RISK_ORDER}; nothing shares a batch until it is"
+    )
+
+
 def can_group(a: dict, b: dict, config: dict) -> tuple[bool, str]:
     """Whether two issues may share a PR, and if not, why not."""
+    problem = ceiling_problem(config)
+    if problem:
+        return False, problem
     ceiling = config.get("risk_ceiling", "medium")
     for record in (a, b):
         if _rank(record.get("risk", "high")) > _rank(ceiling):
@@ -326,6 +346,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"warning: no ledger at {ledger_root}; batch ids will restart at b-001",
                 file=sys.stderr,
             )
+        problem = ceiling_problem(config)
+        if problem:
+            # Every issue comes out solo below, which is safe and useless;
+            # without this line it is also silent.
+            print(f"warning: {problem}", file=sys.stderr)
         taken = set(ledger_mod.load(ledger_root).batches)
         batches = group_issues(triage_out.get("triaged", []), config, taken=taken)
         print(
