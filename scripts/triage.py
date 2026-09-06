@@ -12,8 +12,9 @@ they are what keeps automated triage trustworthy:
     applying needs-repro is evidence of absence, not absence of evidence.
 
 CLI:
-    triage.py plan --repo OWNER/NAME [--limit 50] [--json]
-    triage.py apply --repo OWNER/NAME --plan plan.json
+    triage.py plan --repo OWNER/NAME [--limit 50] [--config .foreman/config.json]
+        [--ledger .foreman]
+    triage.py apply --repo OWNER/NAME --plan plan.json [--ledger .foreman]
 """
 
 from __future__ import annotations

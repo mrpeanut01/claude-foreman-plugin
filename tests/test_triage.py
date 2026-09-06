@@ -1,6 +1,7 @@
 """Triage: classify, size, risk-score and dedupe issues into the ledger."""
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1108,3 +1109,11 @@ def test_repository_names_compare_case_insensitively(tmp_path, monkeypatch):
         ["apply", "--repo", "Me/Mine", "--plan", str(plan), "--ledger", str(tmp_path / ".f")]
     )
     assert code == 0
+
+
+def test_the_docstring_documents_the_flags_plan_and_apply_accept():
+    """`[--json]` was advertised and refused by argparse; `--config` and
+    `--ledger` were accepted and unadvertised."""
+    documented = set(re.findall(r"--[a-z-]+", triage.__doc__))
+    assert "--json" not in documented
+    assert {"--config", "--ledger", "--limit", "--repo", "--plan"} <= documented
