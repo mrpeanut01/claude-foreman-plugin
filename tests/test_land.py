@@ -896,6 +896,23 @@ def test_land_says_so_when_it_is_judging_a_merge_with_no_config(worktree, monkey
     assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in captured.err
 
 
+# --- issue #81: the command page documents what `checks` actually returns ------
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_the_land_command_documents_every_bucket_and_the_sha_flag():
+    """`commands/land.md` is what the operator reads when a gate says `pending`.
+    The `stale` bucket and `--sha` went into the skill module and never reached
+    the page, so a check parked in `stale` had no documented explanation where
+    the command told the reader to look."""
+    doc = (ROOT / "commands" / "land.md").read_text()
+    for bucket in land.classify_checks([], {}):
+        assert f"`{bucket}`" in doc, f"`checks` returns a {bucket} bucket; land.md never names it"
+    for term in ("--sha", "head_sha", "reason"):
+        assert term in doc, f"land.md never mentions {term}"
+
+
 # --- review: an unresolvable head SHA must not fall back to the unscoped read -
 
 

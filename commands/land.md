@@ -35,11 +35,35 @@ text, and repo conventions. Nothing else. See `modules/review-gate.md`.
 **3. Watch CI.**
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" checks --pr <n> --repo OWNER/NAME
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" checks --pr <n> --repo OWNER/NAME [--sha <commit>]
 ```
 
 Act on `gate`, never on the raw check list. Wait only on `actionable_pending`;
 `human_gate_pending` and `advisory_pending` are not the loop's business.
+
+| Bucket | Means |
+|--------|-------|
+| `passed` | Green for this commit |
+| `pending` | Every check not yet resolved, whatever kind; the three rows below split it |
+| `actionable_pending` | Required, still running. The only thing worth waiting for |
+| `human_gate_pending` | Waiting on a person. Report it and move to another batch |
+| `advisory_pending` / `advisory_failed` | Not required. Informational |
+| `failed` | Required and red. Fix or adjudicate |
+| `stale` | Reported against **another commit**. Ignored — it proves nothing about this one |
+
+The verdict is about one commit. `checks` resolves the PR's current head and
+reads the SHA-addressed endpoints for it, so `head_sha` in the output names the
+commit the `gate` describes; anything CI posted about a different commit lands
+in `stale`. That is what stops the *previous* push's green being read as this
+one's in the minutes before the new run registers. Pass `--sha` with the
+batch's `head_sha` from the ledger to gate the commit you pushed rather than
+whatever the PR points at now.
+
+`head_sha: null` with `gate: pending` and a `reason` means the commit could not
+be resolved at all — `gh pr view` failed, or is too old to know `headRefOid`.
+It is `pending`, not green, and the check list is deliberately not read
+unscoped to fill the gap. See `modules/ci-watch.md` in `Skill(foreman:pr-landing)`
+for the full reasoning.
 
 **4. Record both verdicts.**
 
