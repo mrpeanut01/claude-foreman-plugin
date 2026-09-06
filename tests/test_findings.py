@@ -322,3 +322,24 @@ def test_a_finding_raised_outside_a_pull_request_names_no_pr(context):
 def test_a_finding_raised_on_a_pull_request_still_names_it():
     first = findings.to_issue(f(), CONTEXT, LABELS)["body"].splitlines()[0]
     assert "PR #7" in first
+
+
+# --- a plan built for one repository is not filed against another -------------
+
+
+def test_a_plan_for_another_repository_files_nothing(tmp_path, monkeypatch, capsys):
+    """`findings.py file` creates issues, which the wrapper cannot undo, so the
+    check has to come before the first one."""
+
+    def never(repo, issue, wrapper):
+        raise AssertionError("no issue may be created for a plan built for another repo")
+
+    monkeypatch.setattr(findings, "create_issue", never)
+    result = findings.plan([f()], CONTEXT, LABELS, [])
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps({**result, "context": CONTEXT}))  # context.repo is o/r
+    rc = findings.main(
+        ["file", "--plan", str(plan_file), "--repo", "someone/else", "--ledger", str(tmp_path)]
+    )
+    assert rc == 1
+    assert "o/r" in capsys.readouterr().err

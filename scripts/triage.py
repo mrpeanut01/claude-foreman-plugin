@@ -653,6 +653,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     plan = json.loads(Path(args.plan).read_text())
+    # The plan names the repository it was built for. The recipe writes every
+    # plan to the same /tmp path, so a plan for one repo and an --repo for
+    # another is one stale file away — and it relabelled issue numbers in the
+    # wrong repository without a word. Nothing is written past this line
+    # until the two agree; GitHub compares repo names case-insensitively.
+    planned_for = plan.get("repo")
+    if planned_for and str(planned_for).lower() != args.repo.lower():
+        print(
+            f"error: this plan was built for {planned_for}, not {args.repo}; "
+            f"rebuild it with --repo {args.repo} rather than applying it here",
+            file=sys.stderr,
+        )
+        return 1
     sys.path.insert(0, str(here))
     import ledger as ledger_mod
 

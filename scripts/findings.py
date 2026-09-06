@@ -274,6 +274,16 @@ def main(argv: list[str] | None = None) -> int:
 
     payload = json.loads(Path(args.plan).read_text())
     context = payload.get("context", {})
+    # An issue, once created, is not something the wrapper can undo, so the
+    # plan's own repository has to agree with --repo before the first one.
+    planned_for = context.get("repo")
+    if planned_for and str(planned_for).lower() != args.repo.lower():
+        print(
+            f"error: this plan was built for {planned_for}, not {args.repo}; "
+            f"rebuild it with --repo {args.repo} rather than filing it here",
+            file=sys.stderr,
+        )
+        return 1
     root = Path(args.ledger)
     filed, failed = [], []
     for issue in payload.get("file", []):
