@@ -26,7 +26,7 @@ as given. Two ledgers is the worst outcome available here: the push that resets
 | `review.verdict` | `batch`, `verdict`, `findings`, `round` | Appends to the review scoreboard. **`findings` is not optional** — `land.review_stalled` reads it to decide whether findings are repeating, and without it the convergence rule is inert. |
 | `merge.reverted` | `batch` | The rubber-stamp signal. Pairs against clean verdicts in `/foreman:status`. |
 | `flake.observed` | `job`, `test` | Increments the `job::test` counter. |
-| `escalation` | `batch`, `reason` | Adds to NEEDS YOU. `reason` is read by a human — write a sentence, not a code. |
+| `escalation` | `batch`, `reason` | Adds to NEEDS YOU. `reason` is read by a human — write a sentence, not a code. An escalation about an **issue** rather than a batch carries `issues` (plus `merged_batch` for context) *instead of* `batch` — see below. |
 | `batch.meta` | `batch`, plus fields | Merges arbitrary fields (e.g. `pr`, `branch`) onto the batch. |
 
 `ts` and `type` are added by `ledger.append`. Every event carrying `batch` also
@@ -36,9 +36,9 @@ refreshes that batch's `updated`.
 
 `triage.fetch_issues` asks GitHub for **open** issues only, so every issue that
 reaches a triage plan was open when the plan was built. `open_seen_at[n]` records
-when each was last seen that way, and `loop._grouped_issues` reads it: a sighting
-newer than a merged batch's `progress_at` is the loop's only evidence that the
-merge did not close the issue, and the issue goes back to batching.
+when each was last seen that way, and `loop.merged_leaving_open` reads it: a
+sighting newer than a merged batch's `progress_at` is the loop's only evidence
+that the merge did not close the issue.
 
 `open_issues` on `triage.completed` carries **skipped** issues as well as
 recorded ones, and that is the whole point. `triage.should_skip` refuses to
@@ -49,6 +49,25 @@ catch. Reading the records alone left the rule with no producer (issue #58).
 
 A ledger written before this field folds fine; those passes simply record no
 sightings.
+
+### What a sighting produces: an escalation, not a re-batch
+
+The sighting says the issue is open. It does **not** say why, and the two
+possibilities want opposite actions: the PR merged without a closing keyword and
+the fix is on trunk (close the issue), or the fix did not fix it (do the work
+again). So the loop hands it to a person rather than guessing.
+
+The escalation is keyed on `issues`, not on `batch`, and that is deliberate
+twice over. The batch is `merged` — terminal, with no transition to make and
+nothing to retry — so it is not what needs attention; and `status._needs_human`
+decides whether an escalation still matters by reading its batch's *current*
+state, so filing this under a merged batch would hide it in exactly the bucket
+the morning digest is right to consider finished.
+
+`loop.merged_leaving_open` drops any issue a recorded escalation already names,
+which is what stops it repeating every tick. Handing the issue back to batching
+instead was unreachable and unbounded in both directions — see the note in
+`loop._grouped_issues`.
 
 ## Why a push resets both gates
 

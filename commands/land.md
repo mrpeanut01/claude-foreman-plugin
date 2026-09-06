@@ -91,10 +91,15 @@ Nothing else closes them. The PR body cites issues as `Refs #n`, which GitHub
 does not treat as a closing keyword, and no script in the pipeline touches issue
 state. The cost is not an untidy tracker: `loop._grouped_issues` counts an issue
 as taken once it appears in any batch, whatever state that batch is in, so an
-issue left open after its batch merged is excluded from re-batching for good
-while still sitting in the queue. The loop then reports idle against a tracker
-full of work it believes is done. Observed twice while foreman ran on its own
-repo — both merged batches left every one of their issues open.
+issue left open after its batch merged is never batched again while still sitting
+in the queue. Observed twice while foreman ran on its own repo — both merged
+batches left every one of their issues open.
+
+Skipping this step is no longer silent, but it is not repaired either.
+`loop.merged_leaving_open` escalates once, the next time a triage pass finds the
+issue still open, and a person then closes it by hand — the loop will not batch
+it again, because a second PR for work already on trunk is worse than an untidy
+tracker. Closing it here is the cheap version.
 
 ## On a red gate
 

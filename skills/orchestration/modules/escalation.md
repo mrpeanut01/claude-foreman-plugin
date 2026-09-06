@@ -11,6 +11,7 @@ from one that stalls on its first surprise.
 | `cap_breached` returns a counter | A runaway ceiling was reached. These are loose (`pushes: 8`, `review_rounds: 5`) because they count events elapsed, not progress. |
 | `futile_push_run` returns a reason | Three pushes in a row left CI red the same way. This, not `caps.pushes`, is the push rule that reads progress — see below. |
 | `stalled_build` returns a reason | Three resumes and the batch still has not reached `built`. Nothing else can see this one — see below. |
+| `merged_leaving_open` returns a batch | A merged batch's issue is still on the tracker, and the ledger cannot say why — see below. |
 | Same test fails identically twice | A second identical failure is evidence, not noise. |
 | Diff touches `protected_paths` | Auth, migrations, payments, and CI config are never auto-merged, however green. |
 | The same finding survives a review round | Builder and reviewer are trading one objection. Rounds elapsed is not the test — see `review-gate.md`. |
@@ -45,6 +46,40 @@ four times that then reached `built` converged, and its old resumes are history.
 
 Like `futile_pushes`, the ceiling has a **default** — a repo with no
 `.foreman/config.json` is still bounded. `caps.build_resumes` overrides it.
+
+## A merged batch that left its issue open
+
+Triage lists **open** issues only, so a sighting of an issue after its batch
+merged is proof the merge did not close it. Two things produce that, and the
+ledger cannot tell them apart:
+
+1. the PR merged without a closing keyword and the fix is already on trunk;
+2. the fix did not fix it.
+
+They want opposite actions — close the issue, or reopen the work — so the loop
+reports it. Handing the issue back to batching instead is worse than doing
+nothing: `batch.py plan` groups `triage_out["triaged"]`, and these are exactly
+the issues triage *skips*, so the action can never be taken; and in the case
+where it could, it cuts a second PR for work already merged. Repeatedly.
+
+The record is keyed on the **issues**, not on the batch. The batch is `merged` —
+terminal, nothing to transition, nothing to retry — and `status._needs_human`
+reads an escalation's batch's current state to decide whether it still matters,
+so filing this under the batch would hide it from the morning digest.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" append --type escalation \
+  --json '{"issues":[5],"merged_batch":"b-001","reason":"b-001 merged, but triage has since seen #5 still open — close it if PR #7 fixed it, or say what is still wrong"}'
+```
+
+No `transition` line: `merged` is terminal. The escalation itself is the bound —
+`merged_leaving_open` drops every issue a recorded escalation names, so writing
+it is what stops the loop raising it again on the next tick. Then comment on the
+merged PR and move on.
+
+The root cause is usually upstream: `commands/land.md` step 6 closes the issues,
+and nothing else does. A repeat of this escalation across several batches means
+that step is being skipped.
 
 ## Never escalate
 
