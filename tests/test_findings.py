@@ -1,5 +1,6 @@
 """Review findings become GitHub issues, so the loop can pick them up again."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -246,3 +247,58 @@ def test_the_tracker_fetch_asks_only_for_open_issues(monkeypatch):
     findings.fetch_open_issues("o/r")
     assert "--state" in seen["args"]
     assert seen["args"][seen["args"].index("--state") + 1] == "open"
+
+
+# --- issue #30: a short tracker title must not swallow a longer finding -------
+
+
+def test_a_two_token_tracker_title_does_not_swallow_a_much_longer_finding():
+    """The floor scales down for short titles. It must not scale down for a long one.
+
+    Every token of "Flaky tests" appears in the longer summary, so the overlap
+    coefficient is a perfect 1.0 against the shorter title — which is exactly why
+    two shared tokens are not enough evidence when the other title has nine.
+    """
+    existing = [{"number": 9, "title": "Flaky tests", "state": "open"}]
+    result = findings.plan(
+        [f(summary="Flaky tests in the upload suite mask a real regression in land.py")],
+        CONTEXT,
+        LABELS,
+        existing,
+    )
+    assert len(result["file"]) == 1, "a distinct finding must not be lost to a tracker stub"
+    assert result["skipped"] == []
+
+
+def test_two_word_titles_are_still_deduped_against_each_other():
+    """The relaxed floor still has to do the job it was added for."""
+    existing = [{"number": 9, "title": "Race condition", "state": "open"}]
+    result = findings.plan([f(summary="Race condition")], CONTEXT, LABELS, existing)
+    assert result["file"] == [] and result["skipped"][0]["duplicate_of"] == 9
+
+
+def test_a_duplicate_of_something_queued_this_run_claims_no_issue_number():
+    """Nothing has been filed yet, so there is no number a caller could follow."""
+    result = findings.plan([f(), f()], CONTEXT, LABELS, [])
+    skipped = result["skipped"][0]
+    assert skipped["duplicate_of"] is None
+    assert skipped["duplicate_of_title"] == result["file"][0]["title"]
+
+
+def test_already_tracked_holds_issue_numbers_and_nothing_else(tmp_path, monkeypatch, capsys):
+    """The reported symptom: 'pending:Audit log corrupted…' where a number belongs."""
+    monkeypatch.setattr(findings, "create_issue", lambda repo, issue, wrapper: "https://x/99")
+    repeated = f(summary="Audit log is corrupted by any multi-line argument", file="gh_safe.sh")
+    result = findings.plan([f(), repeated, repeated], CONTEXT, LABELS, OPEN)
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps({**result, "context": CONTEXT}))
+    rc = findings.main(
+        ["file", "--plan", str(plan_file), "--repo", "o/r", "--ledger", str(tmp_path)]
+    )
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert out["already_tracked"] == [11]
+    assert all(isinstance(n, int) for n in out["already_tracked"])
+    assert out["duplicate_within_run"] == [repeated["summary"]]

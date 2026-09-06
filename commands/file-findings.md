@@ -24,7 +24,7 @@ Returns three lists:
 | List | Means |
 |------|-------|
 | `file` | New findings, ordered worst severity first |
-| `skipped` | Already on the tracker, with `duplicate_of` |
+| `skipped` | Already on the tracker, with `duplicate_of` — or, when the twin is another finding in this same run, a null `duplicate_of` and a `duplicate_of_title` |
 | `unusable` | No summary to file. Reported, never silently dropped |
 
 ## Apply
@@ -36,6 +36,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/findings.py" file \
 
 Creates each issue through `gh_safe.sh` and appends a `finding.filed` event, so
 the ledger records which review produced which issue.
+
+`already_tracked` holds issue numbers and nothing else, so they can be followed.
+Findings suppressed by a sibling finding in the same run were never filed and have
+no number; they are listed by title under `duplicate_within_run`.
 
 ## File every severity, not just blocking ones
 

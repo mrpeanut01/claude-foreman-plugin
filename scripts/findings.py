@@ -100,7 +100,28 @@ def to_issue(finding: dict, context: dict, available_labels: list[str]) -> dict:
     }
 
 
-def _duplicate_of(title: str, open_issues: list[dict]) -> int | None:
+def _floor(mine: set[str], theirs: set[str]) -> int:
+    """How many shared tokens this pair of titles needs before it can be a duplicate.
+
+    Two-word titles can never reach a flat floor of 3, which would make "Race
+    condition" permanently undedupable, so the floor scales down for them. It may
+    only scale down when *both* titles are that short. The score divides by the
+    shorter title's length, so a two-token tracker stub is contained in a long
+    summary at a perfect 1.0 — "Flaky tests" would swallow "Flaky tests in the
+    upload suite mask a real regression in land.py". Brevity on one side is not
+    evidence; it is only an excuse for the floor when the other side is brief too.
+    """
+    if max(len(mine), len(theirs)) >= MIN_SHARED_TOKENS:
+        return MIN_SHARED_TOKENS
+    return min(MIN_SHARED_TOKENS, len(mine), len(theirs))
+
+
+def _duplicate_of(title: str, open_issues: list[dict]) -> dict | None:
+    """The open issue this title duplicates, as a record rather than a number.
+
+    The record, because an entry queued earlier in this same run has no issue
+    number yet and the caller has to be able to tell the two cases apart.
+    """
     mine = _tokens(title)
     if not mine:
         return None
@@ -112,13 +133,11 @@ def _duplicate_of(title: str, open_issues: list[dict]) -> int | None:
         if not theirs:
             continue
         shared = mine & theirs
-        # Two-word titles can never reach a flat floor of 3, which would make
-        # "Race condition" permanently undedupable. Scale the floor down instead.
-        if len(shared) < min(MIN_SHARED_TOKENS, len(mine), len(theirs)):
+        if len(shared) < _floor(mine, theirs):
             continue
         score = len(shared) / min(len(mine), len(theirs))
         if score >= DUPLICATE_THRESHOLD and score > best_score:
-            best, best_score = issue.get("number"), score
+            best, best_score = issue, score
     return best
 
 
@@ -135,13 +154,21 @@ def plan(
             continue
         # Compare against the tracker AND against what this run already queued,
         # or one defect reported at two call sites files two identical issues.
+        # The queued entries carry a null number on purpose: they are not filed
+        # yet, so there is no number, and inventing one puts a string where every
+        # consumer of duplicate_of expects an issue to link to.
         seen = list(open_issues or []) + [
-            {"number": f"pending:{i['title'][:40]}", "title": i["title"], "state": "open"}
-            for i in to_file
+            {"number": None, "title": i["title"], "state": "open"} for i in to_file
         ]
         duplicate = _duplicate_of(issue["title"], seen)
-        if duplicate:
-            skipped.append({**issue, "duplicate_of": duplicate})
+        if duplicate is not None:
+            entry = {**issue, "duplicate_of": duplicate.get("number")}
+            if entry["duplicate_of"] is None:
+                # Suppressed by a sibling finding in this very run. The title is
+                # the only handle on it, and it is worth reporting: two call
+                # sites reporting one defect is itself information.
+                entry["duplicate_of_title"] = duplicate.get("title")
+            skipped.append(entry)
         else:
             to_file.append(issue)
     return {"file": to_file, "skipped": skipped, "unusable": unusable}
@@ -258,12 +285,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             failed.append(issue["title"])
+    skipped = payload.get("skipped", [])
     print(
         json.dumps(
             {
                 "filed": filed,
                 "failed": failed,
-                "already_tracked": [s["duplicate_of"] for s in payload.get("skipped", [])],
+                # Issue numbers only, so a caller can follow them. A finding
+                # suppressed by another finding in the same run has no number;
+                # it is reported by title under its own key rather than as a
+                # fake one nobody can look up.
+                "already_tracked": [
+                    s["duplicate_of"] for s in skipped if s.get("duplicate_of") is not None
+                ],
+                "duplicate_within_run": [
+                    s["title"] for s in skipped if s.get("duplicate_of") is None
+                ],
             },
             indent=2,
         )
