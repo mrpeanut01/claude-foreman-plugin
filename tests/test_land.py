@@ -664,3 +664,59 @@ def test_two_findings_naming_different_things_are_different_however_much_they_sh
     a = finding("src/pool.py", "high", "connection pool leaks handles on timeout")
     b = finding("src/pool.py", "high", "connection pool leaks handles on shutdown")
     assert land.same_finding(a, b) is False
+
+
+# --- issue #36: a locus wrong round after round is deadlock, however worded --
+
+
+def locus_rounds(*summaries, file="scripts/land.py", severity="high"):
+    return [[finding(file, severity, summary)] for summary in summaries]
+
+
+ARC = (
+    "empty check list read as full_green",
+    "requiring every declared job hangs on unreportable ones",
+    "a running job is invisible, so the gate merges early",
+)
+
+
+def test_one_file_wrong_in_three_consecutive_rounds_is_a_deadlock():
+    """PR #7's own arc: one function, four rounds, alternating directions."""
+    reason = land.review_stalled(locus_rounds(*ARC), hard_ceiling=5)
+    assert reason and "locus" in reason.lower() and "scripts/land.py" in reason
+
+
+def test_two_rounds_on_one_file_is_ordinary_iteration():
+    assert land.review_stalled(locus_rounds(*ARC[:2]), hard_ceiling=5) is None
+
+
+def test_three_rounds_spread_across_files_is_progress():
+    rounds = [
+        [finding("scripts/land.py", "high", ARC[0])],
+        [finding("scripts/triage.py", "high", "auth vocabulary is incomplete")],
+        [finding("scripts/loop.py", "high", "the daily budget never refreshes")],
+    ]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_a_round_that_clears_the_file_breaks_the_run():
+    rounds = [
+        [finding("scripts/land.py", "high", ARC[0])],
+        [finding("scripts/loop.py", "high", "the daily budget never refreshes")],
+        [finding("scripts/land.py", "high", ARC[2])],
+    ]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_repeated_low_findings_in_one_file_are_not_a_deadlock():
+    """A low finding never blocked a merge, so repeating one blocks nothing."""
+    assert land.review_stalled(locus_rounds(*ARC, severity="low"), hard_ceiling=5) is None
+
+
+def test_the_locus_run_survives_the_file_being_named_alongside_others():
+    rounds = [
+        [finding("scripts/land.py", "high", ARC[0]), finding("scripts/loop.py", "high", "a")],
+        [finding("scripts/land.py", "high", ARC[1])],
+        [finding("scripts/triage.py", "high", "b"), finding("scripts/land.py", "high", ARC[2])],
+    ]
+    assert "scripts/land.py" in land.review_stalled(rounds, hard_ceiling=5)

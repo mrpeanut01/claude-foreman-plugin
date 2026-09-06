@@ -71,6 +71,12 @@ PR_EVENTS = {"pull_request", "pull_request_target", "push"}
 # things each round is progress. Only the first is worth escalating on.
 REVIEW_MATCH_THRESHOLD = 0.5
 DEFAULT_REVIEW_CEILING = 5
+# Consecutive rounds carrying a blocking finding in the same file before that
+# counts as deadlock on its own. Two is ordinary iteration — a reviewer reading
+# one file twice. Three says the fixes are not converging on a correct model of
+# that code, and it has to fire below the hard ceiling to say something more
+# useful than "you ran out of rounds".
+LOCUS_REPEAT_ROUNDS = 3
 _WORD = re.compile(r"[a-z0-9]+")
 _NOISE = {
     "the",
@@ -442,31 +448,63 @@ def same_finding(a: dict, b: dict, threshold: float = REVIEW_MATCH_THRESHOLD) ->
     return not (wa - wb and wb - wa)
 
 
+def _blocking(round_findings: list[dict]) -> list[dict]:
+    """Only findings that stood between the batch and a merge."""
+    return [f for f in round_findings or [] if str(f.get("severity", "")).lower() in SERIOUS]
+
+
+def _repeated_locus(rounds: list[list[dict]], span: int) -> str | None:
+    """A file that carried a blocking finding in each of the last `span` rounds.
+
+    Repeated wording is one deadlock signal; repeated *locus* is a stronger one.
+    A builder and reviewer can name a genuinely different defect in the same
+    function every round, in alternating directions, and never once repeat
+    themselves textually — while the thing being described is a model of that
+    code that neither of them has right. A human watching that arc stops the
+    patching and asks for the spec; this is the rule that does the same.
+    """
+    if span < 1 or len(rounds) < span:
+        return None
+    recent = [{f.get("file") for f in _blocking(r) if f.get("file")} for r in rounds[-span:]]
+    if not all(recent):
+        return None  # a round with no blocking finding at all breaks the run
+    shared = set.intersection(*recent)
+    return sorted(shared)[0] if shared else None
+
+
 def review_stalled(
-    rounds: list[list[dict]], hard_ceiling: int = DEFAULT_REVIEW_CEILING
+    rounds: list[list[dict]],
+    hard_ceiling: int = DEFAULT_REVIEW_CEILING,
+    locus_span: int = LOCUS_REPEAT_ROUNDS,
 ) -> str | None:
     """Reason to stop reviewing, or None to allow another round.
 
     Rounds elapsed is the wrong measure. A builder and reviewer who surface a
     different real defect each round are converging, however many rounds it
-    takes; two who trade the same finding are not. Only blocking severities
-    count — a repeated `low` never stood between the batch and a merge.
+    takes; two who trade the same finding are not, and two who keep being wrong
+    about the same code are not either. Only blocking severities count — a
+    repeated `low` never stood between the batch and a merge.
     """
     if len(rounds) >= hard_ceiling:
         return f"review reached the hard ceiling of {hard_ceiling} rounds"
     if len(rounds) < 2:
         return None
 
-    def blocking(round_findings):
-        return [f for f in round_findings if str(f.get("severity", "")).lower() in SERIOUS]
-
-    previous, current = blocking(rounds[-2]), blocking(rounds[-1])
+    previous, current = _blocking(rounds[-2]), _blocking(rounds[-1])
     for now in current:
         if any(same_finding(before, now) for before in previous):
             return (
                 f"the same finding survived a round (repeat): "
                 f"{now.get('file')} - {str(now.get('summary', ''))[:80]}"
             )
+
+    locus = _repeated_locus(rounds, locus_span)
+    if locus:
+        return (
+            f"{locus_span} rounds running have found a blocking defect in the same "
+            f"place (locus): {locus}. The fixes are not converging on a correct "
+            "model of that code - stop patching and write the model down."
+        )
     return None
 
 
