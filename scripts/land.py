@@ -431,7 +431,15 @@ def same_finding(a: dict, b: dict, threshold: float = REVIEW_MATCH_THRESHOLD) ->
     wa, wb = _words(a.get("summary")), _words(b.get("summary"))
     if not wa or not wb:
         return False
-    return len(wa & wb) / len(wa | wb) >= threshold
+    if len(wa & wb) / len(wa | wb) < threshold:
+        return False
+    # Overlap alone is not enough. Two summaries about the same file share their
+    # locus and their verb for free, so "missing null check in parse_config" and
+    # "missing type check in parse_config" share most of their content words
+    # while naming two unrelated defects. What separates them is that each names
+    # something the other does not. A genuine rewording only elaborates: it adds
+    # or drops filler, so one summary's words still contain the other's.
+    return not (wa - wb and wb - wa)
 
 
 def review_stalled(

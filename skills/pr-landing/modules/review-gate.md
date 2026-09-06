@@ -59,10 +59,16 @@ both clean. Two reviews cost less than one bad merge into an auth path.
 **Escalate when findings repeat, not when rounds elapse.**
 
 `land.review_stalled(rounds, hard_ceiling)` compares the blocking findings of the
-last two rounds. A finding that survives a round — same file, same severity,
-substantially the same complaint — means the builder and reviewer are trading the
-same objection, and another round will trade it again. That is deadlock, and it
+last two rounds. A finding that survives a round — same file, same severity
+band, the same complaint reworded — means the builder and reviewer are trading
+the same objection, and another round will trade it again. That is deadlock, and it
 escalates.
+
+*The same complaint reworded* means one summary reads as an elaboration of the
+other. Two summaries that each name something the other does not are two defects
+in one file, not one defect repeated: "missing null check in parse_config" and
+"missing type check in parse_config" share most of their words and describe
+unrelated bugs, and escalating that pair would call a converging PR a deadlock.
 
 Different findings each round is the opposite: the reviewer is working through
 layers, and quality is rising. Let it run.

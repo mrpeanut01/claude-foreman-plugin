@@ -640,3 +640,27 @@ def test_fetching_checks_for_a_sha_uses_the_sha_addressed_endpoints(monkeypatch)
 def test_fetching_checks_with_no_sha_still_reads_the_pull_request(monkeypatch):
     monkeypatch.setattr(land, "_gh_json", lambda args: [{"name": "lint", "state": "SUCCESS"}])
     assert land.fetch_checks("o/r", 7) == [{"name": "lint", "state": "SUCCESS"}]
+
+
+# --- issue #29: two defects in one file are not one finding repeating --------
+
+
+def test_two_different_defects_in_one_file_are_not_one_repeated_finding():
+    """Half the content words are the locus and the verb; the noun is the defect."""
+    a = finding("scripts/parse.py", "high", "missing null check in parse_config")
+    b = finding("scripts/parse.py", "medium", "missing type check in parse_config")
+    assert land.same_finding(a, b) is False
+    assert land.review_stalled([[a], [b]], hard_ceiling=5) is None
+
+
+def test_a_repeat_that_only_adds_words_is_still_a_repeat():
+    """A rewording elaborates; it does not name something new."""
+    a = finding("scripts/parse.py", "high", "missing null check in parse_config")
+    b = finding("scripts/parse.py", "high", "still a missing null check in parse_config on line 4")
+    assert land.same_finding(a, b) is True
+
+
+def test_two_findings_naming_different_things_are_different_however_much_they_share():
+    a = finding("src/pool.py", "high", "connection pool leaks handles on timeout")
+    b = finding("src/pool.py", "high", "connection pool leaks handles on shutdown")
+    assert land.same_finding(a, b) is False
