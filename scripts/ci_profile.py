@@ -419,6 +419,25 @@ def build_profile(
         by_name[name]["events"] = {event: _merge_triggers(cfgs) for event, cfgs in events.items()}
     jobs = list(by_name.values())
 
+    # Branch protection stores required checks as the names GitHub *reports*, not
+    # as the keys the workflow declares. A matrix job `test` reports one context
+    # per cell — `test (3.11)`, `test (3.12)` — and a job with a `name:` reports
+    # under that display name, so matching the key against the context list said
+    # "not required" about the very jobs that gate the merge. `attribute` reverses
+    # a reported name back to the job that declared it, and returns None rather
+    # than guessing, so a third-party context like `codecov/patch` marks nothing.
+    #
+    # Partial coverage rounds up: one required cell means this job can block a
+    # merge, which is the only question the flag answers. The per-cell truth is
+    # not lost — `required_checks` still lists the exact contexts protection
+    # named. Rounding down would let a failing required cell read as advisory,
+    # turning a red gate green; rounding up at worst costs a wait.
+    required_jobs = set()
+    for context in required:
+        key = attribute(context, jobs)
+        if key is not None:
+            required_jobs.add(key)
+
     merged, unmeasured = {}, []
     for job in jobs:
         name = job["name"]
@@ -443,7 +462,7 @@ def build_profile(
             "p95": stat["p95"] if stat else None,
             "samples": stat["n"] if stat else 0,
             "tier": tiers.get(name, "unmeasured"),
-            "required": name in required,
+            "required": name in required_jobs,
             "flake_rate": round(flakes.get(name, 0.0), 3),
         }
 

@@ -231,6 +231,62 @@ def test_job_with_no_observed_runs_is_reported_as_unmeasured(workflows):
     assert profile["unmeasured_jobs"] == ["integration", "lint", "soak", "unit"]
 
 
+@pytest.fixture
+def matrix_workflow(tmp_path):
+    """A matrix job plus a plain one, both reported under names of their own."""
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on: [pull_request]
+        jobs:
+          test:
+            strategy:
+              matrix:
+                python-version: ['3.11', '3.12']
+            steps: [{run: pytest}]
+          docs:
+            steps: [{run: make docs}]
+    """)
+    )
+    return d
+
+
+def test_a_matrix_job_whose_cells_are_required_is_recorded_as_required(matrix_workflow):
+    """Protection names the cells GitHub reports, never the job key they came from."""
+    profile = ci_profile.build_profile(
+        workflow_dir=matrix_workflow,
+        job_runs=[],
+        protection={"required_status_checks": {"contexts": ["test (3.11)", "test (3.12)"]}},
+    )
+    assert profile["jobs"]["test"]["required"] is True
+    assert profile["jobs"]["docs"]["required"] is False
+
+
+def test_a_matrix_job_with_only_some_cells_required_still_counts_as_required(matrix_workflow):
+    """One required cell is enough to block a merge, so the job can block one."""
+    profile = ci_profile.build_profile(
+        workflow_dir=matrix_workflow,
+        job_runs=[],
+        protection={"required_status_checks": {"contexts": ["test (3.11)"]}},
+    )
+    assert profile["jobs"]["test"]["required"] is True
+    # The per-cell truth is not lost by the flag rounding up: the exact contexts
+    # protection named are still on the profile for anyone who needs them.
+    assert profile["required_checks"] == ["test (3.11)"]
+
+
+def test_a_required_context_no_workflow_declares_marks_no_job_required(matrix_workflow):
+    """A third-party gate resolves to no job rather than to a plausible-looking one."""
+    profile = ci_profile.build_profile(
+        workflow_dir=matrix_workflow,
+        job_runs=[],
+        protection={"required_status_checks": {"contexts": ["codecov/patch"]}},
+    )
+    assert [n for n, j in profile["jobs"].items() if j["required"]] == []
+
+
 # --- probe guards -------------------------------------------------------------
 
 
