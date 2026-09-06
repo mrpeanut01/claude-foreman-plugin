@@ -58,9 +58,17 @@ def _on_block(doc: dict) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def _path_filters(on: dict) -> list[str]:
+def _path_filters(on: dict, events: set[str] | None = None) -> list[str]:
+    """Path filters declared by the given events (all of them when None).
+
+    Filters belong to the event that declared them. A `paths:` on `push` says
+    nothing about whether a job runs on a pull request, and treating the union as
+    if it did marks unconditional PR jobs conditional.
+    """
     paths: list[str] = []
-    for cfg in on.values():
+    for event, cfg in on.items():
+        if events is not None and str(event) not in events:
+            continue
         if isinstance(cfg, dict):
             paths.extend(cfg.get("paths", []) or [])
     return sorted(dict.fromkeys(paths))
@@ -82,6 +90,7 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
         on = _on_block(doc)
         triggers = sorted(str(k) for k in on)
         filters = _path_filters(on)
+        pr_filters = _path_filters(on, {"pull_request", "pull_request_target"})
         for name, spec in (doc.get("jobs") or {}).items():
             spec = spec if isinstance(spec, dict) else {}
             needs = spec.get("needs", [])
@@ -94,6 +103,7 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
                     "needs": [needs] if isinstance(needs, str) else list(needs or []),
                     "triggers": triggers,
                     "path_filters": filters,
+                    "pr_path_filters": pr_filters,
                 }
             )
     return (jobs, problems) if report_problems else jobs

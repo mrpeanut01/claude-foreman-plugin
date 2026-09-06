@@ -69,6 +69,11 @@ again from the cheap tier.
 
 ## Caps
 
-`pushes: 3`, `review_rounds: 2`, `reruns: 2`. At any cap the batch escalates. A
-third identical failure is not bad luck — the diagnosis is wrong, and another
-attempt by the same reasoning will reach the same place.
+`pushes: 8`, `review_rounds: 5`, `reruns: 2` — all **runaway ceilings**, not
+judgement. At any of them the batch escalates.
+
+`reruns` is the one that means what it says: a third rerun is no longer a
+hypothesis about flakiness, it is a hope. The other two are loose because they
+count events elapsed rather than progress, and a PR that survives several genuine
+review rounds trips them without anything being wrong. Review deadlock is decided
+by `land.review_stalled` instead — see [review-gate](review-gate.md).

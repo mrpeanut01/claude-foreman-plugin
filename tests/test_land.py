@@ -480,3 +480,32 @@ def test_a_downgrade_out_of_the_blocking_band_is_still_progress():
     a = {"file": "scripts/triage.py", "severity": "high", "summary": "vocabulary incomplete"}
     b = {**a, "severity": "low"}
     assert land.review_stalled([[a], [b]], hard_ceiling=5) is None
+
+
+# --- issue #25: a running job still holds the gate, requirable or not --------
+
+
+def test_a_non_requirable_job_that_is_actually_running_still_holds_the_gate():
+    profile = _unprotected_with(integration=job(path_filters=["src/**"]))
+    checks = [*GREEN, check("integration", "PENDING")]
+    assert land.classify_checks(checks, profile)["actionable_pending"] == ["integration"]
+    assert land.ci_gate(checks, profile) == "pending"
+
+
+def test_a_templated_matrix_job_that_is_running_still_holds_the_gate():
+    profile = _unprotected_with(e2e=job(display="E2E ${{ matrix.browser }}"))
+    assert land.ci_gate([*GREEN, check("E2E chrome", "PENDING")], profile) == "pending"
+
+
+# --- issue #26: path filters are per event ----------------------------------
+
+
+def test_a_push_only_path_filter_does_not_excuse_a_pull_request_job():
+    """`on: push: {paths: [...]}` plus an unconditional `pull_request` trigger."""
+    spec = job(path_filters=["src/**"], pr_path_filters=[])
+    assert land._can_report(spec) is True
+
+
+def test_a_pull_request_path_filter_still_makes_a_job_conditional():
+    spec = job(path_filters=["docs/**"], pr_path_filters=["docs/**"])
+    assert land._can_report(spec) is False

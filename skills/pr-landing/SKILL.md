@@ -84,14 +84,19 @@ High and medium findings get fixed in this PR. Low findings will not be fixed
 here and must become issues, or they are gone — an issue is the only artefact
 `/foreman:triage` reads. See [file-findings](../../commands/file-findings.md).
 
-## After the merge
+## Record every verdict, as it happens
 
-Record the verdict for the scoreboard:
+**Every round**, not once at the end, and always with the findings:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" append --type review.verdict \
-  --json '{"batch":"<id>","verdict":"clean"}'
+  --json '{"batch":"<id>","verdict":"changes_requested","round":2,"findings":[...]}'
 ```
+
+`land.review_stalled` compares the findings of consecutive rounds to decide
+whether the review is converging. Recording only after the merge, or omitting
+`findings`, leaves it reading empty lists — the rule is then inert and only the
+hard ceiling stops a genuine deadlock.
 
 If the merge is later reverted, append `merge.reverted`. That pairing is the only
 honest measure of whether the review gate works, and `/foreman:status` reports it.

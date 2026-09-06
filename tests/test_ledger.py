@@ -217,3 +217,26 @@ def test_a_batch_keeps_the_paths_and_risk_it_was_created_with(root):
     batch = ledger.fold(ledger.read_events(root)).batches["b-001"]
     assert batch["paths"] == ["src/auth/session.py"]
     assert batch["risk"] == "high"
+
+
+# --- issue #28: staleness must measure progress, not bookkeeping -------------
+
+
+def test_re_recording_an_unchanged_gate_is_not_progress(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    for step in ("building", "built", "open"):
+        ledger.transition(root, "b-001", step)
+    before = ledger.fold(ledger.read_events(root)).batches["b-001"]["progress_at"]
+    ledger.gate(root, "b-001", "ci", "pending")
+    ledger.append(root, "ci.launched", batch="b-001", tier="cheap", seconds=10)
+    after = ledger.fold(ledger.read_events(root)).batches["b-001"]
+    assert after["progress_at"] == before, "polling must not reset the staleness clock"
+    assert after["updated"] != before, "but the batch was still touched"
+
+
+def test_a_gate_that_actually_changes_is_progress(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.transition(root, "b-001", "building")
+    before = ledger.fold(ledger.read_events(root)).batches["b-001"]["progress_at"]
+    ledger.gate(root, "b-001", "ci", "cheap_green")
+    assert ledger.fold(ledger.read_events(root)).batches["b-001"]["progress_at"] != before

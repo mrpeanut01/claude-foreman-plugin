@@ -95,7 +95,13 @@ def _can_report(spec: dict) -> bool:
     """
     if not (PR_EVENTS & set(spec.get("triggers") or [])):
         return False  # schedule, workflow_dispatch, release...
-    if spec.get("path_filters"):
+    # Filters belong to the event that declared them; a push-only `paths:` says
+    # nothing about pull requests. Fall back to the union only when the profile
+    # predates pr_path_filters.
+    conditional = spec.get("pr_path_filters")
+    if conditional is None:
+        conditional = spec.get("path_filters")
+    if conditional:
         return False  # conditional on the diff; counts only if it actually reports
     if "${{" in str(spec.get("display") or ""):
         return False  # a templated name cannot be attributed back to this job
@@ -169,7 +175,11 @@ def ci_gate(checks: list[dict], profile: dict) -> str:
             if not requirable:
                 return "full_green" if not summary["actionable_pending"] else "pending"
             covered = {attribute(name, shapes) for name in summary["passed"]}
-            return "full_green" if all(n in covered for n in requirable) else "pending"
+            if not all(n in covered for n in requirable):
+                return "pending"
+            # A job excluded from `requirable` counts once it actually reports.
+            # Ignoring that lets a running required check slip past the gate.
+            return "full_green" if not summary["actionable_pending"] else "pending"
         # Protection says nothing is required, so nothing can block.
         return "full_green" if not summary["actionable_pending"] else "pending"
 

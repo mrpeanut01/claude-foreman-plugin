@@ -48,8 +48,8 @@ def budget_remaining(state: ledger.State, config: dict) -> float | None:
 
 
 def age_seconds(batch: dict, now: datetime | None = None) -> float | None:
-    """Seconds since anything happened to this batch, or None if unknown."""
-    stamp = batch.get("updated")
+    """Seconds since this batch last actually moved, or None if unknown."""
+    stamp = batch.get("progress_at") or batch.get("updated")
     if not stamp:
         return None
     try:

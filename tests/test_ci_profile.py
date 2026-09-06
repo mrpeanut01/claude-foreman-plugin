@@ -325,3 +325,45 @@ def test_a_non_python_test_suite_still_maps(tmp_path):
         f.touch()
     hit, complete = ci_profile.impacted_tests(["src/parser.ts"], tmp_path)
     assert hit == ["tests/test_parser.ts"] and complete is True
+
+
+# --- issue #26: path filters belong to the event that declared them ----------
+
+
+def test_push_only_path_filters_are_not_attributed_to_pull_request(tmp_path):
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          push:
+            branches: [main]
+            paths: ['src/**', 'tests/**']
+          pull_request:
+        jobs:
+          lint:
+            steps: [{run: ruff check}]
+    """)
+    )
+    jobs = {j["name"]: j for j in ci_profile.parse_workflows(d)}
+    assert jobs["lint"]["path_filters"] == ["src/**", "tests/**"], "union kept for reference"
+    assert jobs["lint"]["pr_path_filters"] == [], "the PR trigger carries no filter"
+
+
+def test_a_pull_request_path_filter_is_recorded_as_one(tmp_path):
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "docs.yml").write_text(
+        textwrap.dedent("""
+        name: Docs
+        on:
+          pull_request:
+            paths: ['docs/**']
+        jobs:
+          docs:
+            steps: [{run: make docs}]
+    """)
+    )
+    jobs = {j["name"]: j for j in ci_profile.parse_workflows(d)}
+    assert jobs["docs"]["pr_path_filters"] == ["docs/**"]

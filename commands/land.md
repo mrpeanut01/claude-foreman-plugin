@@ -66,5 +66,6 @@ escalate; never merge past it.
 
 CI failed → classify flake vs bug (`modules/ci-watch.md`), then rerun, fix, or
 escalate as `flake_decision` says. Review requested changes → address the
-findings and push; the gates reset and both run again. Two review rounds is the
-cap.
+findings and push; the gates reset and both run again. Rounds continue while the
+reviewer keeps finding *different* things; the batch escalates when a finding
+survives a round, or at the runaway ceiling of 5.
