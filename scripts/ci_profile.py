@@ -27,6 +27,10 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import ledger  # noqa: E402
+
 # A job whose p95 sits under this runs in the cheap tier: it is worth paying on
 # every push. Anything slower waits behind the cheap tier and the review gate.
 DEFAULT_TIER_THRESHOLD_S = 300
@@ -586,7 +590,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("probe")
     p.add_argument("--repo", required=True)
     p.add_argument("--runs", type=int, default=50)
-    p.add_argument("--out", default=".foreman/ci-profile.json")
+    p.add_argument(
+        "--out",
+        help=f"where to write the profile (default {ledger.LEDGER_DIR}/{ledger.PROFILE_FILE} "
+        "in the repository root)",
+    )
     p.add_argument(
         "--workflows",
         default=None,
@@ -611,7 +619,11 @@ def main(argv: list[str] | None = None) -> int:
         except ProfileError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        out = Path(args.out)
+        # Written where every reader looks: the repository's `.foreman`, not the
+        # caller's. Run from a build worktree, the default used to create a
+        # second `.foreman` there and the profile every reader anchors to
+        # stayed missing (issue #74).
+        out = ledger.resolve_profile(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(profile, indent=2), encoding="utf-8")
         print(

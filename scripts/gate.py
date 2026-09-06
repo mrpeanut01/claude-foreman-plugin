@@ -66,6 +66,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 ci_profile = importlib.import_module("ci_profile")
 batch = importlib.import_module("batch")
+ledger = importlib.import_module("ledger")
 
 # batch.py already had to answer "what did this branch change?" and already had
 # to refuse to answer it with silence. Reusing its exception rather than growing
@@ -749,7 +750,11 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--root", default=".")
         p.add_argument("--base", default="main", help="branch the diff is measured against")
         p.add_argument("--changed", nargs="+", help="override the diff (default: ask git)")
-        p.add_argument("--profile", default=".foreman/ci-profile.json")
+        p.add_argument(
+            "--profile",
+            help=f"CI profile (default {ledger.LEDGER_DIR}/{ledger.PROFILE_FILE} in the "
+            "repository --root belongs to)",
+        )
         p.add_argument("--workflows", default=".github/workflows")
         p.add_argument("--test-command", default=None, help="runner for the impacted tests")
         p.add_argument(
@@ -766,8 +771,11 @@ def main(argv: list[str] | None = None) -> int:
         path = Path(value)
         return path if path.is_absolute() else root / path
 
-    profile_path = under_root(args.profile)
-    profile = json.loads(profile_path.read_text()) if profile_path.is_file() else None
+    # The workflows are tracked, so they sit under --root wherever that is. The
+    # profile is not: it lives in the main checkout's `.foreman`, which a linked
+    # worktree does not have, so it is anchored to the repository --root belongs
+    # to rather than to --root itself (issue #74).
+    profile = ledger.load_profile(args.profile, start=root) or None
     try:
         changed = args.changed if args.changed is not None else changed_files(root, args.base)
     except PathsUnavailable as exc:

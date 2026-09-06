@@ -29,6 +29,7 @@ from pathlib import Path
 LEDGER_DIR = ".foreman"
 EVENTS = "events.jsonl"
 CONFIG_FILE = "config.json"
+PROFILE_FILE = "ci-profile.json"
 
 # --- the batch lifecycle ------------------------------------------------------
 # A batch is one group of issues heading for one PR. Gates (CI and review) run
@@ -204,6 +205,37 @@ def resolve_config(path: Path | str | None) -> Path:
         return repo_root() / LEDGER_DIR / CONFIG_FILE
     given = Path(path)
     return given if given.is_absolute() else repo_root() / given
+
+
+def resolve_profile(path: Path | str | None, start: Path | str | None = None) -> Path:
+    """The CI profile, anchored to the repository exactly like the config.
+
+    Third member of the #64 family: `land.py checks`, `gate.py`, `batch.py plan`
+    and `ci_profile.py probe` all defaulted to a relative `.foreman/ci-profile.json`
+    read against the caller, so from a build worktree the profile silently
+    resolved to nothing — tiers unknown, advisory checks read as required, the
+    expensive tier never deferred (issue #74). `start` is for callers that take
+    a `--root` of their own: the profile lives with the repository *that* root
+    belongs to, which from a linked worktree is the main checkout.
+    """
+    if path is None:
+        return repo_root(start) / LEDGER_DIR / PROFILE_FILE
+    given = Path(path)
+    return given if given.is_absolute() else repo_root(start) / given
+
+
+def load_profile(path: Path | str | None = None, start: Path | str | None = None) -> dict:
+    """The CI profile, or `{}` — quietly, because absence is a legitimate state.
+
+    Unlike the config, a missing profile is the ordinary first-run condition
+    that `ci_profile.py probe` exists to end, and every reader is written to
+    work without one. So there is no warning here: anchoring is the fix, not
+    making absence an error.
+    """
+    resolved = resolve_profile(path, start)
+    if not resolved.is_file():
+        return {}
+    return json.loads(resolved.read_text(encoding="utf-8"))
 
 
 def load_config(path: Path | str | None = None) -> dict:

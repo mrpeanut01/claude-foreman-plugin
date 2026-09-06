@@ -9,7 +9,7 @@ plausible-sounding judgement call would quietly cost you something:
   * whether a failure is a flake or a bug (rerunning a bug hides it).
 
 CLI:
-    land.py checks   --pr N --repo OWNER/NAME [--profile .foreman/ci-profile.json]
+    land.py checks   --pr N --repo OWNER/NAME [--sha SHA] [--profile .foreman/ci-profile.json]
     land.py verdict  --file verdict.json
     land.py blockers --batch b-001 [--ledger .foreman] [--config .foreman/config.json]
 """
@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import ledger as ledger_mod  # noqa: E402
 from ci_profile import attribute  # noqa: E402
 from globs import compile_glob, matches_any  # noqa: E402
 from ledger import PROGRESS_COUNTERS  # noqa: E402
@@ -753,7 +754,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("checks")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--repo", required=True)
-    p.add_argument("--profile", default=".foreman/ci-profile.json")
+    p.add_argument(
+        "--profile",
+        help=f"CI profile (default {ledger_mod.LEDGER_DIR}/{ledger_mod.PROFILE_FILE} "
+        "in the repository root)",
+    )
     p.add_argument(
         "--sha",
         help="the commit this gate is about; defaults to the PR's current head",
@@ -776,7 +781,10 @@ def main(argv: list[str] | None = None) -> int:
         return json.loads(Path(path).read_text()) if Path(path).exists() else default
 
     if args.cmd == "checks":
-        profile = load_json(args.profile, {})
+        # Anchored to the repository, like the ledger and the config: read
+        # against the caller, the profile was simply not there from a build
+        # worktree, and the gate lost every tier and advisory flag (issue #74).
+        profile = ledger_mod.load_profile(args.profile)
         pr = fetch_pr(args.repo, args.pr) or {}
         # GitHub knows the new head the moment a push lands; its checks appear
         # later. Scoping the read to that head is what stops the previous
@@ -842,8 +850,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0 if ok else 1
-
-    import ledger as ledger_mod
 
     state = ledger_mod.load(Path(args.ledger))
     batch = state.batches.get(args.batch)

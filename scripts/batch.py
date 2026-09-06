@@ -256,8 +256,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("plan")
     p.add_argument("--triage", required=True, help="output of `triage.py plan`")
     p.add_argument("--ledger", default=".foreman")
-    p.add_argument("--config", default=".foreman/config.json")
-    p.add_argument("--profile", default=".foreman/ci-profile.json")
+    p.add_argument(
+        "--config", help="foreman config (default .foreman/config.json in the repository root)"
+    )
+    p.add_argument(
+        "--profile", help="CI profile (default .foreman/ci-profile.json in the repository root)"
+    )
     p = sub.add_parser("apply")
     p.add_argument("--plan", required=True)
     p.add_argument("--ledger", default=".foreman")
@@ -276,13 +280,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "plan":
         triage_out = json.loads(Path(args.triage).read_text())
-        config = json.loads(Path(args.config).read_text()) if Path(args.config).exists() else {}
-        profile = json.loads(Path(args.profile).read_text()) if Path(args.profile).exists() else {}
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import ledger as ledger_mod
 
+        # Both anchored to the repository, like the ledger (issue #74). Read
+        # against the caller, a plan cut from a build worktree saw no config —
+        # no limits, no risk ceiling — and no profile, so it could not say what
+        # its batching saved.
+        config = ledger_mod.load_config(args.config)
+        profile = ledger_mod.load_profile(args.profile)
+
         ledger_root = Path(args.ledger)
-        if not ledger_root.exists():
+        if not ledger_mod.resolve_root(ledger_root).exists():
             # Without the ledger the taken set is empty and ids restart at b-001,
             # colliding with batches the ledger already holds — and the fold keeps
             # the first record of an id, so apply's collision is silently dropped

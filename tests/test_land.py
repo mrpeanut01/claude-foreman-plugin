@@ -836,6 +836,50 @@ def test_land_reads_its_protected_paths_from_the_repository_when_run_from_a_work
     assert "auto_merge is disabled in config" not in blockers
 
 
+def test_checks_reads_its_profile_from_the_repository_when_run_from_a_worktree(
+    worktree, monkeypatch, capsys
+):
+    """Issue #74. Read against the caller, the profile was simply not there from a
+    build worktree, and an advisory job with no profile to say so is an unknown
+    check — which counts as required, so its red failed the gate."""
+    checkout, linked = worktree
+    import ledger
+
+    (checkout / ledger.LEDGER_DIR / ledger.PROFILE_FILE).write_text(
+        json.dumps(
+            {
+                "protection_known": True,
+                "required_checks": [],
+                "jobs": {"lint": {"tier": "cheap", "required": False}},
+            }
+        )
+    )
+
+    def fake_gh(args):
+        if args[:2] == ["pr", "view"]:
+            return {"number": 7, "headRefOid": NEW, "baseRefName": "main", "labels": []}
+        if "check-runs" in args[-1]:
+            return {
+                "check_runs": [
+                    {
+                        "name": "lint",
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "head_sha": NEW,
+                    }
+                ]
+            }
+        return {"statuses": []}
+
+    monkeypatch.setattr(land, "_gh_json", fake_gh)
+    monkeypatch.chdir(linked)
+
+    land.main(["checks", "--pr", "7", "--repo", "o/r"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["advisory_failed"] == ["lint"]
+    assert out["failed"] == []
+
+
 def test_land_says_so_when_it_is_judging_a_merge_with_no_config(worktree, monkeypatch, capsys):
     """Merging itself fails safe here — `auto_merge` defaults off — so this is not an
     auto-merge hole. What is missing is the reason: the protected path goes unmentioned,

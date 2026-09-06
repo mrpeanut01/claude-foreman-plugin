@@ -12,6 +12,13 @@ from a linked worktree) before it reads or writes. An absolute path is obeyed
 as given. Two ledgers is the worst outcome available here: the push that resets
 `review_gate` lands in one file while the merge decision reads the other.
 
+The same anchoring covers everything else in `.foreman`: `--config` on every
+script (`ledger.load_config`, loud when the file is missing) and `--profile` on
+`land.py`, `gate.py`, `batch.py plan` and `ci_profile.py probe`
+(`ledger.load_profile`, quiet when it is missing, because a repo that has not
+been profiled yet is an ordinary state). `gate.py` anchors to the repository
+its `--root` belongs to, since from a build worktree that is the main checkout.
+
 ## Event types
 
 | `type` | Required fields | Effect on folded state |

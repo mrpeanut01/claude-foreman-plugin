@@ -419,8 +419,9 @@ def test_the_docstring_documents_every_flag_a_subcommand_accepts(subcommand):
     assert _accepted_flags(subcommand) <= _documented_flags(subcommand)
 
 
-def test_planning_against_a_ledger_that_is_not_there_says_so(tmp_path, capsys):
+def test_planning_against_a_ledger_that_is_not_there_says_so(tmp_path, capsys, monkeypatch):
     """Silence looks identical to a fresh repo, and the ids collide either way."""
+    monkeypatch.chdir(tmp_path)  # not this repository: its own config must not leak in
     triage_file = tmp_path / "triage.json"
     triage_file.write_text(json.dumps({"triaged": _actionable(11)}))
     missing = tmp_path / "elsewhere" / ".foreman"
@@ -429,3 +430,55 @@ def test_planning_against_a_ledger_that_is_not_there_says_so(tmp_path, capsys):
     assert rc == 0
     assert str(missing) in captured.err
     assert json.loads(captured.out)["batches"][0]["id"] == "b-001"
+
+
+# --- issue #74: the config and profile live with the repository ---------------
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """The layout `commands/build.md` prescribes: `.foreman` lives one repo up."""
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    _git(checkout, "init", "-q", "-b", "main")
+    _git(checkout, "config", "user.email", "foreman@example.com")
+    _git(checkout, "config", "user.name", "foreman")
+    _git(checkout, "commit", "-q", "--allow-empty", "-m", "root")
+    linked = tmp_path / "foreman-b-001"
+    _git(checkout, "worktree", "add", "-q", str(linked), "-b", "foreman/b-001")
+    root = ledger.init(checkout)
+    (root / ledger.CONFIG_FILE).write_text(json.dumps({"limits": {"max_batch_issues": 1}}))
+    (root / ledger.PROFILE_FILE).write_text(
+        json.dumps({"cheap_tier_s": 100, "expensive_tier_s": 900})
+    )
+    return checkout, linked
+
+
+def test_plan_reads_its_config_and_profile_from_the_repository_when_run_from_a_worktree(
+    worktree, monkeypatch, capsys, tmp_path
+):
+    """Read against the caller, a plan cut from a worktree saw no config — so no
+    issue cap and no risk ceiling — and no profile, so it could not price what
+    its batching saved. And it warned that the ledger was missing, which it was
+    not; only the unanchored `.exists()` test thought so."""
+    _checkout, linked = worktree
+    triage_file = tmp_path / "triage.json"
+    triage_file.write_text(
+        json.dumps(
+            {
+                "triaged": [
+                    {**_actionable(1)[0], "paths": ["a.py"]},
+                    {**_actionable(2)[0], "paths": ["b.py"]},
+                ]
+            }
+        )
+    )
+    monkeypatch.chdir(linked)
+
+    rc = batch.main(["plan", "--triage", str(triage_file)])
+    captured = capsys.readouterr()
+    plan = json.loads(captured.out)
+    assert rc == 0
+    assert [b["issues"] for b in plan["batches"]] == [[1], [2]], "max_batch_issues was read"
+    assert plan["savings"]["suite_seconds"] == 1000, "the profile was read"
+    assert "warning" not in captured.err, captured.err

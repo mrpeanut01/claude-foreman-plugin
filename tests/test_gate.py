@@ -22,6 +22,7 @@ available is an argument rather than an accident.
 import importlib
 import json
 import shutil
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -31,6 +32,7 @@ import pytest
 # scripts/ is not an installed package: put it on the path, then load by name.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 gate = importlib.import_module("gate")
+ledger = importlib.import_module("ledger")
 
 
 @pytest.fixture(autouse=True)
@@ -947,3 +949,67 @@ def test_the_exit_code_separates_green_from_red_from_could_not_run(repo, capsys,
     )
     assert code == expected
     assert out(capsys)["exit_code"] == expected
+
+
+# --- issue #74: the profile lives with the repository, not with --root --------
+
+
+def _real_git():
+    """git from outside the toolbox, for a test that needs a repository to exist."""
+    return shutil.which("git", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+
+
+@pytest.fixture
+def linked_worktree(tmp_path, toolbox):
+    """The layout `commands/build.md` prescribes. The workflows are tracked, so the
+    worktree has them; `.foreman` is not, so only the main checkout does."""
+    real = _real_git()
+    if not real:
+        pytest.skip("no git to build a worktree with")
+    (toolbox / "git").symlink_to(real)
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-c", "user.email=f@example.com", "-c", "user.name=foreman", *args],
+            cwd=str(checkout),
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    (checkout / ".github" / "workflows").mkdir(parents=True)
+    (checkout / ".github" / "workflows" / "ci.yml").write_text(textwrap.dedent(CHECK_ONLY))
+    git("add", "-A")
+    git("commit", "-qm", "ci")
+    linked = tmp_path / "foreman-b-001"
+    git("worktree", "add", "-q", str(linked), "-b", "foreman/b-001")
+    root = ledger.init(checkout)
+    (root / ledger.PROFILE_FILE).write_text(
+        json.dumps(
+            {
+                "jobs": {
+                    "lint": {
+                        "tier": "cheap",
+                        "workflow_file": "ci.yml",
+                        "events": {"pull_request": {}},
+                    }
+                }
+            }
+        )
+    )
+    return checkout, linked
+
+
+def test_the_profile_is_read_from_the_repository_when_the_gate_runs_in_a_worktree(
+    linked_worktree, capsys
+):
+    """`--root` is the worktree, and the profile is not in it: reading the profile
+    under --root lost every tier the moment the build did what build.md says."""
+    _checkout, linked = linked_worktree
+    code = gate.main(["plan", "--root", str(linked), "--changed", "README.md"])
+    report = out(capsys)
+    assert code == 0
+    assert not any("no CI profile" in note for note in report["notes"]), report["notes"]
+    assert report["jobs"] == ["lint"]

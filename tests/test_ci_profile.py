@@ -1,5 +1,7 @@
 """CI profile: learn the repo's job graph, costs, flake rates, and test mapping."""
 
+import json
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -10,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import ci_profile  # noqa: E402
 import globs  # noqa: E402
+import ledger  # noqa: E402
 
 # --- workflow parsing ---------------------------------------------------------
 
@@ -790,3 +793,53 @@ def test_a_type_that_always_reports_can_also_report_while_the_pull_request_is_op
     import land
 
     assert set(land.PR_UNCONDITIONAL_TYPES) <= set(ci_profile.OPEN_PR_TYPES)
+
+
+# --- issue #74: the profile is written where every reader looks ---------------
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """The layout `commands/build.md` prescribes: `.foreman` lives one repo up."""
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-c", "user.email=f@example.com", "-c", "user.name=foreman", *args],
+            cwd=str(checkout),
+            check=True,
+            capture_output=True,
+        )
+
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "root")
+    linked = tmp_path / "foreman-b-001"
+    git("worktree", "add", "-q", str(linked), "-b", "foreman/b-001")
+    ledger.init(checkout)
+    return checkout, linked
+
+
+def test_probe_writes_the_profile_into_the_repository_when_run_from_a_worktree(
+    worktree, monkeypatch, capsys
+):
+    """Written against the caller, the default created a second `.foreman` in the
+    worktree, and the profile every other script anchors to stayed missing."""
+    checkout, linked = worktree
+    monkeypatch.setattr(
+        ci_profile,
+        "probe",
+        lambda *a, **k: {
+            "jobs": {},
+            "cheap_tier_s": None,
+            "expensive_tier_s": None,
+            "unmeasured_jobs": [],
+        },
+    )
+    monkeypatch.chdir(linked)
+
+    assert ci_profile.main(["probe", "--repo", "me/mine"]) == 0
+    written = Path(json.loads(capsys.readouterr().out)["written"])
+    assert written == checkout / ledger.LEDGER_DIR / ledger.PROFILE_FILE
+    assert written.is_file()
+    assert not (linked / ledger.LEDGER_DIR).exists()
