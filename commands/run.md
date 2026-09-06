@@ -36,6 +36,13 @@ every trunk move, so draining one is worth more than beginning another. Caps are
 checked before anything else — a batch past its cap must not be picked up again
 by a loop that has forgotten why it failed.
 
+## Flags
+
+| Flag | Means |
+|------|-------|
+| `--max-actions N` | Take at most N actions, then report and stop. |
+| `--dry-run` | Ask `loop.py next` and print the action and the command it maps to, without taking it. Repeats the question once, since nothing moved. Use it to see what an unattended run would do first. |
+
 ## Stopping
 
 The loop stops on `idle`, on `--max-actions`, or when the CI budget for the day

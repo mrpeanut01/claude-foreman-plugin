@@ -46,3 +46,8 @@ loop treats this as non-negotiable.
 Re-probe after workflow changes, after adding a job, or every ~2 weeks of active
 development. A profile older than its evidence is worse than none, because the
 loop trusts it.
+
+`--refresh` is how you say so. Without it, an existing `.foreman/ci-profile.json`
+younger than two weeks and newer than every file in `.github/workflows/` is left
+alone, and the command reports its age instead of spending fifty API calls to
+learn what it already knows. With it, the probe runs regardless.
