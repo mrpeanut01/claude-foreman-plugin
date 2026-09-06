@@ -70,15 +70,17 @@ reviewer with the errors; do not record it and do not argue with the validator.
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> --repo OWNER/NAME
 "${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --squash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> merging
 ```
 
 `blockers` exits non-zero with a list when anything stands in the way. Fix or
 escalate; never merge past it.
 
-**6. Close the issues, once the merge has landed.**
+**6. Confirm the merge, then close the issues.**
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr view <n> --repo OWNER/NAME --json state
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> merged
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" state --batch <id>    # its issue list
 "${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" issue close <issue> --repo OWNER/NAME \
   --comment "Fixed by #<n> (batch <id>)."
@@ -86,6 +88,12 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" state --batch <id>    # its is
 
 `--auto` queues the merge behind the remaining checks, so the PR reads `MERGED`
 only later. Close nothing before it does.
+
+This step is the whole of `watch` on a batch in `merging`: ask GitHub, and
+either record the merge or take the batch back to `blocked`. `--auto` never
+reports back — a merge queue that refuses it, or never fires, leaves the batch
+here holding a slot against `max_open_prs`, which is why `stale_after_s`
+escalates a merge that has not completed.
 
 Nothing else closes them. The PR body cites issues as `Refs #n`, which GitHub
 does not treat as a closing keyword, and no script in the pipeline touches issue

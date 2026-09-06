@@ -33,12 +33,18 @@ convergence, and `review-gate.md` judges those on the findings themselves.
 
 ## Builds: the one the clock cannot catch
 
-`building` is the only live state whose action does not move the batch.
-`next_action` answers `build`, the recipe re-enters `building`, and the fold
-records `building -> building` as no progress on purpose — so the staleness
-window reads the same age forever, no counter in `caps` moves, and there is no
-push for `futile_push_run` to score. Resuming is right; resuming without a bound
-is a work loop that never reaches anybody.
+`building` is the one live state whose action re-enters the state it is already
+in. `next_action` answers `build`, the recipe re-enters `building`, and the fold
+records `building -> building` as no progress on purpose — so no counter in
+`caps` moves and there is no push for `futile_push_run` to score. Resuming is
+right; resuming without a bound is a work loop that never reaches anybody.
+
+A wait is different, and `merging` is a wait: the merge is requested and the
+answer comes from GitHub. It nonetheless had no branch in `next_action` at all —
+no action, no staleness check, no governor — while `IN_FLIGHT` counted it
+against `max_open_prs`. `gh pr merge --auto` is exactly what parks a batch
+there when the merge queue refuses or never fires. The loop watches it now, and
+`stale_after_s` escalates it like any other wait.
 
 `attempts.build_resumes` counts the re-entries, and `stalled_build` escalates at
 three. It reads only while the batch is still in `building`: a build picked up

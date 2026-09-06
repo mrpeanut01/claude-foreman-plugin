@@ -93,6 +93,21 @@ def triage_due(state: ledger.State, limits: dict) -> bool:
     return since is None or since > every
 
 
+def _stale_reason(batch: dict, limits: dict, waiting_on: str) -> str | None:
+    """Why this batch has waited too long, or None while the window has room.
+
+    Nothing outside the loop may pin a batch indefinitely. Waiting is invisible:
+    it increments no counter, so no cap ever fires and nothing reaches a human.
+    One definition, used by every state that waits — a second copy is how
+    `merging` came to have a wait with no window on it at all.
+    """
+    stale_after = limits.get("stale_after_s")
+    age = age_seconds(batch)
+    if stale_after and age is not None and age > stale_after:
+        return f"stale: waiting on {waiting_on} for {age / 3600:.1f}h with no change"
+    return None
+
+
 def review_rounds(state: ledger.State, batch_id: str) -> list[list[dict]]:
     """Findings from each review round for one batch, oldest first."""
     return [r.get("findings", []) for r in state.reviews if r.get("batch") == batch_id]
@@ -257,6 +272,23 @@ def next_action(state: ledger.State, config: dict) -> dict:
             ),
         }
 
+    # Nearest the merge of all: the merge is already requested. `merging` is in
+    # `IN_FLIGHT` and so holds a slot against `max_open_prs`, but it had no
+    # branch here at all — no action, no staleness check, no governor. `gh pr
+    # merge --auto` is fire-and-forget, and a merge queue that refuses it or
+    # never fires leaves the batch parked here with nothing to bring it back.
+    for batch in live:
+        if batch["state"] != "merging":
+            continue
+        stale = _stale_reason(batch, limits, "the merge queue")
+        if stale:
+            return {"do": "escalate", "batch": batch["id"], "reason": stale}
+        return {
+            "do": "watch",
+            "batch": batch["id"],
+            "reason": "merge requested; waiting for GitHub to confirm it landed",
+        }
+
     for batch in live:
         if batch["state"] != "ready":
             continue
@@ -285,18 +317,9 @@ def next_action(state: ledger.State, config: dict) -> dict:
         ]
         if answered:
             return {"do": "unblock", "batch": batch["id"], "reason": "; ".join(answered)}
-        # No gate may pin a batch indefinitely. Watching forever is invisible:
-        # no counter increments, so no cap ever fires and nothing reaches a human.
-        stale_after = limits.get("stale_after_s")
-        age = age_seconds(batch)
-        if stale_after and age is not None and age > stale_after:
-            return {
-                "do": "escalate",
-                "batch": batch["id"],
-                "reason": (
-                    f"stale: waiting on {', '.join(pending)} for {age / 3600:.1f}h with no change"
-                ),
-            }
+        stale = _stale_reason(batch, limits, ", ".join(pending))
+        if stale:
+            return {"do": "escalate", "batch": batch["id"], "reason": stale}
         return {
             "do": "watch",
             "batch": batch["id"],

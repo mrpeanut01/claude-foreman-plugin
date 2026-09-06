@@ -317,6 +317,60 @@ def test_a_batch_with_no_timestamp_is_never_called_stale():
     assert loop.next_action(st, cfg)["do"] == "watch"
 
 
+# --- a batch in the merge queue is live, and had no action at all -------------
+
+
+def _merging(**over):
+    """A batch driven planned -> merging, both gates clear, waiting on GitHub."""
+    return {
+        "id": "b-001",
+        "state": "merging",
+        "pr": 1,
+        "ci_gate": "full_green",
+        "review_gate": "clean",
+        **over,
+    }
+
+
+def test_a_batch_in_the_merge_queue_is_watched():
+    """`merging` is in IN_FLIGHT but had no branch in next_action, so it got no
+    action, no staleness check and no governor — while still holding a slot
+    against max_open_prs."""
+    st = state_with(_merging())
+    st.batches["b-001"]["progress_at"] = _aged(0)
+    cfg = {**CONFIG, "limits": {**CONFIG["limits"], "stale_after_s": 3600}}
+    action = loop.next_action(st, cfg)
+    assert action["do"] == "watch" and action["batch"] == "b-001"
+
+
+def test_a_merge_that_never_completes_escalates():
+    """`gh pr merge --auto` is fire-and-forget: a queue that refuses it, or never
+    fires, leaves the batch here for good and nothing brings it back."""
+    st = state_with(_merging())
+    st.batches["b-001"]["progress_at"] = _aged(68)
+    cfg = {**CONFIG, "limits": {**CONFIG["limits"], "stale_after_s": 3600}}
+    action = loop.next_action(st, cfg)
+    assert action["do"] == "escalate" and action["batch"] == "b-001"
+    assert "stale" in action["reason"].lower()
+
+
+def test_a_merging_batch_with_no_staleness_window_is_still_only_watched():
+    """Same rule as every other wait: no window configured, no escalation."""
+    st = state_with(_merging())
+    st.batches["b-001"]["progress_at"] = _aged(500)
+    assert loop.next_action(st, CONFIG)["do"] == "watch"
+
+
+def test_a_merging_batch_is_drained_before_one_that_is_only_ready():
+    """Nearest the merge first — the merge for this one is already requested."""
+    st = state_with(
+        _merging(),
+        {"id": "b-002", "state": "ready", "ci_gate": "full_green", "review_gate": "clean"},
+    )
+    st.batches["b-001"]["progress_at"] = _aged(0)
+    assert loop.next_action(st, CONFIG)["batch"] == "b-001"
+
+
 # --- issue #53: triage must stay reachable after the first batch --------------
 
 

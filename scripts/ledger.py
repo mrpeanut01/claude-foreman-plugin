@@ -455,13 +455,20 @@ def stalled_build(batch: dict, caps: dict[str, int]) -> str | None:
     Resuming an interrupted build is the right behaviour — a worktree that
     already exists beats cutting a new one, and abandoning work in place is the
     failure the durable ledger exists to prevent. But `building` is the one live
-    state whose action does not move the batch: `next_action` answers `build`,
-    the recipe re-enters `building`, and the fold records no progress for the
-    self-loop by design. So none of the other governors can reach it — no
-    counter in `COUNTER_ORDER` moves, `futile_push_run` needs a push, and the
-    staleness window is read against `progress_at`, which stands still. The
-    resume count is the only quantity that actually grows, so it is the one
-    that has to be bounded (issue #62).
+    state whose action re-enters the state it is already in: `next_action`
+    answers `build`, the recipe re-enters `building`, and the fold records no
+    progress for the self-loop by design. So none of the counting governors can
+    reach it — no counter in `COUNTER_ORDER` moves, and `futile_push_run` needs
+    a push. The resume count is the only quantity that actually grows, so it is
+    the one that has to be bounded (issue #62).
+
+    It was not the only live state `loop.next_action` left without an action,
+    though the first draft of this said so. `merging` had no branch there at
+    all — no action, no staleness check, no governor — while still holding a
+    slot against `max_open_prs`. That one the clock can catch, because a batch
+    in the merge queue is waiting on something outside the loop, and
+    `loop._stale_reason` now reads it like any other wait. A resume is not a
+    wait, which is why this counter has to exist instead.
 
     Read only while the batch is still in `building`: a build that was picked
     up four times and then reached `built` converged, and its old resumes are
