@@ -25,7 +25,9 @@ the issue.
 ## Show the plan, then apply
 
 Render the plan as a table (issue, kind, size, risk, verdict, labels, why) and
-show it before writing anything. Then:
+show it before writing anything. Each record also carries `risk_reason` — the
+word that set the score and whether it came from the title or the body — so put
+it next to the risk column whenever anything scores `high`. Then:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/triage.py" apply \
@@ -67,3 +69,11 @@ The heuristics are deliberately blunt. If an issue is scored `low` risk and you
 can see it touches something dangerous, override it in the plan before applying —
 and if the same mistake recurs, the fix belongs in `HIGH_RISK_HINTS`, not in a
 one-off correction.
+
+The commonest disagreement runs the other way: `risk_reason` reads
+`"tokens" in the body` on an issue about a tokeniser. Risk matches the title and
+the body, and no pattern can tell an issue *about* auth from one that mentions
+it — a real auth bug often has a neutral title and a single mention in the body,
+which is why the score rounds up. Downgrading a mention you have read is a
+correct override, not a workaround; it just has to be a reading, not a guess.
+Nothing about the vocabulary needs changing for it.

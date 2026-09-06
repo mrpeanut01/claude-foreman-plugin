@@ -68,6 +68,14 @@ path, a security-ish keyword, or a `security`/`critical`/`data-loss` label.
 Rounding risk **up** is cheap: the issue still gets fixed, just in a solo PR.
 Rounding it down puts an auth change into a five-issue batch that merges itself.
 
+So it over-scores on purpose, and `risk_reason` on every record says what it
+saw: `"tokens" in the body` on an issue about a tokeniser, `protected path
+src/auth/session.py`, `the security label`. Keyword collisions are expected —
+the body is searched because a real auth bug is often titled neutrally — and
+reading one and downgrading it is part of the job, not a sign the vocabulary is
+wrong. Read the issue before you downgrade; a hit in the *title* almost never
+is one.
+
 See [modules/taxonomy.md](modules/taxonomy.md) for the size and risk vocabularies
 and how to extend them.
 

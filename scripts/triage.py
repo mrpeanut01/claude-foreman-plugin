@@ -249,20 +249,40 @@ def classify_size(issue: dict) -> str:
 # --- risk ---------------------------------------------------------------------
 
 
-def risk_level(issue: dict, protected: list[str]) -> str:
-    """Risk gates batching and auto-merge. When unsure, this rounds upward."""
-    if set(issue.get("labels") or []) & set(HIGH_RISK_LABELS):
-        return "high"
+def _scored(issue: dict, protected: list[str]) -> tuple[str, str]:
+    """Risk, and the evidence for it.
+
+    Hints are read from the title *and* the body, which means a keyword
+    collision: an issue that only discusses a dangerous word scores high. That
+    cannot be scored away. A real auth bug often has a neutral title and one
+    mention in the body, so the same signal in the same place is all there is
+    to go on, and rounding down puts an auth change into a batch that merges
+    itself. So the score rounds up and says what it saw instead, because an
+    override the reviewer can make on evidence is the thing that was missing —
+    see "When you disagree with the score" in commands/triage.md.
+    """
+    labelled = sorted(set(issue.get("labels") or []) & set(HIGH_RISK_LABELS))
+    if labelled:
+        return "high", f"the {labelled[0]} label"
     text = _text(issue)
     matchers = [_glob_to_re(p) for p in protected or []]
     for path in _paths_in(text):
         if any(m.match(path) for m in matchers):
-            return "high"
-    if _has(text, HIGH_RISK_HINTS):
-        return "high"
-    if _has(text, LOW_RISK_HINTS):
-        return "low"
-    return "medium"
+            return "high", f"protected path {path}"
+    # Title and body are searched separately only to report which one matched;
+    # the verdict is the same either way.
+    parts = (("title", issue.get("title") or ""), ("body", issue.get("body") or ""))
+    for level, hints in (("high", HIGH_RISK_HINTS), ("low", LOW_RISK_HINTS)):
+        for where, part in parts:
+            hit = _hint_matcher(tuple(hints)).search(part)
+            if hit:
+                return level, f'"{hit.group(0)}" in the {where}'
+    return "medium", "no risk or safety signal in the text"
+
+
+def risk_level(issue: dict, protected: list[str]) -> str:
+    """Risk gates batching and auto-merge. When unsure, this rounds upward."""
+    return _scored(issue, protected)[0]
 
 
 # --- actionability ------------------------------------------------------------
@@ -406,12 +426,17 @@ def triage_issue(
 ) -> dict:
     duplicates = dedupe(issue, others)
     act = actionability(issue)
+    risk, why_risk = _scored(issue, protected)
     record = {
         "issue": issue.get("number"),
         "title": issue.get("title"),
         "kind": "duplicate" if duplicates else _kind(issue),
         "size": classify_size(issue),
-        "risk": risk_level(issue, protected),
+        "risk": risk,
+        # A high score blocks batching entirely, so the reviewer has to be able
+        # to see whether it came from the subject of the issue or from a word
+        # it happened to mention.
+        "risk_reason": why_risk,
         "lifecycle": None if duplicates else act["lifecycle"],
         "issue_updated_at": issue.get("updatedAt"),
         # batch.can_group needs these; without them nothing ever groups.

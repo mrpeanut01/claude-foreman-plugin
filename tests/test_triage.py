@@ -574,3 +574,72 @@ def test_needs_info_is_a_verdict_a_record_can_actually_carry():
     assert record["verdict"] == "needs-info"
     assert "needs-info" in record["labels"]
     assert triage.queueable([record]) == []
+
+
+# --- issue #5 (reopened): a risk score must say what set it -------------------
+# The substring half is fixed. The half that remains is a keyword collision:
+# risk reads title *and* body, so an issue that merely discusses a dangerous
+# word scores high. That cannot be scored away — the same word in the same
+# place is the only evidence a real auth bug with a neutral title leaves, and
+# rounding down puts it in a batch that merges itself. What it can do is stop
+# being silent, so the override the command documents can be made on evidence.
+
+
+def test_a_high_risk_score_says_which_word_set_it_and_where():
+    record = triage.triage_issue(
+        issue(
+            number=3,
+            title="Short issue titles produce false duplicates",
+            body="_tokens drops short tokens, so any distinguishing digit is discarded.",
+            labels=["bug"],
+        ),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["risk"] == "high"
+    assert "token" in record["risk_reason"]
+    assert "body" in record["risk_reason"], "a reviewer needs to know it was only mentioned"
+
+
+def test_a_risk_score_from_the_title_says_so():
+    record = triage.triage_issue(
+        issue(number=4, title="Session token never expires", body="Details.", labels=["bug"]),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["risk"] == "high"
+    assert "title" in record["risk_reason"]
+
+
+def test_a_protected_path_names_the_path_that_forced_the_score():
+    record = triage.triage_issue(
+        issue(number=5, title="Tweak helper", body="in src/auth/session.py", labels=["bug"]),
+        others=[],
+        protected=PROTECTED,
+        available_labels=AVAILABLE,
+    )
+    assert record["risk"] == "high"
+    assert "src/auth/session.py" in record["risk_reason"]
+
+
+def test_a_high_risk_label_is_named_as_the_reason():
+    record = triage.triage_issue(
+        issue(number=6, title="Tidy up logging", body="Details.", labels=["security"]),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["risk_reason"] == "the security label"
+
+
+def test_every_record_carries_a_risk_reason_even_when_nothing_scored():
+    record = triage.triage_issue(
+        issue(number=7, title="Handle empty upload payload", body="Returns 500 on empty body."),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["risk"] == "medium"
+    assert record["risk_reason"]
