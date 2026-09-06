@@ -166,6 +166,14 @@ def next_action(state: ledger.State, config: dict) -> dict:
         if stuck:
             return {"do": "escalate", "batch": batch["id"], "reason": stuck}
 
+    # A build that keeps being picked up is the same shape of problem, and the
+    # only one of the three the clock cannot catch: `building -> building`
+    # records no progress, so `stale_after_s` reads the same age forever.
+    for batch in live:
+        stalled = ledger.stalled_build(batch, caps)
+        if stalled:
+            return {"do": "escalate", "batch": batch["id"], "reason": stalled}
+
     # Review deadlock is about repeating findings, not rounds elapsed.
     for batch in live:
         if batch.get("review_gate") != "changes_requested":

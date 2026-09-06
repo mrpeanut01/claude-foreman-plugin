@@ -193,6 +193,7 @@ def test_counters_track_pushes_reviews_and_reruns(root):
         "review_rounds": 1,
         "reruns": 1,
         "futile_pushes": 0,
+        "build_resumes": 0,
     }
 
 
@@ -332,6 +333,47 @@ def test_re_entering_building_is_allowed_so_an_interrupted_build_can_resume(root
     batch = ledger.fold(ledger.read_events(root)).batches["b-001"]
     assert batch["state"] == "building"
     assert batch["progress_at"] == before, "restarting is not progress"
+
+
+def test_each_resume_of_an_interrupted_build_is_counted(root):
+    """`building -> building` records no progress, so a counter is the only
+    thing that can tell one resume from eleven."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    for _ in range(4):
+        ledger.transition(root, "b-001", "building")
+    attempts = ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]
+    assert attempts["build_resumes"] == 3, "the first entry is the build, not a resume"
+
+
+def test_starting_a_build_is_not_a_resume(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.transition(root, "b-001", "building")
+    assert ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]["build_resumes"] == 0
+
+
+def test_a_build_picked_up_past_the_ceiling_is_reported_as_stalled():
+    batch = {"state": "building", "attempts": {"build_resumes": 3}}
+    reason = ledger.stalled_build(batch, {})
+    assert reason and "3" in reason
+
+
+def test_a_build_below_the_ceiling_is_still_the_loops_own_problem():
+    assert ledger.stalled_build({"state": "building", "attempts": {"build_resumes": 2}}, {}) is None
+
+
+def test_a_batch_that_got_out_of_building_is_not_stalled_by_its_old_resumes():
+    """The resumes happened, but the build finished; the count is history now."""
+    batch = {"state": "open", "attempts": {"build_resumes": 9}}
+    assert ledger.stalled_build(batch, {}) is None
+
+
+def test_the_resume_ceiling_can_be_tightened_from_the_config():
+    batch = {"state": "building", "attempts": {"build_resumes": 1}}
+    assert ledger.stalled_build(batch, {"build_resumes": 1})
+
+
+def test_a_batch_with_no_resume_counter_at_all_is_not_stalled():
+    assert ledger.stalled_build({"state": "building"}, {}) is None
 
 
 # --- issue #64: a ledger path must not follow the caller around --------------

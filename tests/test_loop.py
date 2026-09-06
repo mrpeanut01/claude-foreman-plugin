@@ -506,6 +506,57 @@ def test_a_mid_build_batch_is_not_resumed_once_the_ci_budget_is_spent():
     assert action["do"] == "idle" and "budget" in action["reason"].lower()
 
 
+# --- a resumable build must still be a bounded one ---------------------------
+
+
+def _building_batch(root, resumes):
+    """A batch parked in `building`, picked up again `resumes` times."""
+    ledger.append(root, "batch.created", batch="b-9", issues=[1])
+    for _ in range(resumes + 1):
+        ledger.transition(root, "b-9", "building")
+
+
+def test_a_build_resumed_past_the_ceiling_reaches_a_human(tmp_path):
+    """Eleven resumes spread over months: no counter moved, `progress_at` never
+    moved either, and `next_action` answered `build` forever."""
+    root = ledger.init(tmp_path)
+    _building_batch(root, resumes=10)
+    st = ledger.load(root)
+    st.last_triage_at = _JUST_NOW
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "escalate" and action["batch"] == "b-9"
+    assert "resum" in action["reason"].lower()
+
+
+def test_a_build_inside_the_ceiling_is_still_resumed(tmp_path):
+    """Recovering an interrupted build is the point; only doing it forever is not."""
+    root = ledger.init(tmp_path)
+    _building_batch(root, resumes=1)
+    st = ledger.load(root)
+    st.last_triage_at = _JUST_NOW
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "build" and action["batch"] == "b-9"
+
+
+def test_a_batch_that_finished_building_is_not_escalated_for_its_old_resumes(tmp_path):
+    root = ledger.init(tmp_path)
+    _building_batch(root, resumes=10)
+    ledger.transition(root, "b-9", "built")
+    st = ledger.load(root)
+    st.last_triage_at = _JUST_NOW
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "open_pr" and action["batch"] == "b-9"
+
+
+def test_the_resume_ceiling_can_be_set_in_the_config(tmp_path):
+    root = ledger.init(tmp_path)
+    _building_batch(root, resumes=1)
+    st = ledger.load(root)
+    st.last_triage_at = _JUST_NOW
+    cfg = {**CONFIG, "caps": {**CONFIG["caps"], "build_resumes": 1}}
+    assert loop.next_action(st, cfg)["do"] == "escalate"
+
+
 # --- issue #70: the caps must not vanish when the loop runs from a worktree ---
 
 
