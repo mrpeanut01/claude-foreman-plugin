@@ -463,3 +463,23 @@ def test_ordinary_paths_are_still_extracted():
 
 def test_a_sentence_period_is_not_read_as_part_of_a_path():
     assert triage._paths_in("that is wrong. src/upload.py is fine") == ["src/upload.py"]
+
+
+def test_a_path_preceded_by_a_separator_is_still_found():
+    """Guarding the optional dot with a lookbehind refused every path written
+    after a separator, which is how relative paths and tracebacks are written."""
+    assert triage._paths_in("the deploy script ./infra/deploy.py needs a retry") == [
+        "infra/deploy.py"
+    ]
+    assert triage._paths_in('File "/app/src/auth/session.py", line 9') == [
+        "app/src/auth/session.py"
+    ]
+
+
+def test_a_relative_dot_prefixed_path_keeps_the_directory_dot():
+    assert triage._paths_in("./.github/workflows/ci.yml is wrong") == [".github/workflows/ci.yml"]
+
+
+def test_a_separator_prefixed_protected_path_still_scores_high_risk():
+    text = "the deploy script ./infra/deploy.py needs a retry"
+    assert triage.risk_level({"title": text, "body": ""}, ["**/infra/**"]) == "high"

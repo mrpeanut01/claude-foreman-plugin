@@ -159,9 +159,12 @@ from globs import compile_glob as _glob_to_re  # noqa: E402
 
 # A path may start with a dot (.github/, .claude/), so the leading dot has to be
 # optional rather than absent — dropping it silently unprotects every dotfile
-# directory listed in protected_paths. The lookbehind keeps a sentence's full
-# stop from being read as the start of the path that follows it.
-_PATH_RE = re.compile(r"(?<![\w./-])\.?[\w][\w./-]*/[\w./-]+\.\w+")
+# directory listed in protected_paths. The optional dot must not be guarded by a
+# lookbehind: that would refuse every path preceded by a separator, which is how
+# relative paths (./infra/deploy.py), traceback paths (File "/app/src/x.py") and
+# permalinks are written, and refusing those re-opens the same hole. A sentence's
+# full stop is excluded already, since \.? must be followed by a word character.
+_PATH_RE = re.compile(r"\.?[\w][\w./-]*/[\w./-]+\.\w+")
 
 
 def _paths_in(text: str) -> list[str]:

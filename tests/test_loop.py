@@ -140,7 +140,7 @@ def test_a_ready_batch_with_a_blocker_escalates_rather_than_merging():
 
 
 def test_untriaged_issues_are_triaged_when_nothing_is_in_flight():
-    st = state_with(issues={})
+    st = state_with(issues={}, last_triage_at=None)
     assert loop.next_action(st, CONFIG)["do"] == "triage"
 
 
@@ -196,7 +196,7 @@ def test_an_exhausted_budget_stops_work_that_would_spend_ci():
 
 
 def test_an_exhausted_budget_still_allows_triage_which_costs_no_ci():
-    st = state_with(issues={}, spend=[_spend(60 * 60)])
+    st = state_with(issues={}, spend=[_spend(60 * 60)], last_triage_at=None)
     assert loop.next_action(st, CONFIG)["do"] == "triage"
 
 
@@ -345,3 +345,16 @@ def test_triage_can_be_switched_off_entirely():
     st = state_with({"id": "b-001", "state": "merged", "pr": 1}, last_triage_at=None)
     config = {**CONFIG, "limits": {**CONFIG["limits"], "triage_every_s": 0}}
     assert loop.next_action(st, config)["do"] == "idle"
+
+
+def test_triage_is_switched_off_on_an_empty_ledger_too():
+    """The empty-ledger branch used to sit ahead of the refresh gate, so
+    triage_every_s: 0 was ignored on exactly the repo that has never run."""
+    st = state_with(last_triage_at=None)
+    config = {**CONFIG, "limits": {**CONFIG["limits"], "triage_every_s": 0}}
+    assert loop.next_action(st, config)["do"] == "idle"
+
+
+def test_an_empty_ledger_still_says_so():
+    st = state_with(last_triage_at=None)
+    assert loop.next_action(st, CONFIG)["reason"] == "nothing in the ledger yet"

@@ -8,7 +8,8 @@ a fold over the file (`ledger.fold`). Never rewrite a line; correct by appending
 | `type` | Required fields | Effect on folded state |
 |--------|-----------------|------------------------|
 | `issue.triaged` | `issue`, `verdict` | Upserts `issues[n]`. Re-triage overwrites; the log keeps both. |
-| `batch.created` | `batch`, `issues` | Creates the batch in `planned`, both gates `pending`. Optional `branch`, `pr`. |
+| `triage.completed` | — | Sets `last_triage_at`. Written once per `triage.py apply`, **even when it labelled nothing** — it marks that a pass happened, and `loop.triage_due` reads it to decide when to look for new issues. Without it the loop asks for triage on every tick. |
+| `batch.created` | `batch`, `issues` | Creates the batch in `planned`, both gates `pending`. Optional `branch`, `pr`. **Ignored when the id already exists** — ids are unique, so a repeat is a numbering bug, and replacing the record would discard a merge. |
 | `batch.state` | `batch`, `from`, `to` | Moves the batch. Only ever written by `ledger.transition`. |
 | `batch.pushed` | `batch`, `sha` | **Resets both gates to `pending`** and increments `attempts.pushes`. |
 | `gate.set` | `batch`, `gate`, `value` | Sets `ci_gate`/`review_gate`. A red gate under a `ready` batch drops it to `blocked`. |

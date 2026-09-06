@@ -67,7 +67,8 @@ illegal move should be impossible to record, not merely discouraged.
     "max_open_prs": 3,
     "max_batch_issues": 5,
     "max_ci_minutes_per_day": 400,
-    "stale_after_s": 5400
+    "stale_after_s": 5400,
+    "triage_every_s": 3600
   },
   "auto_merge": false,
   "protected_paths": ["**/auth/**", "**/migrations/**", ".github/workflows/**", "**/payments/**"],
@@ -78,6 +79,11 @@ illegal move should be impossible to record, not merely discouraged.
 `stale_after_s` is not optional: without it a gate that never resolves pins a
 batch on `watch` forever, and watching increments no counter, so nothing else
 would ever surface it.
+
+`triage_every_s` is how long the loop will go without looking for new issues;
+triage spends no CI, so it is checked ahead of the budget stop. Setting it to `0`
+switches triage off, which means the loop only ever works on what the ledger
+already holds.
 
 `caps.pushes` is deliberately loose at 8. It counts every push, including the
 ones that resolved review findings, so a PR that survives several genuine review

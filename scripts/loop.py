@@ -194,9 +194,6 @@ def next_action(state: ledger.State, config: dict) -> dict:
                 break  # WIP limit: draining beats starting
             return {"do": "build", "batch": batch["id"], "reason": "capacity to start new work"}
 
-    if not state.issues and not state.batches:
-        return {"do": "triage", "reason": "nothing in the ledger yet"}
-
     ungrouped = [
         n
         for n, r in sorted(state.issues.items())
@@ -210,10 +207,12 @@ def next_action(state: ledger.State, config: dict) -> dict:
         }
 
     if triage_due(state, limits):
-        return {
-            "do": "triage",
-            "reason": "no triage within the refresh window; look for new issues",
-        }
+        reason = (
+            "nothing in the ledger yet"
+            if not state.issues and not state.batches
+            else "no triage within the refresh window; look for new issues"
+        )
+        return {"do": "triage", "reason": reason}
 
     if budget_blocked:
         return {
