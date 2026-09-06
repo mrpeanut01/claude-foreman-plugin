@@ -103,9 +103,20 @@ reviewer with the errors; do not record it and do not argue with the validator.
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" paths --batch <id> --base <trunk> \
   --repo-dir ../foreman-<id> --apply
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> --repo OWNER/NAME
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> ready
 "${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --squash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> merging
 ```
+
+`ready` is the state both gates clear into, and it is the only state `merging`
+can be reached from: `open -> merging` is not a move, and `transition` refuses
+it. The `ready` line therefore comes **before** the merge is requested, so a
+refusal costs nothing — the recipe used to request the merge first and move
+the batch second, and when the move was refused GitHub was already merging a
+batch the ledger still called `open`. `loop.py` answers `advance` for an open
+batch whose gates are clear and `merge` for one already in `ready`; both land
+here. If `ledger.py state --batch <id>` already says `ready` (an earlier pass
+got that far and stopped), skip the `ready` line and carry on.
 
 The first line replaces the batch's `paths` — until now the file names its
 issues' prose happened to mention — with what the branch really changes, and

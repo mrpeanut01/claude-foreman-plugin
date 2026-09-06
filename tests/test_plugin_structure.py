@@ -68,6 +68,34 @@ def test_the_marketplace_and_plugin_versions_agree():
     assert market["plugins"][0]["name"] == MANIFEST["name"]
 
 
+@pytest.mark.parametrize(
+    "recipe,starts_in,ends_in",
+    [
+        ("commands/build.md", "planned", "built"),
+        ("commands/land.md", "built", "merged"),
+    ],
+)
+def test_a_recipe_walks_a_legal_path_through_the_state_machine(recipe, starts_in, ends_in):
+    """`open -> merging` is not a move, and the land recipe used to make it
+    after requesting the merge: GitHub was merging while the ledger refused."""
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import ledger
+
+    moves = re.findall(r'ledger\.py" transition <batch> (\w+)', (ROOT / recipe).read_text())
+    assert moves, f"{recipe} moves no batch at all"
+    current = starts_in
+    for nxt in moves:
+        if nxt == current:
+            continue  # the documented resume, `building -> building`
+        assert nxt in ledger.TRANSITIONS[current], (
+            f"{recipe} moves {current} -> {nxt}, which ledger.transition refuses"
+        )
+        current = nxt
+    assert current == ends_in
+
+
 def test_every_script_the_docs_invoke_exists():
     referenced = set()
     for doc in list(ROOT.glob("commands/*.md")) + list(ROOT.glob("skills/**/*.md")):

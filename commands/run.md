@@ -23,7 +23,8 @@ session merged something).
 | `triage` | `/foreman:triage` |
 | `batch` | `/foreman:batch` |
 | `build` | `/foreman:build <batch>` |
-| `open_pr` / `watch` / `advance` / `merge` | `/foreman:land <batch>` |
+| `open_pr` / `watch` / `merge` | `/foreman:land <batch>` |
+| `advance` | `/foreman:land <batch>` step 5: both gates are clear, so move the batch to `ready` and merge |
 | `unblock` | Fix the red gate, push; gates reset |
 | `escalate` | Record it, comment on the PR, label `needs-human`, **move on** |
 | `idle` | Report and stop |
