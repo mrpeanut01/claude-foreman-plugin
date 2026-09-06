@@ -302,3 +302,23 @@ def test_already_tracked_holds_issue_numbers_and_nothing_else(tmp_path, monkeypa
     assert out["already_tracked"] == [11]
     assert all(isinstance(n, int) for n in out["already_tracked"])
     assert out["duplicate_within_run"] == [repeated["summary"]]
+
+
+# --- issue #61: the provenance line must not render a null -------------------
+
+
+@pytest.mark.parametrize(
+    "context", [{"batch": "dogfood-2", "round": 1}, {"batch": "dogfood-2", "pr": None, "round": 1}]
+)
+def test_a_finding_raised_outside_a_pull_request_names_no_pr(context):
+    """--pr is optional, and the provenance line is the only trace back to the
+    review that raised the finding, so it is exactly the line that must not
+    render a null."""
+    first = findings.to_issue(f(), context, LABELS)["body"].splitlines()[0]
+    assert "None" not in first and "PR #" not in first
+    assert "dogfood-2" in first and "round 1" in first
+
+
+def test_a_finding_raised_on_a_pull_request_still_names_it():
+    first = findings.to_issue(f(), CONTEXT, LABELS)["body"].splitlines()[0]
+    assert "PR #7" in first

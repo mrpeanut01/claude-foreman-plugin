@@ -78,8 +78,13 @@ def to_issue(finding: dict, context: dict, available_labels: list[str]) -> dict:
     if finding.get("line"):
         where = f"{where}:{finding['line']}"
 
+    # --pr is optional: a review can be raised on a batch before there is a PR,
+    # or on a repo rather than a change. The provenance line is the only trace
+    # back to the review that raised the finding, so it is exactly the line that
+    # must not render a null — the batch and round carry it when the PR cannot.
+    raised_on = f" of PR #{context['pr']}" if context.get("pr") else ""
     body = [
-        f"Raised by the independent review of PR #{context.get('pr')} "
+        f"Raised by the independent review{raised_on} "
         f"(batch `{context.get('batch')}`, round {context.get('round')}).",
         "",
         f"**Severity:** {finding.get('severity', 'unknown')}  ",

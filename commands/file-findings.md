@@ -19,6 +19,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/findings.py" plan \
   > /tmp/findings-plan.json
 ```
 
+`--pr` is optional. A review raised on a batch that has no PR yet is traced back
+by its batch and round instead.
+
 Returns three lists:
 
 | List | Means |
