@@ -7,8 +7,10 @@ PR with an **independent** agent, and auto-merge on green.
 Built for repos where the test suite is slow enough that how you spend CI is the
 main constraint on throughput.
 
-> **Status: all five phases implemented, 191 tests.** Not yet run unattended
-> against a production repo — `auto_merge` ships `false` for that reason.
+> **Status: all five phases implemented, 764 tests.** Dogfooded against this
+> repository's own issue queue, which is where most of those tests came from.
+> Not yet run unattended against a production repo — `auto_merge` ships
+> `false` for that reason.
 
 ## The idea
 
@@ -111,6 +113,8 @@ All stdlib Python plus PyYAML; no service, no database.
 | `scripts/triage.py` | Sizing, risk, actionability, dedupe, label planning |
 | `scripts/batch.py` | Grouping, savings arithmetic, splitting a failed batch |
 | `scripts/land.py` | Check classification, review-verdict validation, merge blockers |
+| `scripts/gate.py` | The local gate: the diff's covering tests, then every cheap-tier CI step, as one command |
+| `scripts/findings.py` | Turn review findings into issues, deduplicated against the tracker |
 | `scripts/loop.py` | The scheduler: one next action, WIP limits, the daily CI budget |
 | `scripts/gh_safe.sh` | Allowlisted `gh` wrapper — no deletes, no `--admin`, no protection edits, everything audited |
 
