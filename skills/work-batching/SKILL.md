@@ -68,6 +68,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" paths \
 `--apply` records the real paths as a `batch.meta` event, which is where
 `land.py` reads a batch's paths from.
 
+It refuses to record an empty diff, and exits 1 saying so. git exiting 0 with no
+output means the branch changes nothing — which is also exactly what you see when
+`--repo-dir` names a checkout that does not hold the branch, the usual mistake
+being running this from the main worktree while the work sits in a linked one.
+Neither is an observation of what the batch touched, and `batch.meta` *replaces*
+the path list rather than adding to it, so recording `[]` would clear the list
+the protected-path merge gate reads. The declared paths stay put instead. Point
+`--repo-dir` at the worktree holding the branch and run it again.
+
 **Nothing calls this for you.** Run it after the branch is pushed and before
 asking whether the batch may merge, or the merge gate is still judging prose.
 
