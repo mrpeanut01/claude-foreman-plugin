@@ -10,8 +10,14 @@ same whether the PR fixes one issue or five, so grouping compatible issues is th
 largest saving available.
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" plan --triage /tmp/foreman-triage.json
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" plan \
+  --triage /tmp/foreman-triage.json --ledger .foreman
 ```
+
+`plan` reads the ledger to allocate ids that continue past the ones already
+issued. Point `--ledger` at the same directory `apply` writes to, or ids restart
+at `b-001` and collide with batches that already exist — from any directory but
+the repo root, the default is not that directory.
 
 ## The arithmetic
 
@@ -38,6 +44,32 @@ case collapses.
 
 A high-risk issue is never dropped — it gets a batch of its own. Solo is not
 exclusion.
+
+## Paths are intent until the diff says otherwise
+
+A batch's `paths` are the union of file paths its issues' prose happens to name.
+Prose invents files that do not exist and says nothing about files the fix had to
+touch. The protected-path merge gate reads `paths`, so gating on the prose alone
+guards intent rather than the change.
+
+Once the branch exists, recompute them from it:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" paths \
+  --batch b-001 --base main --repo-dir . --apply
+```
+
+| Key | Means |
+|-----|-------|
+| `paths` | What the branch really changes. The value that should replace the declared list |
+| `undeclared` | Changed but never mentioned — the protected file the gate would have missed |
+| `untouched` | Mentioned but never changed — usually a file the prose invented |
+
+`--apply` records the real paths as a `batch.meta` event, which is where
+`land.py` reads a batch's paths from.
+
+**Nothing calls this for you.** Run it after the branch is pushed and before
+asking whether the batch may merge, or the merge gate is still judging prose.
 
 ## The honest downside
 
