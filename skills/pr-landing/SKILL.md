@@ -70,9 +70,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> -
 "${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --squash
 ```
 
-`blockers` reports everything at once — gates, labels, protected paths, caps,
-`auto_merge` — so you fix or escalate in one pass rather than discovering
-obstacles one at a time.
+`blockers` reports everything at once — gates, labels, protected paths, the
+runaway caps, `auto_merge` — so you fix or escalate in one pass rather than
+discovering obstacles one at a time. The convergence counters (`futile_pushes`,
+`build_resumes`) are not among them: they belong to the escalation rules that
+own them, not to the merge gate.
 
 ## File the findings before acting on them
 

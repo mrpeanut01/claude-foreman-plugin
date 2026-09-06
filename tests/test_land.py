@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import land  # noqa: E402
+import ledger  # noqa: E402
 
 PROFILE = {
     "required_checks": ["lint", "unit", "integration"],
@@ -965,6 +966,89 @@ def test_a_green_for_this_commit_is_still_green_beside_a_dropped_stale_red():
     """Waiting is for what has not reported, not for what has."""
     mixed = [sha_check("lint", "FAILURE", OLD), sha_check("lint", "SUCCESS", NEW)]
     assert land.ci_gate(mixed, UNREQUIRED, None, NEW) == "full_green"
+
+
+# --- review: an emptiness test measured over the wrong checks -----------------
+
+TWO_JOBS = {
+    "required_checks": [],
+    "protection_known": True,
+    "jobs": {"lint": job(required=True), "test": job(required=True)},
+}
+
+
+def test_a_status_from_no_declared_job_does_not_end_the_wait():
+    """The hole the emptiness test left: the list is not empty, the suite is.
+
+    A DCO or CLA status, or a preview deploy, posts within a second of the push.
+    That leaves one check in the scoped list, so "nothing describes this commit"
+    is false and the guard never fires — while every job the profile declares is
+    still missing. Protection naming no required context means nothing can
+    *block* a merge; it still does not mean CI has spoken about this commit.
+    """
+    checks = [sha_check("lint", "FAILURE", OLD), sha_check("DCO", "SUCCESS", NEW)]
+    assert land.ci_gate(checks, TWO_JOBS, None, NEW) == "pending"
+
+
+def test_the_two_protection_branches_read_an_undeclared_status_alike():
+    """Whether protection could be read changes nothing about what a bot proves."""
+    checks = [sha_check("lint", "FAILURE", OLD), sha_check("DCO", "SUCCESS", NEW)]
+    unknown = {**TWO_JOBS, "protection_known": False}
+    assert land.ci_gate(checks, unknown, None, NEW) == "pending"
+    assert land.ci_gate(checks, TWO_JOBS, None, NEW) == "pending"
+
+
+def test_a_declared_job_reporting_is_what_ends_the_wait():
+    """The other half: waiting stops on the declared suite, not on the bot."""
+    checks = [sha_check("DCO", "SUCCESS", NEW), sha_check("lint", "SUCCESS", NEW)]
+    assert land.ci_gate(checks, UNREQUIRED, None, NEW) == "full_green"
+
+
+# --- review: a convergence counter is not a merge ceiling ---------------------
+
+PROGRESS_CAPS = {"pushes": 3, "review_rounds": 2, "reruns": 2, "build_resumes": 3}
+
+
+def progressed(**counters):
+    """A green, cleanly reviewed batch that took some number of attempts to get there."""
+    base = {"pushes": 1, "review_rounds": 0, "reruns": 0, "futile_pushes": 0, "build_resumes": 0}
+    return ready_batch(attempts={**base, **counters})
+
+
+def test_a_build_that_converged_is_not_blocked_by_the_resumes_it_took():
+    """`caps.build_resumes` is `stalled_build`'s ceiling, and that rule already ended.
+
+    `stalled_build` reads the count only while the batch is still `building`, so
+    a build interrupted three times that then reached `built` has converged.
+    Nothing resets the counter — by design, the record of what happened stays —
+    so `merge_blockers` reading the same key held a fully green, cleanly
+    reviewed batch for the rest of its life, and requeueing could not clear it.
+    """
+    batch = progressed(build_resumes=3)
+    assert ledger.stalled_build(batch, PROGRESS_CAPS) is None
+    assert ledger.cap_breached(batch, PROGRESS_CAPS) is None
+    assert land.merge_blockers(batch, {"labels": []}, {**CFG, "caps": PROGRESS_CAPS}) == []
+
+
+def test_a_run_of_futile_pushes_is_owned_by_its_own_rule_as_well():
+    """The other progress counter, excluded for the same reason rather than by luck.
+
+    `futile_push_run` carries a default ceiling and escalates on its own; it is
+    only invisible in `merge_blockers` today because any green resets the run to
+    zero. Both counters answer "is this batch converging?", which is a question
+    about escalation, not a ceiling on how much may have happened.
+    """
+    caps = {**PROGRESS_CAPS, "futile_pushes": 3}
+    batch = progressed(futile_pushes=3)
+    assert ledger.futile_push_run(batch, caps) is not None
+    assert land.merge_blockers(batch, {"labels": []}, {**CFG, "caps": caps}) == []
+
+
+def test_a_runaway_ceiling_still_blocks_beside_a_progress_counter():
+    """The exclusion is by counter, not a blanket amnesty on caps."""
+    batch = progressed(pushes=3, build_resumes=3)
+    blockers = land.merge_blockers(batch, {"labels": []}, {**CFG, "caps": PROGRESS_CAPS})
+    assert blockers == ["pushes at cap (3/3)"]
 
 
 # --- review: mutual containment dropped genuine rewordings -------------------

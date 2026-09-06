@@ -46,6 +46,16 @@ four times that then reached `built` converged, and its old resumes are history.
 Like `futile_pushes`, the ceiling has a **default** — a repo with no
 `.foreman/config.json` is still bounded. `caps.build_resumes` overrides it.
 
+## Neither counter is a merge blocker
+
+`merge_blockers` reads `caps` for the runaway ceilings — `pushes`,
+`review_rounds`, `reruns` — and skips `futile_pushes` and `build_resumes`, the
+same two `cap_breached` skips. They answer *is this batch converging?*, and a
+batch holding `full_green` and a clean review has converged, whatever it cost to
+get there. `build_resumes` is never reset (the record of the interruptions is
+meant to stand), so counting it at the merge held a finished batch for the rest
+of its life — a batch requeueing could not clear either.
+
 ## Never escalate
 
 - A first CI failure with a clear cause — fix it.
