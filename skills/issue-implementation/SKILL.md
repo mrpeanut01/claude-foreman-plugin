@@ -58,6 +58,11 @@ Never work around exit 2 by re-running the parts that pass. An unrunnable check
 is an unknown, and a green assembled out of unknowns is the exact result this
 gate exists to prevent.
 
+Exit 2 on the very first run is usually the diff, not a check: `--base` defaults
+to `main` and this repo's trunk may be `master`. Pass `--base <trunk>`. The gate
+refuses to fall back to an empty diff, because an empty diff requires no test and
+would let it exit 0 having run none.
+
 ## Finishing
 
 ```bash
