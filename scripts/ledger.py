@@ -28,6 +28,7 @@ from pathlib import Path
 
 LEDGER_DIR = ".foreman"
 EVENTS = "events.jsonl"
+CONFIG_FILE = "config.json"
 
 # --- the batch lifecycle ------------------------------------------------------
 # A batch is one group of issues heading for one PR. Gates (CI and review) run
@@ -179,6 +180,41 @@ def resolve_root(root: Path | str | None) -> Path:
         return repo_root() / LEDGER_DIR
     path = Path(root)
     return path if path.is_absolute() else repo_root() / path
+
+
+def resolve_config(path: Path | str | None) -> Path:
+    """The config file, anchored exactly like the ledger it sits beside.
+
+    `--config` had the same shape of bug as `--ledger` did (issue #64): a
+    relative default resolved against the caller's cwd, and a build runs inside
+    `../foreman-<batch>`, so the file was simply not there.
+    """
+    if path is None:
+        return repo_root() / LEDGER_DIR / CONFIG_FILE
+    given = Path(path)
+    return given if given.is_absolute() else repo_root() / given
+
+
+def load_config(path: Path | str | None = None) -> dict:
+    """The foreman config, or `{}` — but never `{}` quietly.
+
+    Every governor in this system is opt-in: `cap_breached` only fires for
+    counters that appear in `caps`, `stale_after_s` has no default, and
+    `risk_level` sees no protected paths without `protected_paths`. So an empty
+    config is not a conservative fallback, it is the loop with its brakes
+    removed, and the only reason that was survivable is that it stayed hidden.
+    Say it on stderr instead: stdout is JSON that callers parse.
+    """
+    resolved = resolve_config(path)
+    if not resolved.exists():
+        print(
+            f"warning: no foreman config at {resolved} — running with no caps, "
+            "no staleness window and no protected paths. Nothing will stop a "
+            f"runaway batch. Copy config.example.json to {LEDGER_DIR}/{CONFIG_FILE}.",
+            file=sys.stderr,
+        )
+        return {}
+    return json.loads(resolved.read_text(encoding="utf-8"))
 
 
 # --- storage ------------------------------------------------------------------

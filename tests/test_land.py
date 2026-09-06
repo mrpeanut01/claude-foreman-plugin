@@ -1,5 +1,7 @@
 """Landing: read CI honestly, judge the reviewer, and refuse to merge on doubt."""
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -780,3 +782,70 @@ def test_a_ready_for_review_job_that_does_report_is_still_waited_on():
     }
     checks = [check("lint", "SUCCESS"), check("e2e", "PENDING")]
     assert land.ci_gate(checks, profile, "main") == "pending"
+
+
+# --- issue #70: the config must not vanish when land runs from a worktree -----
+
+
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", "-c", "user.email=f@example.com", "-c", "user.name=foreman", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """The layout `commands/build.md` prescribes: the config lives one repo up."""
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    _git(checkout, "init", "-q", "-b", "main")
+    _git(checkout, "commit", "-q", "--allow-empty", "-m", "root")
+    linked = tmp_path / "foreman-b-001"
+    _git(checkout, "worktree", "add", "-q", str(linked), "-b", "foreman/b-001")
+
+    import ledger
+
+    root = ledger.init(checkout)
+    (root / ledger.CONFIG_FILE).write_text(json.dumps(CFG))
+    # A batch whose only remaining objection is that it touches a protected path.
+    ledger.append(root, "batch.created", batch="b-001", issues=[1], paths=["src/auth/session.py"])
+    for state in ("building", "built", "open"):
+        ledger.transition(root, "b-001", state)
+    ledger.gate(root, "b-001", "ci", "full_green")
+    ledger.gate(root, "b-001", "review", "clean")
+    ledger.transition(root, "b-001", "ready")
+    return checkout, linked
+
+
+def test_land_reads_its_protected_paths_from_the_repository_when_run_from_a_worktree(
+    worktree, monkeypatch, capsys
+):
+    """Merging itself fails safe with no config — `auto_merge` defaults off — but the
+    protected-path objection disappears entirely, so nothing records *why* the batch
+    should never have auto-merged."""
+    checkout, linked = worktree
+    monkeypatch.chdir(linked)
+
+    assert land.main(["blockers", "--batch", "b-001"]) == 2
+    blockers = json.loads(capsys.readouterr().out)["blockers"]
+    assert any("src/auth/session.py is protected" in b for b in blockers)
+    assert "auto_merge is disabled in config" not in blockers
+
+
+def test_land_says_so_when_it_is_judging_a_merge_with_no_config(worktree, monkeypatch, capsys):
+    """Merging itself fails safe here — `auto_merge` defaults off — so this is not an
+    auto-merge hole. What is missing is the reason: the protected path goes unmentioned,
+    and nobody reading the blockers learns the config was never found."""
+    checkout, linked = worktree
+    import ledger
+
+    (checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE).unlink()
+    monkeypatch.chdir(linked)
+
+    assert land.main(["blockers", "--batch", "b-001"]) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["blockers"] == ["auto_merge is disabled in config"]
+    assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in captured.err
