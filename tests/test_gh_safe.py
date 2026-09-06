@@ -27,9 +27,15 @@ def sandbox_ledger(tmp_path, monkeypatch):
 
 
 def run(*args, ledger=_SANDBOX, cwd=None):
-    """The wrapper, dry-run, auditing into `ledger` and running from `cwd`."""
+    """The wrapper, dry-run, auditing into `ledger` and running from `cwd`.
+
+    `ledger=None` removes FOREMAN_LEDGER entirely, which is the only way to
+    exercise the wrapper's own idea of where the audit log belongs.
+    """
     env = {**os.environ, "FOREMAN_DRY_RUN": "1"}
-    if ledger is not _SANDBOX:
+    if ledger is None:
+        env.pop("FOREMAN_LEDGER", None)
+    elif ledger is not _SANDBOX:
         env["FOREMAN_LEDGER"] = str(ledger)
     return subprocess.run([str(WRAPPER), *args], capture_output=True, text=True, env=env, cwd=cwd)
 
@@ -179,3 +185,91 @@ def test_a_call_with_no_subcommand_is_refused_and_still_audited(tmp_path):
     (record,) = records(tmp_path)
     assert record["decision"] == "REFUSED"
     assert record["argv"] == []
+
+
+# --- where the audit log lands ------------------------------------------------
+# `commands/build.md` has a build work in `../foreman-<batch>`, a linked
+# worktree that `git worktree remove` deletes when the batch lands. A
+# cwd-relative audit log therefore names a directory with a shorter life than
+# the record it holds (issue #71).
+
+
+def git(*args, cwd):
+    """git with an identity of its own, so a machine with no gitconfig can commit."""
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=foreman",
+            "-c",
+            "user.email=foreman@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.fixture
+def build(tmp_path):
+    """A checkout and a linked worktree of it: the layout a build runs in."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    git("init", "-q", cwd=checkout)
+    git("commit", "-q", "--allow-empty", "-m", "root", cwd=checkout)
+    worktree = tmp_path / "foreman-b-001"
+    git("worktree", "add", "-q", str(worktree), "-b", "b-001", cwd=checkout)
+    return checkout, worktree
+
+
+def test_a_call_from_a_build_worktree_is_audited_in_the_repository(build):
+    checkout, worktree = build
+    run("issue", "comment", "42", "--body", "done", ledger=None, cwd=worktree)
+    (record,) = records(checkout / ".foreman")
+    assert record["argv"] == ["issue", "comment", "42", "--body", "done"]
+    assert not (worktree / ".foreman").exists(), "an audit log the batch takes with it"
+
+
+def test_a_refusal_from_a_build_worktree_is_audited_in_the_repository(build):
+    checkout, worktree = build
+    result = run("repo", "delete", "o/r", ledger=None, cwd=worktree)
+    assert result.returncode != 0
+    (record,) = records(checkout / ".foreman")
+    assert record["decision"] == "REFUSED"
+
+
+def test_a_call_from_a_subdirectory_reaches_the_same_audit_log(build):
+    checkout, worktree = build
+    inside = worktree / "scripts"
+    inside.mkdir()
+    run("issue", "view", "42", ledger=None, cwd=inside)
+    assert [r["argv"] for r in records(checkout / ".foreman")] == [["issue", "view", "42"]]
+
+
+def test_an_absolute_ledger_is_obeyed_verbatim(build, tmp_path):
+    """How a caller says "this ledger, not the one you would have picked"."""
+    checkout, worktree = build
+    elsewhere = tmp_path / "elsewhere"
+    run("issue", "view", "42", ledger=elsewhere, cwd=worktree)
+    assert [r["argv"] for r in records(elsewhere)] == [["issue", "view", "42"]]
+    assert not (checkout / ".foreman").exists()
+
+
+def test_a_relative_ledger_is_anchored_to_the_repository_like_the_python_ledger(build):
+    """`ledger.resolve_root` anchors a relative path to the repo; so does this."""
+    checkout, worktree = build
+    run("issue", "view", "42", ledger="audit", cwd=worktree)
+    assert [r["argv"] for r in records(checkout / "audit")] == [["issue", "view", "42"]]
+    assert not (worktree / "audit").exists()
+
+
+def test_a_directory_in_no_repository_still_gets_an_audit_log(tmp_path):
+    """Not every caller is in a checkout; a directory is still a fine place for a log."""
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    run("issue", "view", "42", ledger=None, cwd=loose)
+    assert [r["argv"] for r in records(loose / ".foreman")] == [["issue", "view", "42"]]

@@ -6,10 +6,47 @@
 # the operations the loop actually needs, refuses the rest, and audits both.
 #
 #   FOREMAN_DRY_RUN=1   validate and audit without calling gh
-#   FOREMAN_LEDGER=DIR  audit location (default .foreman)
+#   FOREMAN_LEDGER=DIR  audit location (default .foreman, anchored to the repo)
 set -euo pipefail
 
+# --- where the audit log goes -------------------------------------------------
+# `commands/build.md` has a build work inside `../foreman-<batch>`, a linked
+# worktree that `git worktree remove` deletes once the batch lands, so a
+# cwd-relative audit log named a directory with a shorter life than the record
+# it held: half of what an unattended loop did to GitHub was written where
+# nobody would look for it, and was then thrown away (issue #71). #64 anchored
+# the ledger to the repository in `scripts/ledger.py`; this wrapper never runs
+# that code, so it anchors the same way, by the same rule -- and an absolute
+# FOREMAN_LEDGER is still obeyed verbatim, which is how a caller says "this
+# ledger, not the one you would have picked".
+
+repo_root() {
+  # `--git-common-dir` rather than `--show-toplevel` on purpose: inside a linked
+  # worktree the toplevel is the worktree, which is exactly the wrong answer.
+  # The common dir is the one thing every worktree of a repo agrees on.
+  local common top
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || common=""
+  case "$common" in
+    "") ;;
+    /*) ;;
+    *) common="$PWD/$common" ;;
+  esac
+  # A `.git` directory sits in its working tree; anything else (a bare repo, or
+  # --separate-git-dir) does not, so ask where the tree is.
+  if [ "${common##*/}" = ".git" ] && [ -d "${common%/*}" ]; then
+    printf '%s\n' "${common%/*}"
+    return
+  fi
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
+  # No repository here at all: a directory is still a fine place for a log.
+  printf '%s\n' "${top:-$PWD}"
+}
+
 LEDGER="${FOREMAN_LEDGER:-.foreman}"
+case "$LEDGER" in
+  /*) ;;
+  *) LEDGER="$(repo_root)/$LEDGER" ;;
+esac
 mkdir -p "$LEDGER"
 AUDIT="$LEDGER/gh-audit.log"
 STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
