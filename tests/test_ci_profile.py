@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import ci_profile  # noqa: E402
+import globs  # noqa: E402
 
 # --- workflow parsing ---------------------------------------------------------
 
@@ -466,3 +467,263 @@ def test_the_collision_merge_gives_the_same_answer_in_either_file_order(tmp_path
 
     assert answers[0] == answers[1], "file order changed the gate's behaviour"
     assert answers[0] is True, "one unconditional declaration means a check will appear"
+
+
+# --- issue #48: GitHub's filter-pattern syntax --------------------------------
+#
+# `globs.compile_glob` compiles the branch, tag and path filters read out of the
+# workflows above, so the cheat-sheet cases live here beside the profile that
+# feeds them to the gate.
+
+
+def test_a_character_class_matches_one_alphanumeric_listed_in_the_brackets():
+    assert globs.compile_glob("[CB]at").match("Cat")
+    assert globs.compile_glob("[CB]at").match("Bat")
+    assert not globs.compile_glob("[CB]at").match("Rat")
+
+
+def test_a_range_in_a_character_class_matches_every_character_in_the_range():
+    """GitHub's own example: v[12].[0-9]+.[0-9]+ is major version 1 or 2."""
+    pattern = globs.compile_glob("v[12].[0-9]+.[0-9]+")
+    assert pattern.match("v1.10.1")
+    assert pattern.match("v2.0.0")
+    assert not pattern.match("v3.0.0")
+    assert not pattern.match("v1.10.x")
+
+
+def test_a_question_mark_makes_the_preceding_character_optional():
+    """GitHub's `?` is a quantifier, not fnmatch's match-exactly-one-character."""
+    pattern = globs.compile_glob("*.jsx?")
+    assert pattern.match("page.js")
+    assert pattern.match("page.jsx")
+    assert not pattern.match("page.jsxx")
+
+
+def test_a_plus_repeats_the_preceding_character_one_or_more_times():
+    pattern = globs.compile_glob("release/v1+")
+    assert pattern.match("release/v1")
+    assert pattern.match("release/v111")
+    assert not pattern.match("release/v")
+
+
+def test_a_character_class_never_crosses_a_directory_separator():
+    assert not globs.compile_glob("src/[a-z]/x.py").match("src/a/b/x.py")
+
+
+def test_a_bracket_expression_github_does_not_support_stays_a_literal():
+    """Ranges cover a-z, A-Z and 0-9 only. Inventing a meaning for anything else
+    — a negated class, say — would silently change which paths are protected."""
+    assert globs.compile_glob("release-[!x].txt").match("release-[!x].txt")
+    assert not globs.compile_glob("release-[!x].txt").match("release-y.txt")
+    assert globs.compile_glob("v[9-0]").match("v[9-0]")  # a reversed range is not a range
+    assert globs.compile_glob("logs/[unclosed").match("logs/[unclosed")
+
+
+def test_a_negated_class_branch_filter_keeps_the_job_out_of_the_gate(tmp_path):
+    """#48's repro: GitHub excludes base release/v1, so no check ever appears.
+
+    Reading the negative pattern as a literal leaves the job requirable, and the
+    gate then waits for a check that cannot arrive until the staleness timer
+    escalates it.
+    """
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          pull_request:
+            branches: ['**', '!release/v[12]']
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "release/v1") is False
+    assert land.can_report_on_pr(spec, "release/v3") is True
+
+
+def test_a_positive_class_branch_filter_makes_the_job_requirable(tmp_path):
+    """The other direction from #48: the literal reading under-requires."""
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          pull_request:
+            branches: ['v[12].x']
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "v1.x") is True
+    assert land.can_report_on_pr(spec, "v3.x") is False
+
+
+# --- issue #50: the hyphenated ignore keys ------------------------------------
+#
+# `branches-ignore` and `tags-ignore` are the only filters whose YAML spelling
+# differs from the profile field they land in, so they are the only ones a
+# copy-paste regression to the underscore spelling would silently empty. An
+# empty ignore list reads as "no filter", which makes an unrunnable job
+# requirable and hangs the gate — so assert the spelling through the parser
+# rather than hand-building the dict the parser is supposed to produce.
+
+
+def test_parse_workflows_reads_the_hyphenated_ignore_keys(tmp_path):
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          pull_request:
+            branches-ignore: ['release/**']
+          push:
+            tags-ignore: ['v*']
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    events = {j["name"]: j["events"] for j in ci_profile.parse_workflows(d)}["test"]
+    assert events["pull_request"]["branches_ignore"] == ["release/**"]
+    assert events["push"]["tags_ignore"] == ["v*"]
+
+
+def test_a_branches_ignore_on_the_base_keeps_the_job_out_of_the_gate(tmp_path):
+    """The consequence of losing that key: a job GitHub never runs on this PR
+    would be waited for until the staleness timer escalated the batch."""
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          pull_request:
+            branches-ignore: [main]
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "main") is False
+    assert land.can_report_on_pr(spec, "develop") is True
+
+
+def test_a_tags_ignore_push_trigger_keeps_the_job_out_of_the_gate(tmp_path):
+    """A push filtered by tags only never fires on a branch push, so it can
+    never report on a pull request."""
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          push:
+            tags-ignore: ['v*']
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "main") is False
+
+
+# --- issue #51: merging two declarations of one job name ----------------------
+
+
+def _two_workflows(tmp_path, first_on: str, second_on: str) -> list[bool]:
+    """Requirability of job `test` on a PR into main, with the two workflow
+    files written in both filename orders."""
+    import land
+
+    answers = []
+    for names in (("a", "b"), ("b", "a")):
+        d = tmp_path / "".join(names) / ".github" / "workflows"
+        d.mkdir(parents=True)
+        for name, on in zip(names, (first_on, second_on), strict=True):
+            (d / f"{name}.yml").write_text(
+                f"name: {name}\non:\n{textwrap.indent(textwrap.dedent(on).strip(), '  ')}\n"
+                "jobs:\n  test: {steps: [{run: pytest}]}\n"
+            )
+        profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
+        answers.append(land.can_report_on_pr(profile["jobs"]["test"], "main"))
+    return answers
+
+
+def test_the_collision_merge_keeps_the_declaration_that_can_still_report(tmp_path):
+    """#51's repro. Both declarations carry exactly one filter, so a filter-count
+    proxy cannot separate them and the answer falls to filename order. Only the
+    branch-filtered one produces a check while the PR is open, and it does so on
+    every PR into main, so the job is requirable however the files are named.
+    """
+    answers = _two_workflows(
+        tmp_path,
+        "pull_request:\n  types: [closed]",
+        "pull_request:\n  branches: [main]",
+    )
+    assert answers == [True, True]
+
+
+def test_two_branch_filtered_declarations_merge_into_the_union_of_their_branches(tmp_path):
+    """Neither declaration covers the other, but their disjunction is exactly
+    one branch list, so nothing has to be thrown away."""
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    for name, branch in (("a", "main"), ("b", "develop")):
+        (d / f"{name}.yml").write_text(
+            f"name: {name}\non:\n  pull_request:\n    branches: [{branch}]\n"
+            "jobs:\n  test: {steps: [{run: pytest}]}\n"
+        )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "main") is True
+    assert land.can_report_on_pr(spec, "develop") is True
+    assert land.can_report_on_pr(spec, "release") is False
+
+
+def test_the_collision_merge_never_widens_two_declarations_into_no_filter(tmp_path):
+    """`branches: [main]` OR `paths: [src/**]` is not "unconditional": a PR into
+    develop touching only docs runs neither. Merging key by key would say
+    otherwise and hang the gate on a check that never appears.
+    """
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "a.yml").write_text(
+        "name: a\non:\n  pull_request:\n    branches: [main]\n"
+        "jobs:\n  test: {steps: [{run: pytest}]}\n"
+    )
+    (d / "b.yml").write_text(
+        "name: b\non:\n  pull_request:\n    paths: ['src/**']\n"
+        "jobs:\n  test: {steps: [{run: pytest}]}\n"
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "main") is True
+    assert land.can_report_on_pr(spec, "develop") is False
+
+
+def test_the_open_pull_request_types_agree_with_the_gate_that_reads_them():
+    """The merge and the gate must mean the same thing by "still open", and they
+    are in different modules because land.py imports ci_profile, not the reverse.
+    """
+    import land
+
+    assert set(ci_profile.OPEN_PR_TYPES) == set(land.PR_OPEN_TYPES)

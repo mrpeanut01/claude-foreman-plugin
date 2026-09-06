@@ -41,6 +41,18 @@ expensive job.
 Above ~0.1 the job's failures are barely evidence; fix or quarantine it before
 trusting anything it says.
 
+**`events`** — the filters each trigger declared, one entry per event. This is
+what decides whether a job can produce a check on a pull request at all.
+
+> One job name declared in several workflows is one check name, so those
+> declarations collapse into a single config per event. A check appears if *any*
+> of them fires — but one filter dict cannot say "`branches: [main]` **or**
+> `paths: [src/**]`", and merging key by key says "no filters at all", which
+> marks a job requirable that GitHub may never run. So the union is taken only
+> where it is exact, and otherwise the declaration that can still report while
+> the PR is open is the one kept. Under-requiring costs a wait; over-requiring
+> hangs the gate until the staleness timer escalates it.
+
 ## Cancelled and skipped runs are excluded
 
 They report the moment someone hit cancel, not the cost of the work. Including
