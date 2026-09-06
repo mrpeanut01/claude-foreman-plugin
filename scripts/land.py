@@ -192,7 +192,31 @@ def can_report_on_pr(spec: dict, base_branch: str | None = None) -> bool:
 _can_report = can_report_on_pr
 
 
-def _is_advisory(name: str, profile: dict) -> bool:
+def _shapes(profile: dict) -> list[dict]:
+    """The job list `ci_profile.attribute` wants: job key plus declared display name."""
+    return [
+        {"name": name, "display": (spec or {}).get("display")}
+        for name, spec in (profile.get("jobs") or {}).items()
+    ]
+
+
+def _job_for(name: str, profile: dict, shapes: list[dict] | None = None) -> dict:
+    """The profile entry for a reported check name, or {} when nothing matches.
+
+    GitHub reports matrix cells (`test (3.11)`) and reusable-workflow legs
+    (`caller / called`), while the profile is keyed by the workflow's job key
+    (`test`). Indexing `jobs` with the reported name therefore misses on exactly
+    the repos this system is for. `ci_profile.attribute` already reverses those
+    display forms, and returns None rather than guessing.
+    """
+    jobs = profile.get("jobs") or {}
+    if name in jobs:
+        return jobs[name] or {}
+    key = attribute(name, _shapes(profile) if shapes is None else shapes)
+    return (jobs.get(key) or {}) if key else {}
+
+
+def _is_advisory(name: str, profile: dict, shapes: list[dict] | None = None) -> bool:
     """Unknown checks count as required: an unknown gate may block the queue.
 
     When branch protection could not be read, nothing is known to be advisory.
@@ -202,11 +226,19 @@ def _is_advisory(name: str, profile: dict) -> bool:
     """
     if not profile.get("protection_known", False):
         return False
-    job = (profile.get("jobs") or {}).get(name)
+    if name in set(profile.get("required_checks") or []):
+        # Protection names this exact context. The job's own `required` flag is
+        # computed by matching the job KEY against those contexts, so a matrix
+        # job whose cells are required still reads required=False. Believing the
+        # flag over the context list would file a failing required cell as
+        # advisory, and a red gate would read green.
+        return False
+    job = _job_for(name, profile, shapes)
     return bool(job) and job.get("required") is False
 
 
 def classify_checks(checks: list[dict], profile: dict) -> dict:
+    shapes = _shapes(profile)
     summary = {
         "passed": [],
         "failed": [],
@@ -219,7 +251,7 @@ def classify_checks(checks: list[dict], profile: dict) -> dict:
     for entry in checks or []:
         name = entry.get("name", "")
         state = (entry.get("state") or entry.get("bucket") or "").upper()
-        advisory = _is_advisory(name, profile)
+        advisory = _is_advisory(name, profile, shapes)
 
         if state in PASSED:
             summary["passed"].append(name)
@@ -249,9 +281,7 @@ def ci_gate(checks: list[dict], profile: dict, base_branch: str | None = None) -
             # Nothing is known to be optional, so decide from what the workflows
             # declare plus what has actually reported.
             declared = profile.get("jobs") or {}
-            shapes = [
-                {"name": name, "display": spec.get("display")} for name, spec in declared.items()
-            ]
+            shapes = _shapes(profile)
             requirable = {n: s for n, s in declared.items() if can_report_on_pr(s, base_branch)}
             covered = {attribute(name, shapes) for name in summary["passed"]}
             reported = {attribute(c.get("name", ""), shapes) for c in (checks or [])}
@@ -271,9 +301,15 @@ def ci_gate(checks: list[dict], profile: dict, base_branch: str | None = None) -
         # Protection says nothing is required, so nothing can block.
         return "full_green" if not summary["actionable_pending"] else "pending"
 
-    jobs = profile.get("jobs") or {}
     done = set(summary["passed"])
-    expensive = [n for n in required if (jobs.get(n) or {}).get("tier") == "expensive"]
+    # Required checks are protection contexts — the names GitHub reports — so
+    # their tier lives under the job that declared them, not under the context.
+    # Reading the tier off the context directly finds nothing for every matrix
+    # cell, the expensive job then counts as cheap, and cheap_green collapses
+    # into full_green: the expensive tier gets launched on every push, which is
+    # the whole saving the ladder exists to make.
+    shapes = _shapes(profile)
+    expensive = [n for n in required if _job_for(n, profile, shapes).get("tier") == "expensive"]
     cheap = [n for n in required if n not in expensive]
 
     if all(n in done for n in required):

@@ -510,3 +510,42 @@ def test_a_push_only_path_filter_does_not_excuse_a_pull_request_job():
 def test_a_pull_request_path_filter_still_makes_a_job_conditional():
     spec = job(path_filters=["docs/**"], pr_path_filters=["docs/**"])
     assert land._can_report(spec) is False
+
+
+# --- issue #8: a reported name must be resolved to the job that declared it ---
+
+# Branch protection names the contexts GitHub actually reports. For a matrix job
+# that is one context per cell — never the workflow's job key, which is what the
+# profile is keyed by. `e2e` therefore carries required=False even though both of
+# its cells are required to merge.
+MATRIX = {
+    "required_checks": ["lint", "e2e (chrome)", "e2e (firefox)"],
+    "protection_known": True,
+    "jobs": {
+        "lint": {"tier": "cheap", "required": True, "display": None},
+        "e2e": {"tier": "expensive", "required": False, "display": None},
+        "coverage": {"tier": "cheap", "required": False, "display": None},
+    },
+}
+
+
+def test_a_matrix_cell_inherits_the_tier_of_the_job_that_declared_it():
+    """Otherwise the expensive tier is invisible and gets paid for on every push."""
+    checks = [
+        check("lint", "SUCCESS"),
+        check("e2e (chrome)", "PENDING"),
+        check("e2e (firefox)", "PENDING"),
+    ]
+    assert land.ci_gate(checks, MATRIX) == "cheap_green"
+
+
+def test_a_matrix_cell_of_an_advisory_job_is_advisory_too():
+    s = land.classify_checks([check("coverage (3.11)", "FAILURE")], MATRIX)
+    assert s["failed"] == [] and s["advisory_failed"] == ["coverage (3.11)"]
+
+
+def test_a_required_context_is_never_advisory_whatever_its_job_key_says():
+    """`e2e` reads required=False; the cell protection names is still required."""
+    s = land.classify_checks([check("e2e (chrome)", "FAILURE")], MATRIX)
+    assert s["failed"] == ["e2e (chrome)"]
+    assert land.ci_gate([check("e2e (chrome)", "FAILURE")], MATRIX) == "failed"
