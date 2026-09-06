@@ -24,6 +24,12 @@ def _needs_human(state: ledger.State, caps: dict) -> list[str]:
     """Two ways a batch stops being the loop's problem and becomes yours."""
     lines = []
     for event in state.escalations:
+        # An escalation event is never retracted, so the batch's current state is
+        # the authority. A merged or requeued batch needs nobody, and a NEEDS YOU
+        # section that accumulates resolved items is one nobody reads.
+        batch = state.batches.get(event.get("batch"))
+        if batch is not None and batch.get("state") != "escalated":
+            continue
         lines.append(
             f"  {event.get('batch', '—'):<10} escalated — "
             f"{event.get('reason', 'no reason recorded')}"

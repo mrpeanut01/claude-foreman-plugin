@@ -81,3 +81,33 @@ def test_review_verdicts_and_post_merge_reverts_are_reported(root):
     ledger.append(root, "merge.reverted", batch="b-002", within_days=2)
     out = status.render(ledger.fold(ledger.read_events(root)), config={})
     assert "1/2" in out or "50" in out
+
+
+def test_an_escalation_stops_nagging_once_the_batch_moves_on(root):
+    """NEEDS YOU is the morning report. A resolved item there teaches you to skip it."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.transition(root, "b-001", "building")
+    ledger.transition(root, "b-001", "escalated")
+    ledger.append(root, "escalation", batch="b-001", reason="pushes at cap")
+    assert "pushes at cap" in status.render(ledger.load(root), config={})
+
+    # a human requeues it and it goes on to merge
+    ledger.transition(root, "b-001", "planned")
+    for step in ("building", "built", "open"):
+        ledger.transition(root, "b-001", step)
+    ledger.gate(root, "b-001", "ci", "full_green")
+    ledger.gate(root, "b-001", "review", "clean")
+    for step in ("ready", "merging", "merged"):
+        ledger.transition(root, "b-001", step)
+
+    out = status.render(ledger.load(root), config={})
+    assert "pushes at cap" not in out, "a merged batch needs nobody"
+    assert "Nothing blocked." in out
+
+
+def test_an_escalation_for_a_batch_still_escalated_is_still_shown(root):
+    ledger.append(root, "batch.created", batch="b-002", issues=[2])
+    ledger.transition(root, "b-002", "building")
+    ledger.transition(root, "b-002", "escalated")
+    ledger.append(root, "escalation", batch="b-002", reason="needs a human")
+    assert "needs a human" in status.render(ledger.load(root), config={})
