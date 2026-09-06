@@ -11,6 +11,8 @@ plausible-sounding judgement call would quietly cost you something:
 CLI:
     land.py checks   --pr N --repo OWNER/NAME [--sha SHA] [--profile .foreman/ci-profile.json]
     land.py verdict  --file verdict.json
+    land.py revert-check --base main --source FILE... --test ID... [--repo-dir DIR]
+                     [--test-command CMD]
     land.py blockers --batch b-001 [--ledger .foreman] [--config .foreman/config.json]
 """
 
@@ -19,9 +21,13 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -481,6 +487,106 @@ def validate_review(verdict: dict) -> tuple[bool, list[str]]:
     return not errors, errors
 
 
+# --- the revert check ---------------------------------------------------------
+# The single most useful thing the reviewer does, and the one the recipe used to
+# get wrong. It said `git stash push -- <source files>`. By the time a review
+# runs the fix is committed and pushed, so stash finds "No local changes to
+# save", leaves the fix in place, and the covering test passes. An honest
+# reviewer then reports `still_passed`, which blocks every behaviour-changing
+# PR; a less honest one writes `failed_as_expected`, and the check is a word.
+# This makes it a fact instead: run the tests with the fix, revert the source
+# files to the base branch in a throwaway worktree, and run them again.
+
+
+def _tail(done: subprocess.CompletedProcess, limit: int = 4000) -> str:
+    return ((done.stdout or "") + (done.stderr or ""))[-limit:]
+
+
+def revert_check(
+    repo: Path | str,
+    base: str,
+    sources: list[str],
+    tests: list[str],
+    test_command: str | None = None,
+) -> dict:
+    """Whether the named tests fail once the source change is reverted.
+
+    `revert_check` in the result is `failed_as_expected` when the tests pass
+    with the fix and fail without it (they guard it), `still_passed` when they
+    pass either way (they guard nothing), or `not_run` with a `reason` when
+    nothing about the fix was measured: the tests fail *with* the fix in place,
+    or a named file is nowhere to be found. It is never `not_applicable`; that
+    is the reviewer's call about a change with no behaviour, not this one's.
+
+    Everything happens in a detached worktree of the repository's HEAD, so the
+    checkout the builder works in is never touched, and a crash mid-check
+    leaves nothing reverted anywhere that matters.
+    """
+    repo = Path(repo)
+    if not sources:
+        return {"revert_check": "not_run", "reason": "no source files named to revert"}
+    if not tests:
+        return {"revert_check": "not_run", "reason": "no covering tests named to run"}
+    runner = (
+        shlex.split(test_command)
+        if test_command
+        else [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    )
+    # Stale bytecode is the one way a correct revert can still report a pass:
+    # a reverted file of the same size, written in the same second, keeps its
+    # old .pyc. Not worth explaining to a reviewer twice.
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    parent = Path(tempfile.mkdtemp(prefix="foreman-revert-"))
+    scratch = parent / "worktree"
+
+    def run(args, cwd=None):
+        return subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True)
+
+    try:
+        made = run(["git", "-C", str(repo), "worktree", "add", "--detach", "-q", str(scratch)])
+        if made.returncode != 0:
+            why = made.stderr.strip() or f"git exited {made.returncode}"
+            return {"revert_check": "not_run", "reason": f"could not cut a scratch worktree: {why}"}
+        with_fix = run([*runner, *tests], cwd=scratch)
+        if with_fix.returncode != 0:
+            return {
+                "revert_check": "not_run",
+                "reason": "the covering tests do not pass with the fix in place, so reverting "
+                "it measures nothing",
+                "exit_code": with_fix.returncode,
+                "output": _tail(with_fix),
+            }
+        reverted, removed = [], []
+        for src in sources:
+            back = run(["git", "-C", str(scratch), "checkout", base, "--", src])
+            if back.returncode == 0:
+                reverted.append(src)
+                continue
+            # Not on the base branch: the branch added it, so reverting it is
+            # removing it. A file that is nowhere at all was named wrongly.
+            target = scratch / src
+            if not target.exists():
+                return {
+                    "revert_check": "not_run",
+                    "reason": f"{src} is neither on {base} nor in the branch",
+                }
+            target.unlink()
+            removed.append(src)
+        without = run([*runner, *tests], cwd=scratch)
+        return {
+            "revert_check": "failed_as_expected" if without.returncode != 0 else "still_passed",
+            "base": base,
+            "reverted": reverted,
+            "removed": removed,
+            "tests": list(tests),
+            "exit_code": without.returncode,
+            "output": _tail(without),
+        }
+    finally:
+        run(["git", "-C", str(repo), "worktree", "remove", "--force", str(scratch)])
+        shutil.rmtree(parent, ignore_errors=True)
+
+
 # --- review convergence -------------------------------------------------------
 
 
@@ -879,6 +985,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p = sub.add_parser("verdict")
     p.add_argument("--file", required=True)
+    p = sub.add_parser("revert-check", help="revert the fix, keep the tests, run them")
+    p.add_argument("--base", required=True, help="the branch the PR merges into")
+    p.add_argument("--source", nargs="+", required=True, help="source files the fix changed")
+    p.add_argument("--test", nargs="+", required=True, help="the covering test ids")
+    p.add_argument("--repo-dir", default=".", help="a checkout whose HEAD is the fix")
+    p.add_argument("--test-command", help="test runner (default: python -m pytest)")
     p = sub.add_parser("blockers")
     p.add_argument("--batch", required=True)
     p.add_argument("--pr", type=int)
@@ -964,6 +1076,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0 if ok else 1
+
+    if args.cmd == "revert-check":
+        result = revert_check(
+            args.repo_dir, args.base, args.source, args.test, test_command=args.test_command
+        )
+        print(json.dumps(result, indent=2))
+        return 0 if result["revert_check"] == "failed_as_expected" else 1
 
     state = ledger_mod.load(Path(args.ledger))
     batch = state.batches.get(args.batch)

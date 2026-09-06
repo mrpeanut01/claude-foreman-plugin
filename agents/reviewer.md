@@ -21,7 +21,9 @@ hypothesis; the diff is the fact.
 
 You cannot edit. No `Edit`, no `Write`. If something is wrong you must describe
 it precisely enough for someone else to fix, which is a higher bar than fixing it
-yourself and a deliberate one.
+yourself and a deliberate one. `Bash` is for reading — `git diff`, `grep`,
+running tests — and for the revert check below, which works in a scratch
+worktree of its own. Never use it to change a file in the branch under review.
 
 ## The bar for `clean`
 
@@ -35,10 +37,21 @@ point at a test that exercises the changed behaviour, the verdict is not clean.
 **2. Run the revert check.** Revert the source change, keep the new test, run it:
 
 ```bash
-git stash push -- <source files, not test files>
-pytest <the covering test>     # must FAIL
-git stash pop
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" revert-check --base <trunk> \
+  --source <source files the fix changed, not the tests> \
+  --test <the covering test ids> \
+  --repo-dir <the checkout holding the branch, e.g. ../foreman-<id>>
 ```
+
+It runs the named tests with the fix, then again in a throwaway worktree with
+the source files put back to `<trunk>`, and prints `failed_as_expected` only
+when they pass first and fail second. Copy its `revert_check` value into the
+verdict verbatim; `not_run` means nothing was measured, and the `reason` says
+what to fix before asking again.
+
+Do not substitute `git stash`. By the time you see the change it is committed,
+and stash on a clean tree reverts nothing, reports success, and leaves the
+test passing against the fix it was supposed to lose.
 
 A test that still passes with the fix reverted guards nothing. That is a
 mechanical fact, not an opinion, and it is the single most useful thing you do.
