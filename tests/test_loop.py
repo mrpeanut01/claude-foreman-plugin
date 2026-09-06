@@ -421,3 +421,49 @@ def test_the_futile_push_ceiling_can_be_configured():
     assert loop.next_action(st, LOOSE_CAPS)["do"] == "unblock"
     tight = {**LOOSE_CAPS, "caps": {**LOOSE_CAPS["caps"], "futile_pushes": 2}}
     assert loop.next_action(st, tight)["do"] == "escalate"
+
+
+# --- issue #58: a merged batch must not hide an issue it left open -----------
+
+
+def _triaged(number, at):
+    return {number: {"issue": number, "verdict": "actionable", "ts": at}}
+
+
+def test_an_issue_its_merged_batch_left_open_is_offered_for_batching_again():
+    """b-001 merged as PR #7, but issue #5 is still open on the tracker.
+
+    Triage lists open issues only, so a triage record written after the merge
+    is evidence the merge did not close it.
+    """
+    st = state_with({"id": "b-001", "state": "merged", "issues": [5], "pr": 7})
+    st.batches["b-001"]["progress_at"] = _aged(48)
+    st.issues = _triaged(5, _aged(1))
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "batch" and action["issues"] == [5]
+
+
+def test_an_issue_whose_merged_batch_closed_it_stays_out_of_the_queue():
+    """No triage has seen it since the merge, so nothing says it is still open."""
+    st = state_with({"id": "b-001", "state": "merged", "issues": [5], "pr": 7})
+    st.batches["b-001"]["progress_at"] = _aged(1)
+    st.issues = _triaged(5, _aged(48))
+    assert loop.next_action(st, CONFIG)["do"] != "batch"
+
+
+def test_an_issue_held_by_an_escalated_batch_is_not_re_batched():
+    """A human is deciding what happens to it; a second batch would collide."""
+    st = state_with({"id": "b-001", "state": "escalated", "issues": [5]})
+    st.batches["b-001"]["progress_at"] = _aged(48)
+    st.issues = _triaged(5, _aged(1))
+    assert loop.next_action(st, CONFIG)["do"] != "batch"
+
+
+def test_an_issue_a_live_batch_is_working_on_is_never_re_batched():
+    st = state_with(
+        {"id": "b-001", "state": "open", "issues": [5], "pr": 7, "ci_gate": "pending"},
+        {"id": "b-002", "state": "merged", "issues": [5], "pr": 6},
+    )
+    st.batches["b-002"]["progress_at"] = _aged(48)
+    st.issues = _triaged(5, _aged(1))
+    assert loop.next_action(st, CONFIG)["do"] == "watch"

@@ -7,7 +7,7 @@ a fold over the file (`ledger.fold`). Never rewrite a line; correct by appending
 
 | `type` | Required fields | Effect on folded state |
 |--------|-----------------|------------------------|
-| `issue.triaged` | `issue`, `verdict` | Upserts `issues[n]`. Re-triage overwrites; the log keeps both. |
+| `issue.triaged` | `issue`, `verdict` | Upserts `issues[n]`. Re-triage overwrites; the log keeps both. Its `ts` matters: triage asks GitHub for **open** issues only, so a record newer than a merged batch is the loop's only evidence that the merge did not close the issue, and `loop._grouped_issues` hands it back to batching. |
 | `triage.completed` | — | Sets `last_triage_at`. Written once per `triage.py apply`, **even when it labelled nothing** — it marks that a pass happened, and `loop.triage_due` reads it to decide when to look for new issues. Without it the loop asks for triage on every tick. |
 | `batch.created` | `batch`, `issues` | Creates the batch in `planned`, both gates `pending`. Optional `branch`, `pr`. **Ignored when the id already exists** — ids are unique, so a repeat is a numbering bug, and replacing the record would discard a merge. |
 | `batch.state` | `batch`, `from`, `to` | Moves the batch. Only ever written by `ledger.transition`. |

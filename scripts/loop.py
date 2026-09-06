@@ -51,16 +51,22 @@ def budget_remaining(state: ledger.State, config: dict) -> float | None:
     return minutes * 60 - spent_today(state)
 
 
-def seconds_since(stamp: str | None, now: datetime | None = None) -> float | None:
-    """Seconds since an ISO timestamp, or None when it is missing or unreadable."""
+def when(stamp: str | None) -> datetime | None:
+    """An ISO timestamp as an aware datetime, or None when unreadable."""
     if not stamp:
         return None
     try:
         seen = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
     except ValueError:
         return None
-    if seen.tzinfo is None:
-        seen = seen.replace(tzinfo=UTC)
+    return seen if seen.tzinfo else seen.replace(tzinfo=UTC)
+
+
+def seconds_since(stamp: str | None, now: datetime | None = None) -> float | None:
+    """Seconds since an ISO timestamp, or None when it is missing or unreadable."""
+    seen = when(stamp)
+    if seen is None:
+        return None
     return ((now or datetime.now(UTC)) - seen).total_seconds()
 
 
@@ -88,8 +94,41 @@ def review_rounds(state: ledger.State, batch_id: str) -> list[list[dict]]:
     return [r.get("findings", []) for r in state.reviews if r.get("batch") == batch_id]
 
 
+def _seen_open_since(state: ledger.State, issue: int, batch: dict) -> bool:
+    """Whether triage has seen this issue since its batch stopped moving.
+
+    `triage.py` asks GitHub for open issues only, so a triage record written
+    after the batch landed is direct evidence that the landing did not close
+    the issue. An older record says nothing either way, and silence is not
+    evidence: without it the issue stays with the batch.
+    """
+    seen = when((state.issues.get(issue) or {}).get("ts"))
+    landed = when(batch.get("progress_at") or batch.get("updated"))
+    return seen is not None and landed is not None and seen > landed
+
+
 def _grouped_issues(state: ledger.State) -> set[int]:
-    return {i for b in state.batches.values() for i in (b.get("issues") or [])}
+    """Issues some batch is already accountable for.
+
+    Membership alone is not the test. A merged batch used to hold its issues
+    forever, so an issue whose PR merged without closing it became invisible to
+    the loop permanently — nothing reconciles a merged batch against whether
+    the issues it named actually closed, and the loop believed the work was
+    done while the issue that motivated it stayed open (issue #58). A merged
+    batch therefore stops holding an issue that triage has since seen open.
+
+    `escalated` and `abandoned` batches keep holding theirs unconditionally: a
+    person is deciding what happens to those, and offering the same issues to a
+    new batch would duplicate whatever that person is doing.
+    """
+    grouped: set[int] = set()
+    for batch in state.batches.values():
+        released = batch.get("state") == "merged"
+        for issue in batch.get("issues") or []:
+            if released and _seen_open_since(state, issue, batch):
+                continue
+            grouped.add(issue)
+    return grouped
 
 
 def next_action(state: ledger.State, config: dict) -> dict:
