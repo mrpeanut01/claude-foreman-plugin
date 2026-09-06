@@ -158,9 +158,16 @@ STOPWORDS = {
 from globs import compile_glob as _glob_to_re  # noqa: E402
 
 
+# A path may start with a dot (.github/, .claude/), so the leading dot has to be
+# optional rather than absent — dropping it silently unprotects every dotfile
+# directory listed in protected_paths. The lookbehind keeps a sentence's full
+# stop from being read as the start of the path that follows it.
+_PATH_RE = re.compile(r"(?<![\w./-])\.?[\w][\w./-]*/[\w./-]+\.\w+")
+
+
 def _paths_in(text: str) -> list[str]:
     """File paths mentioned in the text, in order, without repeats."""
-    return list(dict.fromkeys(re.findall(r"[\w][\w./-]*/[\w./-]+\.\w+", text or "")))
+    return list(dict.fromkeys(_PATH_RE.findall(text or "")))
 
 
 def _text(issue: dict) -> str:

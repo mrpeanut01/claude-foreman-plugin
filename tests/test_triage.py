@@ -439,3 +439,27 @@ def test_en_gb_spellings_and_bare_auth_still_score_high(title):
 )
 def test_author_is_still_not_an_auth_issue(title):
     assert triage.risk_level(issue(title=title, body="Details."), []) != "high", title
+
+
+# --- issue #54: dot-prefixed paths must survive extraction --------------------
+
+
+def test_a_dot_prefixed_path_keeps_its_leading_dot():
+    """The extractor required a leading word character, so '.github/...' came
+    back as 'github/...' and stopped matching any protected-path glob."""
+    assert triage._paths_in("the release job in .github/workflows/ci.yml") == [
+        ".github/workflows/ci.yml"
+    ]
+
+
+def test_a_dot_prefixed_protected_path_is_scored_high_risk():
+    text = "the release job in .github/workflows/ci.yml must not run on forks"
+    assert triage.risk_level({"title": text, "body": ""}, [".github/workflows/**"]) == "high"
+
+
+def test_ordinary_paths_are_still_extracted():
+    assert triage._paths_in("traceback in src/auth/token.py line 4") == ["src/auth/token.py"]
+
+
+def test_a_sentence_period_is_not_read_as_part_of_a_path():
+    assert triage._paths_in("that is wrong. src/upload.py is fine") == ["src/upload.py"]
