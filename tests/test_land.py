@@ -1405,3 +1405,12 @@ def test_checks_without_gh_report_pending_not_a_crash(monkeypatch, capsys):
     assert land.main(["checks", "--pr", "1", "--repo", "o/r"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["gate"] == "pending" and out["head_sha"] is None
+
+
+def test_a_change_with_no_behaviour_cannot_also_claim_its_test_survived_a_revert():
+    """The one branch of validate_review nothing exercised: behaviour_change
+    false and revert_check still_passed contradict each other."""
+    ok, errors = land.validate_review(
+        clean(behaviour_change=False, tests_covering=[], revert_check="still_passed")
+    )
+    assert not ok and any("contradicts" in e for e in errors)
