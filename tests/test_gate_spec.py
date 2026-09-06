@@ -38,39 +38,86 @@ def spec(events, display=None):
 
 # --- question 1: can this job produce a check on this pull request? ----------
 
+# (shape) -> (spec, requirable with no base known, requirable with base "main")
+# Production ALWAYS supplies a base branch, so a table that only tests the
+# unknown-base column tests the configuration nobody runs.
 REQUIRABLE = {
-    "plain pull_request": (spec({"pull_request": {}}), True),
-    "plain push": (spec({"push": {}}), True),
-    "pull_request and push": (spec({"pull_request": {}, "push": {}}), True),
-    "pull_request_target": (spec({"pull_request_target": {}}), True),
-    "pull_request + paths": (spec({"pull_request": {"paths": ["src/**"]}}), False),
-    "pull_request + pathsignore": (spec({"pull_request": {"paths_ignore": ["**.md"]}}), False),
-    "pull_request + branches": (spec({"pull_request": {"branches": ["main"]}}), False),
-    "push + branches": (spec({"push": {"branches": ["main"]}}), False),
-    "push + tags": (spec({"push": {"tags": ["v*"]}}), False),
-    "push + paths": (spec({"push": {"paths": ["src/**"]}}), False),
-    "schedule only": (spec({"schedule": {}}), False),
-    "workflow_dispatch only": (spec({"workflow_dispatch": {}}), False),
-    "workflow_call only": (spec({"workflow_call": {}}), False),
-    "release only": (spec({"release": {}}), False),
-    "templated job name": (spec({"pull_request": {}}, display="E2E ${{ matrix.os }}"), False),
-    "no triggers at all": (spec({}), False),
-    # A restricted trigger alongside an unrestricted one still reports.
-    "push branches + plain PR": (spec({"push": {"branches": ["main"]}, "pull_request": {}}), True),
-    # `types:` decides whether the trigger fires when a PR is opened at all.
+    "plain pull_request": (spec({"pull_request": {}}), True, True),
+    "plain push": (spec({"push": {}}), True, True),
+    "pull_request and push": (spec({"pull_request": {}, "push": {}}), True, True),
+    "pull_request_target": (spec({"pull_request_target": {}}), True, True),
+    # branches: on a PR trigger matches the BASE, so a matching base makes it
+    # unconditional. On a push trigger it matches the HEAD, which is the PR's
+    # feature branch, so it stays conditional whatever the base is.
+    "pull_request + branches": (spec({"pull_request": {"branches": ["main"]}}), False, True),
+    "push + branches": (spec({"push": {"branches": ["main"]}}), False, False),
+    "push branches + plain PR": (
+        spec({"push": {"branches": ["main"]}, "pull_request": {}}),
+        True,
+        True,
+    ),
+    "pull_request + paths": (spec({"pull_request": {"paths": ["src/**"]}}), False, False),
+    "pull_request + pathsignore": (
+        spec({"pull_request": {"paths_ignore": ["**.md"]}}),
+        False,
+        False,
+    ),
+    "pull_request + branchesignore": (
+        spec({"pull_request": {"branches_ignore": ["main"]}}),
+        False,
+        False,
+    ),
+    "pull_request + negated branch": (
+        spec({"pull_request": {"branches": ["**", "!main"]}}),
+        False,
+        False,
+    ),
+    "push + tags": (spec({"push": {"tags": ["v*"]}}), False, False),
+    "push + paths": (spec({"push": {"paths": ["src/**"]}}), False, False),
+    "schedule only": (spec({"schedule": {}}), False, False),
+    "workflow_dispatch only": (spec({"workflow_dispatch": {}}), False, False),
+    "workflow_call only": (spec({"workflow_call": {}}), False, False),
+    "release only": (spec({"release": {}}), False, False),
+    "merge_group only": (spec({"merge_group": {}}), False, False),
+    "templated job name": (
+        spec({"pull_request": {}}, display="E2E ${{ matrix.os }}"),
+        False,
+        False,
+    ),
+    "no triggers at all": (spec({}), False, False),
     "pull_request + open types": (
         spec({"pull_request": {"types": ["opened", "synchronize"]}}),
         True,
+        True,
     ),
-    "pull_request + closed only": (spec({"pull_request": {"types": ["closed"]}}), False),
-    "pull_request + labeled only": (spec({"pull_request": {"types": ["labeled"]}}), False),
+    "pull_request + closed only": (spec({"pull_request": {"types": ["closed"]}}), False, False),
+    "pull_request + labeled only": (spec({"pull_request": {"types": ["labeled"]}}), False, False),
 }
 
 
+@pytest.mark.parametrize("base", [None, "main"], ids=["no_base", "base_main"])
 @pytest.mark.parametrize("shape", sorted(REQUIRABLE), ids=lambda s: s.replace(" ", "_"))
-def test_requirability_of_every_job_shape(shape):
-    job_spec, expected = REQUIRABLE[shape]
-    assert land.can_report_on_pr(job_spec) is expected, shape
+def test_requirability_of_every_job_shape(shape, base):
+    job_spec, without_base, with_base = REQUIRABLE[shape]
+    expected = with_base if base else without_base
+    assert land.can_report_on_pr(job_spec, base_branch=base) is expected, f"{shape} base={base}"
+
+
+@pytest.mark.parametrize(
+    "patterns,base,expected",
+    [
+        (["releases/**"], "releases/1-alpha", True),
+        (["releases/**", "!releases/**-alpha"], "releases/1-alpha", False),
+        (["**", "!main"], "main", False),
+        (["**", "!main"], "develop", True),
+        (["release/*"], "release/1/2", False),  # * must not cross a slash
+        (["release/**"], "release/1/2", True),
+    ],
+)
+def test_github_branch_filter_semantics(patterns, base, expected):
+    """`!` excludes, and `*` does not cross `/`. fnmatch does neither."""
+    job = spec({"pull_request": {"branches": patterns}})
+    assert land.can_report_on_pr(job, base_branch=base) is expected
 
 
 # `branches:` on a pull_request trigger matches the PR's BASE branch. When the
@@ -222,10 +269,13 @@ def test_no_cell_returns_green_while_a_check_is_running():
             assert land.ci_gate(checks, prof) != "full_green", cell
 
 
-def test_no_cell_hangs_when_every_reportable_job_has_passed():
+@pytest.mark.parametrize("base", [None, "main"], ids=["no_base", "base_main"])
+def test_no_cell_hangs_when_every_reportable_job_has_passed(base):
     """The hang direction: a gate that can never clear."""
-    for name, (job_spec, requirable) in REQUIRABLE.items():
-        if requirable:
+    for name, (job_spec, without_base, with_base) in REQUIRABLE.items():
+        if with_base if base else without_base:
             continue
         prof = profile(lint=PLAIN, other=job_spec)
-        assert land.ci_gate([check("lint", "SUCCESS")], prof) == "full_green", name
+        assert land.ci_gate([check("lint", "SUCCESS")], prof, base) == "full_green", (
+            f"{name} base={base}"
+        )

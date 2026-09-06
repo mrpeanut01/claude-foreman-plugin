@@ -25,10 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fnmatch import fnmatch  # noqa: E402
-
 from ci_profile import attribute  # noqa: E402
-from globs import matches_any  # noqa: E402
+from globs import compile_glob, matches_any  # noqa: E402
 
 PASSED = {"SUCCESS", "PASS", "NEUTRAL", "SKIPPED"}
 # A cancelled check is not a pass. Leaving it in neither set parks it in
@@ -65,7 +63,9 @@ CLEAR = {"ci": "full_green", "review": "clean"}
 
 # Events that can produce a check on a pull request. A job wired to anything else
 # will never report here, and requiring it would hang the gate forever.
-PR_EVENTS = {"pull_request", "pull_request_target", "push", "merge_group"}
+# merge_group checks report against the merge queue ref, not the pull request,
+# so a merge_group-only job never reports here.
+PR_EVENTS = {"pull_request", "pull_request_target", "push"}
 
 # Two reviewers disagreeing forever is deadlock; two reviewers finding different
 # things each round is progress. Only the first is worth escalating on.
@@ -109,19 +109,41 @@ FILTER_KEYS = ("paths", "paths_ignore", "branches", "tags")
 PR_OPEN_TYPES = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
 
 
-def _unconditional(cfg: dict, base_branch: str | None = None) -> bool:
+def _branch_allows(branch: str, patterns: list[str]) -> bool:
+    """GitHub branch-filter semantics: `!` excludes, and `*` does not cross `/`.
+
+    fnmatch does neither — it reads `!main` as a literal that never matches, and
+    since inclusion is an any() test, an ignored exclusion reads as permitted.
+    """
+    positives = [p for p in patterns if not p.startswith("!")]
+    negatives = [p[1:] for p in patterns if p.startswith("!")]
+    if positives and not matches_any(branch, positives):
+        return False
+    return not any(compile_glob(p).match(branch) for p in negatives)
+
+
+def _unconditional(
+    cfg: dict, base_branch: str | None = None, resolve_branches: bool = False
+) -> bool:
     """Whether this trigger fires on every pull request into `base_branch`.
 
-    A `branches:` filter on a pull_request trigger matches the PR's BASE branch,
-    so when the base is known and matches, the filter is not a restriction at
-    all. Treating it as one excluded the primary CI job of most repos.
+    `branches:` on a pull_request trigger matches the PR's BASE, so a matching
+    base means it is no restriction at all. On a `push` trigger it matches the
+    HEAD — the PR's feature branch — so it stays a restriction whatever the base
+    is, and resolving it against the base marks jobs requirable that can never
+    report. Callers say which meaning applies via `resolve_branches`.
     """
-    branches = cfg.get("branches")
-    if branches:
-        if base_branch is None or not any(fnmatch(base_branch, pattern) for pattern in branches):
-            return False
-    if any(cfg.get(key) for key in ("paths", "paths_ignore", "tags")):
+    if any(cfg.get(key) for key in ("paths", "paths_ignore", "tags", "tags_ignore")):
         return False
+
+    branches = list(cfg.get("branches") or [])
+    branches += [f"!{p}" for p in (cfg.get("branches_ignore") or [])]
+    if branches:
+        if not resolve_branches or base_branch is None:
+            return False
+        if not _branch_allows(base_branch, branches):
+            return False
+
     types = cfg.get("types")
     if types and not (set(types) & PR_OPEN_TYPES):
         return False  # e.g. types: [closed] — never fires while the PR is open
@@ -156,10 +178,13 @@ def can_report_on_pr(spec: dict, base_branch: str | None = None) -> bool:
     events = spec.get("events")
     if events is None:
         return _legacy_can_report(spec)
-    for name in (*PR_TRIGGERS, "push"):
+    for name in PR_TRIGGERS:
         cfg = events.get(name)
-        if isinstance(cfg, dict) and _unconditional(cfg, base_branch):
+        if isinstance(cfg, dict) and _unconditional(cfg, base_branch, resolve_branches=True):
             return True
+    push = events.get("push")
+    if isinstance(push, dict) and _unconditional(push):
+        return True
     return False
 
 

@@ -98,6 +98,8 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
                 "branches": list((cfg or {}).get("branches") or []),
                 "tags": list((cfg or {}).get("tags") or []),
                 "types": list((cfg or {}).get("types") or []),
+                "branches_ignore": list((cfg or {}).get("branches-ignore") or []),
+                "tags_ignore": list((cfg or {}).get("tags-ignore") or []),
             }
             for event, cfg in on.items()
             if isinstance(cfg, dict) or cfg is None
@@ -295,7 +297,16 @@ def impacted_tests(changed: list[str], repo_root: Path) -> tuple[list[str], bool
 
 def _filter_count(cfg: dict) -> int:
     """How restricted a trigger is. Fewer filters means it fires more often."""
-    return sum(1 for key in ("paths", "paths_ignore", "branches", "tags", "types") if cfg.get(key))
+    keys = (
+        "paths",
+        "paths_ignore",
+        "branches",
+        "branches_ignore",
+        "tags",
+        "tags_ignore",
+        "types",
+    )
+    return sum(1 for key in keys if cfg.get(key))
 
 
 def build_profile(

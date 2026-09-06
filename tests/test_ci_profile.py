@@ -444,3 +444,24 @@ def test_a_job_name_reused_in_another_workflow_does_not_overwrite_the_first(tmp_
     assert "pull_request" in events, "the PR trigger must survive the collision"
     assert "workflow_dispatch" in events
     assert set(profile["jobs"]["test"]["triggers"]) == {"pull_request", "workflow_dispatch"}
+
+
+def test_the_collision_merge_gives_the_same_answer_in_either_file_order(tmp_path):
+    """#40's actual claim: requirability must not depend on filename sorting."""
+    import land
+
+    plain = "name: A\non: {pull_request: }\njobs:\n  test: {steps: [{run: x}]}\n"
+    filtered = ("name: B\non:\n  pull_request:\n    paths: ['src/**']\n"
+                "jobs:\n  test: {steps: [{run: y}]}\n")
+
+    answers = []
+    for first, second in (("a", "b"), ("b", "a")):
+        d = tmp_path / f"{first}{second}" / ".github" / "workflows"
+        d.mkdir(parents=True)
+        (d / f"{first}.yml").write_text(plain if first == "a" else filtered)
+        (d / f"{second}.yml").write_text(filtered if first == "a" else plain)
+        profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
+        answers.append(land.can_report_on_pr(profile["jobs"]["test"], "main"))
+
+    assert answers[0] == answers[1], "file order changed the gate's behaviour"
+    assert answers[0] is True, "one unconditional declaration means a check will appear"
