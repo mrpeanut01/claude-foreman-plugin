@@ -39,6 +39,32 @@ case collapses.
 A high-risk issue is never dropped — it gets a batch of its own. Solo is not
 exclusion.
 
+## Paths are intent until the diff says otherwise
+
+A batch's `paths` are the union of file paths its issues' prose happens to name.
+Prose invents files that do not exist and says nothing about files the fix had to
+touch. The protected-path merge gate reads `paths`, so gating on the prose alone
+guards intent rather than the change.
+
+Once the branch exists, recompute them from it:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" paths \
+  --batch b-001 --base main --repo-dir . --apply
+```
+
+| Key | Means |
+|-----|-------|
+| `paths` | What the branch really changes. The value that should replace the declared list |
+| `undeclared` | Changed but never mentioned — the protected file the gate would have missed |
+| `untouched` | Mentioned but never changed — usually a file the prose invented |
+
+`--apply` records the real paths as a `batch.meta` event, which is where
+`land.py` reads a batch's paths from.
+
+**Nothing calls this for you.** Run it after the branch is pushed and before
+asking whether the batch may merge, or the merge gate is still judging prose.
+
 ## The honest downside
 
 A batch is harder to attribute on failure and has a wider blast radius on merge.

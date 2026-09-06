@@ -9,6 +9,8 @@ why every issue gets its own commit and `split()` exists.
 CLI:
     batch.py plan --triage triage.json [--config .foreman/config.json]
     batch.py apply --plan batches.json [--ledger .foreman]
+    batch.py paths --batch b-001 --base main [--head HEAD] [--ledger .foreman]
+        [--repo-dir .] [--apply]
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,6 +29,10 @@ DEFAULT_MAX_WEIGHT = 6
 
 
 class CannotSplit(Exception):
+    pass
+
+
+class PathsUnavailable(Exception):
     pass
 
 
@@ -163,6 +170,56 @@ def split(batch: dict, failing_issue: int) -> tuple[dict, dict]:
     return failing, rest
 
 
+# --- what a batch actually changed --------------------------------------------
+# A batch's paths start as the union of the file paths its issues' prose happens
+# to name. That is a statement of intent, and prose is a poor source: it invents
+# files that do not exist and stays silent about files the fix had to touch. The
+# protected-path merge gate reads those paths, so guarding intent instead of the
+# change is a hole in it. These read the branch's real diff instead.
+
+
+def diff_paths(base: str, head: str = "HEAD", repo: Path | str | None = None) -> list[str]:
+    """The files a branch changes, from git.
+
+    Three dots, not two: `base...head` diffs head against the merge base, so
+    everything that landed on trunk after the branch started is excluded. With
+    two dots a busy trunk makes every batch look like it touched half the repo.
+    """
+    done = subprocess.run(
+        ["git", "diff", "--name-only", f"{base}...{head}"],
+        cwd=str(repo) if repo else None,
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode != 0:
+        # Never return [] here. An empty path list clears the protected-path
+        # gate, so a failed git call would read as "this batch is safe".
+        raise PathsUnavailable(
+            f"git diff {base}...{head} failed: {done.stderr.strip() or 'no output'}"
+        )
+    return sorted({line.strip() for line in done.stdout.splitlines() if line.strip()})
+
+
+def observed_paths(
+    batch: dict, base: str, head: str = "HEAD", repo: Path | str | None = None
+) -> dict:
+    """A batch's declared paths against the ones it really changed.
+
+    `paths` is the answer — the value that should replace the declared list. The
+    other two keys are the drift, and both are worth seeing: `undeclared` is the
+    protected file no issue mentioned, `untouched` is the file the prose invented.
+    """
+    declared = sorted(set(batch.get("paths") or []))
+    observed = diff_paths(base, head, repo)
+    return {
+        "batch": batch.get("id"),
+        "declared": declared,
+        "paths": observed,
+        "undeclared": [p for p in observed if p not in set(declared)],
+        "untouched": [p for p in declared if p not in set(observed)],
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -174,6 +231,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("apply")
     p.add_argument("--plan", required=True)
     p.add_argument("--ledger", default=".foreman")
+    p = sub.add_parser("paths", help="recompute a batch's paths from its real diff")
+    p.add_argument("--batch", required=True)
+    p.add_argument("--base", required=True, help="the branch the PR would merge into")
+    p.add_argument("--head", default="HEAD")
+    p.add_argument("--ledger", default=".foreman")
+    p.add_argument("--repo-dir", default=".", help="the working tree holding the branch")
+    p.add_argument("--apply", action="store_true", help="record the recomputed paths in the ledger")
 
     args = parser.parse_args(argv)
 
@@ -197,6 +261,26 @@ def main(argv: list[str] | None = None) -> int:
     import ledger as ledger_mod
 
     root = Path(args.ledger)
+
+    if args.cmd == "paths":
+        record = ledger_mod.load(root).batches.get(args.batch)
+        if record is None:
+            # The fold drops a batch.meta event for a batch it has never seen, so
+            # --apply would report success and change nothing.
+            print(f"no batch {args.batch!r} in {root}", file=sys.stderr)
+            return 1
+        try:
+            seen = observed_paths(record, args.base, args.head, args.repo_dir)
+        except PathsUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if args.apply:
+            # batch.meta is the fold's channel for correcting a batch record, so
+            # the recomputed paths become what land.merge_blockers reads.
+            ledger_mod.append(root, "batch.meta", batch=args.batch, paths=seen["paths"])
+        print(json.dumps(seen, indent=2))
+        return 0
+
     plan = json.loads(Path(args.plan).read_text())
     for item in plan.get("batches", []):
         ledger_mod.append(
