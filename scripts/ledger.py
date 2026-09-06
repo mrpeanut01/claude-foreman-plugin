@@ -33,7 +33,12 @@ EVENTS = "events.jsonl"
 
 TRANSITIONS: dict[str, set[str]] = {
     "planned": {"building", "escalated", "abandoned"},
-    "building": {"built", "escalated", "abandoned"},
+    # `building -> building` is the resume: a build interrupted by a crash or a
+    # context limit is picked up again by re-entering the state it never left,
+    # and the recipe in commands/build.md opens with exactly that transition.
+    # The self-loop makes resuming idempotent instead of an error to reason
+    # around; the fold treats it as no movement, so it cannot launder staleness.
+    "building": {"building", "built", "escalated", "abandoned"},
     "built": {"open", "escalated", "abandoned"},
     "open": {"blocked", "ready", "escalated", "abandoned"},
     "blocked": {"open", "escalated", "abandoned"},

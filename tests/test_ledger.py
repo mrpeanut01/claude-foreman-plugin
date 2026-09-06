@@ -317,3 +317,16 @@ def test_ci_failing_twice_without_a_push_between_is_not_a_futile_push(root):
     ledger.gate(root, "b-001", "ci", "failed")
     ledger.gate(root, "b-001", "ci", "failed")
     assert ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]["futile_pushes"] == 0
+
+
+# --- issue #62: an interrupted build has to be resumable ---------------------
+
+
+def test_re_entering_building_is_allowed_so_an_interrupted_build_can_resume(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.transition(root, "b-001", "building")
+    before = ledger.fold(ledger.read_events(root)).batches["b-001"]["progress_at"]
+    ledger.transition(root, "b-001", "building")
+    batch = ledger.fold(ledger.read_events(root)).batches["b-001"]
+    assert batch["state"] == "building"
+    assert batch["progress_at"] == before, "restarting is not progress"

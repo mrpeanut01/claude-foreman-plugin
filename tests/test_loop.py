@@ -467,3 +467,36 @@ def test_an_issue_a_live_batch_is_working_on_is_never_re_batched():
     st.batches["b-002"]["progress_at"] = _aged(48)
     st.issues = _triaged(5, _aged(1))
     assert loop.next_action(st, CONFIG)["do"] == "watch"
+
+
+# --- issue #62: a batch mid-build is in flight, not nowhere ------------------
+
+
+def test_a_batch_left_mid_build_is_resumed_before_a_new_one_is_started():
+    """A build interrupted by a crash or a closed laptop is exactly what the
+    durable ledger exists to recover."""
+    st = state_with({"id": "b-002", "state": "building"}, {"id": "b-003", "state": "planned"})
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "build" and action["batch"] == "b-002"
+
+
+def test_a_build_in_progress_counts_against_the_open_work_limit():
+    st = state_with({"id": "b-002", "state": "building"}, {"id": "b-003", "state": "planned"})
+    assert loop.in_flight_count(st) == 1
+
+
+def test_no_new_build_starts_while_every_slot_is_held_by_a_running_build():
+    st = state_with(
+        {"id": "b-001", "state": "building"},
+        {"id": "b-002", "state": "building"},
+        {"id": "b-003", "state": "planned"},
+    )
+    action = loop.next_action(st, CONFIG)
+    assert loop.in_flight_count(st) == 2
+    assert action["batch"] != "b-003", "the WIP limit is reached; drain before starting"
+
+
+def test_a_mid_build_batch_is_not_resumed_once_the_ci_budget_is_spent():
+    st = state_with({"id": "b-002", "state": "building"}, spend=[_spend(60 * 60)])
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "idle" and "budget" in action["reason"].lower()

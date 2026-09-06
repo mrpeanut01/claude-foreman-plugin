@@ -28,11 +28,15 @@ import ledger  # noqa: E402
 DEFAULT_TRIAGE_EVERY_S = 3600
 
 DORMANT = {"merged", "abandoned", "escalated"}
-IN_FLIGHT = {"built", "open", "blocked", "ready", "merging"}
+# `building` belongs here: it holds a worktree and a branch, and a session is
+# meant to be inside it. Leaving it out let the loop start work past the WIP
+# limit while a build was already running, and hid the interrupted build from
+# every branch of next_action at once.
+IN_FLIGHT = {"building", "built", "open", "blocked", "ready", "merging"}
 
 
 def in_flight_count(state: ledger.State) -> int:
-    """Batches holding a branch or a PR open. Each one costs CI on every trunk move."""
+    """Batches holding a worktree, a branch or a PR. Each costs CI on every trunk move."""
     return sum(1 for b in state.batches.values() if b.get("state") in IN_FLIGHT)
 
 
@@ -220,9 +224,21 @@ def next_action(state: ledger.State, config: dict) -> dict:
             "may_run_expensive_tier": ledger.may_run_expensive_tier(batch),
         }
 
+    # Nearest the merge first: a batch two steps from landing drains cheaper
+    # than one that has not compiled yet. `building` sits at the end of this
+    # group because it is the least finished of the three — but still ahead of
+    # `planned`, because resuming a worktree that already exists beats cutting
+    # a new one. Resuming is not free (the local gate re-runs and the batch is
+    # heading for a push), so it is budget-gated like its neighbours.
     for state_name, action, reason in (
         ("blocked", "unblock", "a gate came back red; fix and push again"),
         ("built", "open_pr", "committed locally; open the PR to start the gates"),
+        (
+            "building",
+            "build",
+            "a build was interrupted mid-flight; resume it in the existing worktree — "
+            "the batch is already in `building`, so re-entering it is a no-op",
+        ),
     ):
         for batch in live:
             if batch["state"] == state_name:

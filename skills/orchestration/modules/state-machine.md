@@ -13,7 +13,7 @@ planned ─▶ building ─▶ built ─▶ open ─▶ ready ─▶ merging ─
 | State | Meaning | Leaves when |
 |-------|---------|-------------|
 | `planned` | Grouped, not started | A worktree is created |
-| `building` | Implementing, TDD, local gate | Local gate is green |
+| `building` | Implementing, TDD, local gate | Local gate is green. Counts as work in flight, and re-entering it resumes an interrupted build |
 | `built` | Committed locally, not pushed | The PR opens |
 | `open` | PR up; CI and review running **concurrently** | A gate resolves |
 | `blocked` | A gate came back red | A new push resets the gates |
@@ -22,6 +22,26 @@ planned ─▶ building ─▶ built ─▶ open ─▶ ready ─▶ merging ─
 | `merged` | Terminal | — |
 | `escalated` | Set aside for a human | A human requeues or abandons it |
 | `abandoned` | Terminal | — |
+
+## In flight starts at `building`
+
+`building`, `built`, `open`, `blocked`, `ready` and `merging` all hold a
+worktree, a branch or a PR, so all six count against `max_open_prs` in
+`loop.in_flight_count`. `building` is easy to forget because it owns no PR yet,
+but it owns a worktree and a session, and leaving it out lets the loop start
+another batch while a build is already running.
+
+## Resuming an interrupted build
+
+A build ends when the laptop closes, the context runs out, or the process dies —
+and the batch is left in `building` with a worktree on disk. `loop.next_action`
+returns `build` for it, ahead of any `planned` batch: resuming a worktree that
+already exists beats cutting a new one, and abandoning work in place is the
+failure the durable ledger exists to prevent.
+
+`building -> building` is therefore legal. Re-entering the state is how a resume
+starts, so `commands/build.md` can open with the same transition either way. The
+fold records no movement for it, so a resume cannot reset the staleness clock.
 
 ## Gates are not states
 
