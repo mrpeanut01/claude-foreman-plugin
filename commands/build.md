@@ -31,14 +31,25 @@ batching rests on that split being cheap.
 ## The local gate
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ci_profile.py" impact \
-  --changed $(git diff --name-only main...HEAD)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gate.py" run
 ```
 
-`"complete": true` → run the listed tests. `"complete": false` → **run the full
-suite locally.** Then lint and typecheck. Push only when all of it is green.
+One command, and it is the whole gate: the tests covering the diff first, then
+every cheap-tier CI step, in CI's own words.
 
-Every failure caught here costs seconds. The same failure caught in CI costs a
+| Exit | Means | Do |
+|------|-------|----|
+| 0 | all of it ran and passed | push |
+| 1 | a check failed | it names the command and its output — fix that |
+| 2 | the gate could not finish | it names what it could not run — install that, or re-run with `--allow-unrunnable` and accept that CI runs the check first |
+
+Exit 2 is why this is a command rather than a list. A check that never ran looks
+exactly like a check that passed, so the gate refuses to call a missing tool
+green. The last time this section was a list of steps to remember, `ruff format
+--check` was the step forgotten, and CI paid for it.
+
+Do not substitute your own commands, and do not run "the parts that matter".
+Every failure caught here costs seconds; the same failure caught in CI costs a
 suite run and a round trip, and on a repo with a 40-minute suite that is the
 difference between four batches a day and one.
 
