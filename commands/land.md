@@ -75,6 +75,27 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> -
 `blockers` exits non-zero with a list when anything stands in the way. Fix or
 escalate; never merge past it.
 
+**6. Close the issues, once the merge has landed.**
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr view <n> --repo OWNER/NAME --json state
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" state --batch <id>    # its issue list
+"${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" issue close <issue> --repo OWNER/NAME \
+  --comment "Fixed by #<n> (batch <id>)."
+```
+
+`--auto` queues the merge behind the remaining checks, so the PR reads `MERGED`
+only later. Close nothing before it does.
+
+Nothing else closes them. The PR body cites issues as `Refs #n`, which GitHub
+does not treat as a closing keyword, and no script in the pipeline touches issue
+state. The cost is not an untidy tracker: `loop._grouped_issues` counts an issue
+as taken once it appears in any batch, whatever state that batch is in, so an
+issue left open after its batch merged is excluded from re-batching for good
+while still sitting in the queue. The loop then reports idle against a tracker
+full of work it believes is done. Observed twice while foreman ran on its own
+repo — both merged batches left every one of their issues open.
+
 ## On a red gate
 
 CI failed → classify flake vs bug (`modules/ci-watch.md`), then rerun, fix, or
