@@ -4,9 +4,20 @@
 
 | Size | Weight | Signals |
 |------|--------|---------|
-| `small` | 1 | typo, bump, rename, readme, changelog, whitespace, lint, spelling; or a body under 120 characters |
+| `small` | 1 | typo, bump, rename, readme, changelog, whitespace, lint, spelling; or a body under 120 characters; or exactly one file named, no checkboxes, and a body under 900 |
 | `medium` | 2 | Everything else |
-| `large` | 4 | redesign, rewrite, refactor, migrate, overhaul, architecture, epic; or 6+ checkboxes; or a body over 2000 characters |
+| `large` | 4 | redesign, rewrite, refactor, migrate, overhaul, architecture, epic; or 6+ checkboxes; or a body over 2000 characters; or three or more files named in a body over 600 |
+
+Title hints are words almost nobody writes in an issue title, so on their own
+they size nothing: every open issue on this repo came out `medium`, and constant
+size is constant weight — `max_batch_weight` stops measuring CI cost and just
+caps the issue count. The file-count and body-length signals are there because
+ordinary reports do carry them.
+
+Files are counted from prose only. A file named inside a fenced block is quoted
+evidence — a traceback names five files and none of them is being changed. Two
+named files stay `medium`: it could be a move, or a caller and its callee, and
+sizing rounds up for the same reason risk does.
 
 Weight feeds `max_batch_weight`. A batch of two mediums (4) and a small (5) fills
 the default budget of 5; a single large (4) leaves room for one small.

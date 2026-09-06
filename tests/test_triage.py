@@ -749,3 +749,72 @@ def test_a_pass_that_labelled_nothing_still_records_that_it_ran(tmp_path, monkey
     events = ledger_mod.read_events(tmp_path / ".foreman")
     assert events[-1]["type"] == "triage.completed"
     assert events[-1]["triaged"] == 0 and events[-1]["failed"] == 1
+
+
+# --- issue #60: sizing has to be graduated, not a coin that lands on medium ---
+
+ONE_FILE = (
+    "`PR_OPEN_TYPES` in scripts/land.py includes ready_for_review and edited, so a PR "
+    "that is only retitled counts as newly opened and the gate that was already cleared "
+    "is asked for a second time. One tuple, one line."
+)
+NO_FILE = (
+    "The push cap counts every push, including the ones that resolve a review comment, "
+    "so a batch that is being actively reviewed hits the cap and escalates while it is "
+    "still making progress. The cap should count pushes that did not move a gate."
+)
+MANY_FILES = (
+    "The landing procedure spreads one decision over three places. scripts/land.py "
+    "decides whether the gates are clear, scripts/loop.py decides whether the batch is "
+    "still in flight, and commands/land.md tells the operator a third thing again. "
+    "Each of the three has its own idea of what 'ready' means, so a batch can be ready "
+    "in one and blocked in another, and the operator is left holding the difference. "
+    "Landing one of them without the other two would leave the contradiction in place, "
+    "so all three move together, along with the tests that pin each of them. The gate "
+    "spec is the one that should win, because it is the one the operator is shown, but "
+    "whichever wins has to be written down in one place and read from there."
+)
+
+
+def test_a_short_report_naming_one_file_is_small():
+    """An issue that names exactly one file and says little about it is a
+    one-file change. Sizing had no signal for that below 120 characters, and
+    real reports are five times that."""
+    got = triage.classify_size(issue(title="Draft PRs reopen a cleared gate", body=ONE_FILE))
+    assert got == "small"
+
+
+def test_a_report_that_spans_several_files_is_large():
+    got = triage.classify_size(issue(title="Landing is decided in three places", body=MANY_FILES))
+    assert got == "large"
+
+
+def test_a_realistic_queue_does_not_all_come_out_the_same_size():
+    """The defect: every open issue on this repo scored medium, so WEIGHT
+    contributed 2 apiece and max_batch_weight degenerated into an issue count."""
+    sizes = {
+        triage.classify_size(issue(title=t, body=b))
+        for t, b in (
+            ("Draft PRs reopen a cleared gate", ONE_FILE),
+            ("The push cap counts pushes that made progress", NO_FILE),
+            ("Landing is decided in three places", MANY_FILES),
+        )
+    }
+    assert sizes == {"small", "medium", "large"}
+
+
+def test_a_quoted_traceback_is_evidence_not_surface():
+    """Paths are counted as places to change, so they come from prose only. A
+    traceback names five files without one of them changing."""
+    body = (
+        "The upload retry gives up on the first 503 instead of backing off, which is "
+        "what scripts/upload.py was changed to do last month. The trace is below and it "
+        "is the same one every time, on every size of file, from every client:\n"
+        "```\n"
+        'File "src/a.py", line 3\n'
+        'File "src/b.py", line 9\n'
+        'File "src/c.py", line 21\n'
+        "```\n"
+        "Retrying by hand straight afterwards works, so it is the backoff, not the link."
+    )
+    assert triage.classify_size(issue(title="Upload gives up too early", body=body)) != "large"

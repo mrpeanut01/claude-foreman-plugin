@@ -199,6 +199,10 @@ from globs import compile_glob as _glob_to_re  # noqa: E402
 # full stop is excluded already, since \.? must be followed by a word character.
 _PATH_RE = re.compile(r"\.?[\w][\w./-]*/[\w./-]+\.\w+")
 
+# Fenced blocks are quoted evidence, not prose. Sizing counts the files an
+# issue asks someone to change, and a pasted traceback is neither.
+_FENCE_RE = re.compile(r"^```.*?^```", re.M | re.S)
+
 
 def _paths_in(text: str) -> list[str]:
     """File paths mentioned in the text, in order, without repeats."""
@@ -235,6 +239,13 @@ def classify_size(issue: dict) -> str:
 
     Hints are read from the title only. A bug report that *mentions* the lint job
     in passing is not a lint-sized change, and bodies quote error output freely.
+
+    Hints alone are not enough to size a real queue, though: they are words
+    almost nobody writes in an issue title, so every one of this repo's own open
+    issues came out `medium`. Constant size is constant weight, and
+    `max_batch_weight` then stops measuring CI cost and just caps the issue
+    count. So two signals that ordinary reports do carry decide the rest —
+    how many files the issue names, and how much the reporter had to write.
     """
     title = issue.get("title") or ""
     body = issue.get("body") or ""
@@ -242,6 +253,19 @@ def classify_size(issue: dict) -> str:
     if _has(title, LARGE_HINTS) or checkboxes >= 6 or len(body) > 2000:
         return "large"
     if _has(title, SMALL_HINTS) or len(body) < 120:
+        return "small"
+
+    # Files named in prose are places someone has to change. Files inside a
+    # fenced block are evidence: a traceback names five of them and none of
+    # them is being edited.
+    named = _paths_in(f"{title}\n{_FENCE_RE.sub('', body)}")
+    if len(named) >= 3 and len(body) >= 600:
+        return "large"
+    # One file and a report short enough to be about one thing. Two files could
+    # be a move or a caller and its callee, so they stay medium — sizing rounds
+    # up, the same way risk does, because an under-sized issue is the one that
+    # overfills a batch.
+    if len(named) == 1 and checkboxes == 0 and len(body) < 900:
         return "small"
     return "medium"
 
