@@ -44,7 +44,11 @@ but unquantified, and the tool says so rather than inventing a number.
 
 ## Why a batch may be smaller than you expect
 
-| Reason | Fix |
+Every batch in the plan carries `started_because`: the first reason its first
+issue could not join the batch before it, or `null` for the first batch. Read
+that field rather than guessing.
+
+| `started_because` | Fix |
 |--------|-----|
 | `unknown paths: independence cannot be established` | The issues name no files. Add path hints to the issue, or accept solo batches. |
 | `both touch src/x.py` | Correct behaviour — conflicts inside a batch are self-inflicted. |

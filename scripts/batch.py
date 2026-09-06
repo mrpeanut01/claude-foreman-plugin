@@ -108,18 +108,34 @@ def group_issues(records: list[dict], config: dict, taken: set[str] | None = Non
     )
 
     packed: list[list[dict]] = []
+    # Why each batch had to start: the first reason its first issue could not
+    # join the batch before it. `can_group` always said why and this loop
+    # threw it away, so the strings the docs promise — `unknown paths`, `both
+    # touch src/x.py`, `exceeds the batching ceiling` — appeared in no output.
+    started_because: dict[int, str | None] = {}
     for record in queue:
         weight = WEIGHT.get(record.get("size"), 2)
+        refused: str | None = None
         for group in packed:
             if len(group) >= max_issues:
+                refused = (
+                    refused or f"{group[0]['issue']}'s batch holds max_batch_issues ({max_issues})"
+                )
                 continue
             if sum(WEIGHT.get(g.get("size"), 2) for g in group) + weight > max_weight:
+                refused = refused or (
+                    f"joining #{group[0]['issue']}'s batch would exceed max_batch_weight "
+                    f"({max_weight})"
+                )
                 continue
-            if all(can_group(existing, record, config)[0] for existing in group):
+            verdicts = [can_group(existing, record, config) for existing in group]
+            if all(ok for ok, _ in verdicts):
                 group.append(record)
                 break
+            refused = refused or next(why for ok, why in verdicts if not ok)
         else:
             packed.append([record])  # incompatible with every open batch, so it starts one
+            started_because[record["issue"]] = refused
 
     # Ids must continue past everything the ledger already holds. Numbering from
     # 1 each run reuses the id of an earlier batch, and the fold keys batches by
@@ -150,6 +166,8 @@ def group_issues(records: list[dict], config: dict, taken: set[str] | None = Non
                 "risk": max((r.get("risk", "medium") for r in group), key=_rank),
                 "weight": sum(WEIGHT.get(r.get("size"), 2) for r in group),
                 "titles": {r["issue"]: r.get("title") for r in group},
+                # None for the first batch: there was nothing to join yet.
+                "started_because": started_because.get(group[0]["issue"]),
             }
         )
     return batches

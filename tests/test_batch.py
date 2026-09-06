@@ -618,3 +618,31 @@ def test_a_ledger_holding_no_ungrouped_issue_plans_nothing(tmp_path, capsys, mon
     ledger.append(root, "batch.created", batch="b-001", issues=[11])
     batch.main(["plan", "--ledger", str(root)])
     assert json.loads(capsys.readouterr().out)["batches"] == []
+
+
+# --- why a batch had to start is reported, not discarded ---------------------
+
+
+def test_each_batch_says_why_its_first_issue_could_not_join_the_one_before():
+    """can_group always said why; group_issues threw it away, so the strings
+    batch.md tells the operator to read appeared in no output."""
+    groups = batch.group_issues(
+        [
+            rec(1, paths=["a.py"]),
+            rec(2, paths=["a.py"]),
+            rec(3, risk="high", paths=["c.py"]),
+            rec(4, paths=[]),
+        ],
+        CONFIG,
+    )
+    why = {g["issues"][0]: g["started_because"] for g in groups}
+    assert why[1] is None
+    assert "both touch a.py" in why[2]
+    assert "exceeds the batching ceiling" in why[3]
+    assert "unknown paths" in why[4]
+
+
+def test_a_full_batch_is_named_as_the_reason_too():
+    records = [rec(n, paths=[f"f{n}.py"]) for n in range(1, 5)]
+    groups = batch.group_issues(records, CONFIG)  # max_batch_issues is 3
+    assert "max_batch_issues" in groups[1]["started_because"]
