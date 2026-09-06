@@ -81,6 +81,7 @@ class State:
     reviews: list[dict] = field(default_factory=list)
     reverts: list[dict] = field(default_factory=list)
     ci_spend: list[dict] = field(default_factory=list)
+    last_triage_at: str | None = None
     skipped_lines: int = 0
 
 
@@ -155,7 +156,10 @@ def fold(events: list[dict]) -> State:
         bid = event.get("batch")
         batch = state.batches.get(bid) if bid else None
 
-        if kind == "issue.triaged":
+        if kind == "triage.completed":
+            state.last_triage_at = event.get("ts")
+
+        elif kind == "issue.triaged":
             state.issues[event["issue"]] = {k: v for k, v in event.items() if k != "type"}
 
         elif kind == "batch.created":

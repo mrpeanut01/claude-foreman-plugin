@@ -477,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
         if not ok:
             failed.append(record["issue"])
         ledger_mod.append(root, "issue.triaged", **record)
+    ledger_mod.append(root, "triage.completed", triaged=len(plan.get("triaged", [])))
     print(json.dumps({"applied": len(plan.get("triaged", [])) - len(failed), "failed": failed}))
     return 1 if failed else 0
 

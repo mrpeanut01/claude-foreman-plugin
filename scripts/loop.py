@@ -23,6 +23,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import land  # noqa: E402
 import ledger  # noqa: E402
 
+# How long the loop will go without looking for new issues. Triage costs no CI,
+# so this only needs to be short enough that overnight work is not missed.
+DEFAULT_TRIAGE_EVERY_S = 3600
+
 DORMANT = {"merged", "abandoned", "escalated"}
 IN_FLIGHT = {"built", "open", "blocked", "ready", "merging"}
 
@@ -47,9 +51,8 @@ def budget_remaining(state: ledger.State, config: dict) -> float | None:
     return minutes * 60 - spent_today(state)
 
 
-def age_seconds(batch: dict, now: datetime | None = None) -> float | None:
-    """Seconds since this batch last actually moved, or None if unknown."""
-    stamp = batch.get("progress_at") or batch.get("updated")
+def seconds_since(stamp: str | None, now: datetime | None = None) -> float | None:
+    """Seconds since an ISO timestamp, or None when it is missing or unreadable."""
     if not stamp:
         return None
     try:
@@ -59,6 +62,25 @@ def age_seconds(batch: dict, now: datetime | None = None) -> float | None:
     if seen.tzinfo is None:
         seen = seen.replace(tzinfo=UTC)
     return ((now or datetime.now(UTC)) - seen).total_seconds()
+
+
+def age_seconds(batch: dict, now: datetime | None = None) -> float | None:
+    """Seconds since this batch last actually moved, or None if unknown."""
+    return seconds_since(batch.get("progress_at") or batch.get("updated"), now)
+
+
+def triage_due(state: ledger.State, limits: dict) -> bool:
+    """Whether it is worth looking for issues the ledger has not seen yet.
+
+    Triage is the loop's only source of new work, so it cannot be reachable
+    from an empty ledger alone: after the first batch exists that condition is
+    false forever and the loop idles while issues pile up on the tracker.
+    """
+    every = limits.get("triage_every_s", DEFAULT_TRIAGE_EVERY_S)
+    if not every:
+        return False
+    since = seconds_since(state.last_triage_at)
+    return since is None or since > every
 
 
 def review_rounds(state: ledger.State, batch_id: str) -> list[list[dict]]:
@@ -186,6 +208,9 @@ def next_action(state: ledger.State, config: dict) -> dict:
             "issues": ungrouped,
             "reason": f"{len(ungrouped)} actionable issue(s) not yet in a batch",
         }
+
+    if triage_due(state, limits):
+        return {"do": "triage", "reason": "no triage within the refresh window; look for new issues"}
 
     if budget_blocked:
         return {
