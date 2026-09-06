@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ci_profile import attribute  # noqa: E402
 from globs import compile_glob, matches_any  # noqa: E402
+from ledger import PROGRESS_COUNTERS  # noqa: E402
 
 PASSED = {"SUCCESS", "PASS", "NEUTRAL", "SKIPPED"}
 # A cancelled check is not a pass. Leaving it in neither set parks it in
@@ -636,6 +637,19 @@ def merge_blockers(batch: dict, pr: dict, config: dict) -> list[str]:
     caps = config.get("caps") or {}
     attempts = batch.get("attempts") or {}
     for counter, cap in caps.items():
+        # `caps` holds two kinds of number. The runaway ceilings count events
+        # elapsed and are a standing verdict on the batch. The progress counters
+        # measure whether it is converging, and each already has its own rule
+        # (`futile_push_run`, `stalled_build`) that decides when to escalate and
+        # when the question has stopped applying — which is why `cap_breached`
+        # skips them too. Reading them here asks a converging question at the
+        # one moment convergence has been settled: a batch that reached
+        # `full_green` and a clean review converged, whatever it cost to get
+        # there. Nothing resets `build_resumes` (the record of the interruptions
+        # is meant to stand), so counting it here blocked such a batch for the
+        # rest of its life, and requeueing could not clear it either.
+        if counter in PROGRESS_COUNTERS:
+            continue
         if attempts.get(counter, 0) >= cap:
             blockers.append(f"{counter} at cap ({attempts[counter]}/{cap})")
 
