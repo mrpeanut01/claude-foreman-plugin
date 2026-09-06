@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import ledger
@@ -146,7 +147,11 @@ def main(argv: list[str] | None = None) -> int:
     # resolve the config against the caller, so the digest rendered with
     # `caps={}`: every counter shown without its ceiling, NEEDS YOU empty
     # however far past its cap a batch was, and not a word about why.
-    config = ledger.load_config(args.config)
+    try:
+        config = ledger.load_config(args.config)
+    except ledger.LedgerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     state = ledger.load(root)
     if args.json:

@@ -1116,7 +1116,11 @@ def main(argv: list[str] | None = None) -> int:
     # Not `load_json`: a relative config has to be anchored to the repository the
     # way the ledger already is, and a missing one has to say so rather than
     # quietly dropping every cap and every protected path.
-    config = ledger_mod.load_config(args.config)
+    try:
+        config = ledger_mod.load_config(args.config)
+    except ledger_mod.LedgerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     blockers = merge_blockers(batch, pr, config)
     print(
         json.dumps(

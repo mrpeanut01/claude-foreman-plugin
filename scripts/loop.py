@@ -414,8 +414,13 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     # Anchored, and loud when it is not there: an unfound config leaves this
-    # function with no caps, no budget and no staleness window at all.
-    config = ledger.load_config(args.config)
+    # function with no caps, no budget and no staleness window at all. One
+    # that is there and will not parse stops the loop outright.
+    try:
+        config = ledger.load_config(args.config)
+    except ledger.LedgerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     state = ledger.load(Path(args.ledger))
     action = next_action(state, config)
     remaining = budget_remaining(state, config)

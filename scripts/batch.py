@@ -427,7 +427,11 @@ def main(argv: list[str] | None = None) -> int:
         # against the caller, a plan cut from a build worktree saw no config —
         # no limits, no risk ceiling — and no profile, so it could not say what
         # its batching saved.
-        config = ledger_mod.load_config(args.config)
+        try:
+            config = ledger_mod.load_config(args.config)
+        except ledger_mod.LedgerError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         profile = ledger_mod.load_profile(args.profile)
 
         ledger_root = Path(args.ledger)

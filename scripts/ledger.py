@@ -111,6 +111,12 @@ class UnknownBatch(LedgerError):
     pass
 
 
+class ConfigError(LedgerError):
+    """The config is there and cannot be used. Never silently `{}`: a config
+    that fails to parse is the loop with its brakes removed, and every CLI
+    turns this into one line on stderr and exit 1 rather than a traceback."""
+
+
 @dataclass
 class State:
     issues: dict[int, dict] = field(default_factory=dict)
@@ -270,7 +276,19 @@ def load_config(path: Path | str | None = None) -> dict:
             file=sys.stderr,
         )
         return {}
-    return json.loads(resolved.read_text(encoding="utf-8"))
+    try:
+        loaded = json.loads(resolved.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            f"config at {resolved} is not valid JSON ({exc.msg} at line {exc.lineno}, "
+            f"column {exc.colno}); nothing runs until it parses, because running "
+            "without it means running without caps"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise ConfigError(
+            f"config at {resolved} must be a JSON object, not {type(loaded).__name__}"
+        )
+    return loaded
 
 
 # --- storage ------------------------------------------------------------------

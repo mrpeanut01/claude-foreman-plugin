@@ -726,3 +726,53 @@ def test_a_triage_pass_with_one_unreadable_sighting_leaves_nothing_half_applied(
     assert state.skipped_lines == 1
     assert state.last_triage_at is None
     assert state.open_seen_at == {}
+
+
+# --- a config that is there and will not parse stops everything, in one line --
+
+
+def test_a_malformed_config_is_a_named_error_not_a_traceback(tmp_path):
+    bad = tmp_path / "config.json"
+    bad.write_text('{"caps": {\n')
+    with pytest.raises(ledger.ConfigError) as caught:
+        ledger.load_config(bad)
+    message = str(caught.value)
+    assert str(bad) in message and "line 2" in message and "caps" in message
+
+
+def test_a_config_that_is_not_an_object_is_refused(tmp_path):
+    bad = tmp_path / "config.json"
+    bad.write_text("[1, 2, 3]")
+    with pytest.raises(ledger.ConfigError):
+        ledger.load_config(bad)
+
+
+def _cli(name):
+    import importlib
+
+    return importlib.import_module(name)
+
+
+@pytest.mark.parametrize(
+    "module,argv",
+    [
+        ("loop", ["next", "--ledger", "{root}", "--config", "{bad}"]),
+        ("status", ["--ledger", "{root}", "--config", "{bad}"]),
+        ("land", ["blockers", "--batch", "b-001", "--ledger", "{root}", "--config", "{bad}"]),
+        ("batch", ["plan", "--ledger", "{root}", "--config", "{bad}"]),
+        ("triage", ["plan", "--repo", "o/r", "--ledger", "{root}", "--config", "{bad}"]),
+    ],
+)
+def test_every_cli_that_reads_the_config_exits_one_with_the_reason(
+    module, argv, root, tmp_path, capsys, monkeypatch
+):
+    """Every one of these let json.JSONDecodeError escape as a traceback, and
+    an unattended loop that dies with a traceback is a loop nobody reads."""
+    monkeypatch.chdir(tmp_path)
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"caps": {')
+    filled = [a.format(root=root, bad=bad) for a in argv]
+    assert _cli(module).main(filled) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error:") and "not valid JSON" in err

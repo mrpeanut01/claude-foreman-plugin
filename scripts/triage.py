@@ -618,7 +618,11 @@ def main(argv: list[str] | None = None) -> int:
         # Anchored to the repository, and loud when there is nothing to read:
         # an empty config means no protected paths, which silently scores every
         # auth and workflow change as medium and lets it into a batch.
-        config = ledger_mod.load_config(args.config)
+        try:
+            config = ledger_mod.load_config(args.config)
+        except ledger_mod.LedgerError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
         # No `.exists()` guard in front of this. `ledger.load` anchors a relative
         # path to the repository and reads a missing file as no events, so the
