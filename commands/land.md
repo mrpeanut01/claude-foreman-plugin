@@ -45,9 +45,22 @@ Act on `gate`, never on the raw check list. Wait only on `actionable_pending`;
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" verdict --file /tmp/verdict.json
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" append --type review.verdict \
+  --json '{"batch":"<id>","verdict":"clean","round":<r>,"findings":[...]}'
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" gate <batch> review clean
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" gate <batch> ci full_green
 ```
+
+`verdict` validates and prints; it appends nothing. The middle line is what puts
+the round on the record, and it goes in **every** round — clean or
+`changes_requested` — with `findings` copied verbatim from the verdict file and
+`round` the number `findings.py plan` gets. A gate value is one word about the
+current commit; these two rules read the findings across rounds instead:
+
+| Reads `review.verdict` | Inert while the ledger holds none |
+|------------------------|-----------------------------------|
+| `land.review_stalled` | A reviewer and builder trading one objection run to the ceiling of 5 instead of escalating the round it repeats |
+| `/foreman:status` REVIEW QUALITY | Clean reviews later reverted reads `0/0` forever — the only measure of whether the gate rubber-stamps |
 
 A verdict that fails validation is **not** a clean review. Send it back to the
 reviewer with the errors; do not record it and do not argue with the validator.
