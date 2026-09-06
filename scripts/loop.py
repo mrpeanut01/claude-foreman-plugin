@@ -99,16 +99,31 @@ def review_rounds(state: ledger.State, batch_id: str) -> list[list[dict]]:
 
 
 def _seen_open_since(state: ledger.State, issue: int, batch: dict) -> bool:
-    """Whether triage has seen this issue since its batch stopped moving.
+    """Whether triage has seen this issue open since its batch stopped moving.
 
-    `triage.py` asks GitHub for open issues only, so a triage record written
-    after the batch landed is direct evidence that the landing did not close
-    the issue. An older record says nothing either way, and silence is not
-    evidence: without it the issue stays with the batch.
+    `triage.py` asks GitHub for open issues only, so any triage sighting after
+    the batch landed is direct evidence that the landing did not close the
+    issue. An older sighting says nothing either way, and silence is not
+    evidence: without one the issue stays with the batch.
+
+    The sighting is what counts, not a fresh verdict. Reading only the
+    `issue.triaged` record's own `ts` made this rule unreachable in the ordering
+    it was written for: `triage.should_skip` refuses to re-triage an issue whose
+    `updatedAt` has not changed, and a PR that merges without a closing keyword
+    changes nothing about the issue. So the last record stayed older than the
+    merge forever and the issue was never handed back (issue #58).
+    `state.open_seen_at` carries the skipped sightings the records cannot.
     """
-    seen = when((state.issues.get(issue) or {}).get("ts"))
+    stamps = [
+        s
+        for s in (
+            when((state.issues.get(issue) or {}).get("ts")),
+            when(state.open_seen_at.get(issue)),
+        )
+        if s is not None
+    ]
     landed = when(batch.get("progress_at") or batch.get("updated"))
-    return seen is not None and landed is not None and seen > landed
+    return bool(stamps) and landed is not None and max(stamps) > landed
 
 
 def _grouped_issues(state: ledger.State) -> set[int]:
@@ -165,6 +180,14 @@ def next_action(state: ledger.State, config: dict) -> dict:
         stuck = ledger.futile_push_run(batch, caps)
         if stuck:
             return {"do": "escalate", "batch": batch["id"], "reason": stuck}
+
+    # A build that keeps being picked up is the same shape of problem, and the
+    # only one of the three the clock cannot catch: `building -> building`
+    # records no progress, so `stale_after_s` reads the same age forever.
+    for batch in live:
+        stalled = ledger.stalled_build(batch, caps)
+        if stalled:
+            return {"do": "escalate", "batch": batch["id"], "reason": stalled}
 
     # Review deadlock is about repeating findings, not rounds elapsed.
     for batch in live:

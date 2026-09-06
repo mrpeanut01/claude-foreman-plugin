@@ -65,13 +65,20 @@ COUNTER_ORDER = ("pushes", "review_rounds", "reruns")
 
 # Counters that measure whether a batch is converging rather than how much has
 # happened to it. `cap_breached` deliberately ignores these: a runaway ceiling
-# and a wrong diagnosis are different verdicts read off different numbers.
-PROGRESS_COUNTERS = ("futile_pushes",)
+# and a wrong diagnosis are different verdicts read off different numbers. Each
+# has its own rule below, and each of those rules carries a default ceiling —
+# unlike `caps`, which is opt-in, these hold on a repo with no config at all.
+PROGRESS_COUNTERS = ("futile_pushes", "build_resumes")
 
 # Three pushes into the same red CI is where "the next attempt will get it"
 # stops being defensible. Loose enough that fixing one failing test and
 # uncovering a different one is not mistaken for a failed diagnosis.
 DEFAULT_FUTILE_PUSH_CEILING = 3
+
+# A build that has been picked up three times and still has not reached `built`
+# is not having bad luck. Same shape of number as the push ceiling, and loose
+# enough to absorb a closed laptop, a context limit, and one crash.
+DEFAULT_BUILD_RESUME_CEILING = 3
 
 
 class LedgerError(Exception):
@@ -100,6 +107,10 @@ class State:
     reverts: list[dict] = field(default_factory=list)
     ci_spend: list[dict] = field(default_factory=list)
     last_triage_at: str | None = None
+    # When triage last found each issue on the tracker's *open* list. Separate
+    # from `issues` because the most useful sighting is usually of an issue
+    # triage deliberately did not re-record — see `triage.should_skip`.
+    open_seen_at: dict[int, str] = field(default_factory=dict)
     skipped_lines: int = 0
 
 
@@ -312,9 +323,15 @@ def fold(events: list[dict]) -> State:
 
         if kind == "triage.completed":
             state.last_triage_at = event.get("ts")
+            # Every issue the pass looked at, including the ones it skipped.
+            # `triage.fetch_issues` asks GitHub for open issues only, so this is
+            # a sighting: proof the issue was still open at this timestamp.
+            for number in event.get("open_issues") or []:
+                state.open_seen_at[number] = event.get("ts")
 
         elif kind == "issue.triaged":
             state.issues[event["issue"]] = {k: v for k, v in event.items() if k != "type"}
+            state.open_seen_at[event["issue"]] = event.get("ts")
 
         elif kind == "batch.created":
             # Ids are meant to be unique. A repeat means an upstream numbering
@@ -324,6 +341,13 @@ def fold(events: list[dict]) -> State:
                 state.batches[bid] = _new_batch(event)
 
         elif kind == "batch.state" and batch:
+            # The resume: `building -> building`. It is deliberately not
+            # progress, so nothing else in the fold moves for it — which is
+            # exactly why it needs counting. Without a number here a batch can
+            # be picked up forever and no rule anywhere can see it happening.
+            if batch["state"] == "building" and event["to"] == "building":
+                attempts = batch["attempts"]
+                attempts["build_resumes"] = attempts.get("build_resumes", 0) + 1
             if batch["state"] != event["to"]:
                 batch["progress_at"] = event.get("ts")
             batch["state"] = event["to"]
@@ -421,6 +445,36 @@ def futile_push_run(batch: dict, caps: dict[str, int]) -> str | None:
         return (
             f"{run} consecutive pushes left CI failing the same way; "
             "the diagnosis is wrong, and another push will not find it"
+        )
+    return None
+
+
+def stalled_build(batch: dict, caps: dict[str, int]) -> str | None:
+    """Reason to stop resuming this build, or None while resuming is still worth it.
+
+    Resuming an interrupted build is the right behaviour — a worktree that
+    already exists beats cutting a new one, and abandoning work in place is the
+    failure the durable ledger exists to prevent. But `building` is the one live
+    state whose action does not move the batch: `next_action` answers `build`,
+    the recipe re-enters `building`, and the fold records no progress for the
+    self-loop by design. So none of the other governors can reach it — no
+    counter in `COUNTER_ORDER` moves, `futile_push_run` needs a push, and the
+    staleness window is read against `progress_at`, which stands still. The
+    resume count is the only quantity that actually grows, so it is the one
+    that has to be bounded (issue #62).
+
+    Read only while the batch is still in `building`: a build that was picked
+    up four times and then reached `built` converged, and its old resumes are
+    history rather than a verdict.
+    """
+    if batch.get("state") != "building":
+        return None
+    ceiling = caps.get("build_resumes", DEFAULT_BUILD_RESUME_CEILING)
+    resumes = (batch.get("attempts") or {}).get("build_resumes", 0)
+    if ceiling and resumes >= ceiling:
+        return (
+            f"the build has been resumed {resumes} times without ever reaching `built`; "
+            "something in it needs a person, not another session"
         )
     return None
 

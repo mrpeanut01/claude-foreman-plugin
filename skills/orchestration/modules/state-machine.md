@@ -43,6 +43,12 @@ failure the durable ledger exists to prevent.
 starts, so `commands/build.md` can open with the same transition either way. The
 fold records no movement for it, so a resume cannot reset the staleness clock.
 
+That last property is also why resuming has to be counted. With `progress_at`
+standing still and no push to score, a batch parked in `building` is invisible to
+every other governor, and `build` would be the answer forever. Each re-entry
+increments `attempts.build_resumes`, and `ledger.stalled_build` escalates at
+three (`caps.build_resumes` to change it) — see `escalation.md`.
+
 ## Gates are not states
 
 CI and review run **at the same time** and are tracked as separate fields:

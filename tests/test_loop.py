@@ -473,6 +473,69 @@ def test_an_issue_a_live_batch_is_working_on_is_never_re_batched():
     assert loop.next_action(st, CONFIG)["do"] == "watch"
 
 
+def _merged_batch_events(issue, triaged_at, merged_at):
+    """#5 triaged, batched, and merged without a closing keyword."""
+    return [
+        {
+            "ts": triaged_at,
+            "type": "issue.triaged",
+            "issue": issue,
+            "verdict": "actionable",
+            "issue_updated_at": "2026-01-02T00:00:00Z",
+        },
+        {"ts": triaged_at, "type": "batch.created", "batch": "b-001", "issues": [issue]},
+        *(
+            {"ts": merged_at, "type": "batch.state", "batch": "b-001", "from": prev, "to": nxt}
+            for prev, nxt in (
+                ("planned", "building"),
+                ("building", "built"),
+                ("built", "open"),
+                ("open", "ready"),
+                ("ready", "merging"),
+                ("merging", "merged"),
+            )
+        ),
+    ]
+
+
+def _triage_pass(at, saw):
+    """A completed triage run and the open issues it listed."""
+    return {"ts": at, "type": "triage.completed", "triaged": 0, "open_issues": list(saw)}
+
+
+def test_a_merged_batch_releases_an_issue_a_later_triage_saw_open_without_re_triaging_it():
+    """The ordering the release rule was written for, played end to end.
+
+    #5 is triaged, a PR quotes it, the PR merges without a closing keyword, and
+    every triage after that *skips* it — `triage.should_skip` refuses to
+    re-triage an issue whose `updatedAt` has not moved, and merging without
+    closing does not move it. So no `issue.triaged` newer than the merge is ever
+    written, and the rule that hands the issue back had no producer at all.
+
+    The triage pass itself is the evidence: it asked GitHub for open issues and
+    #5 came back.
+    """
+    events = _merged_batch_events(5, triaged_at=_aged(72), merged_at=_aged(48))
+    events.append(_triage_pass(_aged(0.2), saw=[5]))
+    action = loop.next_action(ledger.fold(events), CONFIG)
+    assert action["do"] == "batch" and action["issues"] == [5]
+
+
+def test_a_triage_pass_that_did_not_see_the_issue_leaves_it_with_its_batch():
+    """The merge closed it, so it is not in the open list any more."""
+    events = _merged_batch_events(5, triaged_at=_aged(72), merged_at=_aged(48))
+    events.append(_triage_pass(_aged(0.2), saw=[9]))
+    assert loop.next_action(ledger.fold(events), CONFIG)["do"] == "idle"
+
+
+def test_a_triage_pass_from_before_the_merge_is_not_evidence():
+    """It saw the issue open, but that was before the PR that might have closed it."""
+    events = _merged_batch_events(5, triaged_at=_aged(72), merged_at=_aged(48))
+    events.insert(1, _triage_pass(_aged(70), saw=[5]))
+    events.append(_triage_pass(_aged(0.2), saw=[]))
+    assert loop.next_action(ledger.fold(events), CONFIG)["do"] == "idle"
+
+
 # --- issue #62: a batch mid-build is in flight, not nowhere ------------------
 
 
@@ -504,6 +567,57 @@ def test_a_mid_build_batch_is_not_resumed_once_the_ci_budget_is_spent():
     st = state_with({"id": "b-002", "state": "building"}, spend=[_spend(60 * 60)])
     action = loop.next_action(st, CONFIG)
     assert action["do"] == "idle" and "budget" in action["reason"].lower()
+
+
+# --- a resumable build must still be a bounded one ---------------------------
+
+
+def _building_batch(root, resumes):
+    """A batch parked in `building`, picked up again `resumes` times."""
+    ledger.append(root, "batch.created", batch="b-9", issues=[1])
+    for _ in range(resumes + 1):
+        ledger.transition(root, "b-9", "building")
+
+
+def test_a_build_resumed_past_the_ceiling_reaches_a_human(tmp_path):
+    """Eleven resumes spread over months: no counter moved, `progress_at` never
+    moved either, and `next_action` answered `build` forever."""
+    root = ledger.init(tmp_path)
+    _building_batch(root, resumes=10)
+    st = ledger.load(root)
+    st.last_triage_at = _JUST_NOW
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "escalate" and action["batch"] == "b-9"
+    assert "resum" in action["reason"].lower()
+
+
+def test_a_build_inside_the_ceiling_is_still_resumed(tmp_path):
+    """Recovering an interrupted build is the point; only doing it forever is not."""
+    root = ledger.init(tmp_path)
+    _building_batch(root, resumes=1)
+    st = ledger.load(root)
+    st.last_triage_at = _JUST_NOW
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "build" and action["batch"] == "b-9"
+
+
+def test_a_batch_that_finished_building_is_not_escalated_for_its_old_resumes(tmp_path):
+    root = ledger.init(tmp_path)
+    _building_batch(root, resumes=10)
+    ledger.transition(root, "b-9", "built")
+    st = ledger.load(root)
+    st.last_triage_at = _JUST_NOW
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "open_pr" and action["batch"] == "b-9"
+
+
+def test_the_resume_ceiling_can_be_set_in_the_config(tmp_path):
+    root = ledger.init(tmp_path)
+    _building_batch(root, resumes=1)
+    st = ledger.load(root)
+    st.last_triage_at = _JUST_NOW
+    cfg = {**CONFIG, "caps": {**CONFIG["caps"], "build_resumes": 1}}
+    assert loop.next_action(st, cfg)["do"] == "escalate"
 
 
 # --- issue #70: the caps must not vanish when the loop runs from a worktree ---

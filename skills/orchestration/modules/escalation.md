@@ -10,6 +10,7 @@ from one that stalls on its first surprise.
 |---------|---------------|
 | `cap_breached` returns a counter | A runaway ceiling was reached. These are loose (`pushes: 8`, `review_rounds: 5`) because they count events elapsed, not progress. |
 | `futile_push_run` returns a reason | Three pushes in a row left CI red the same way. This, not `caps.pushes`, is the push rule that reads progress — see below. |
+| `stalled_build` returns a reason | Three resumes and the batch still has not reached `built`. Nothing else can see this one — see below. |
 | Same test fails identically twice | A second identical failure is evidence, not noise. |
 | Diff touches `protected_paths` | Auth, migrations, payments, and CI config are never auto-merged, however green. |
 | The same finding survives a review round | Builder and reviewer are trading one objection. Rounds elapsed is not the test — see `review-gate.md`. |
@@ -28,6 +29,22 @@ failing *before* the push counts. Any green ends the run.
 
 The review gate is not scored this way — different findings each round are
 convergence, and `review-gate.md` judges those on the findings themselves.
+
+## Builds: the one the clock cannot catch
+
+`building` is the only live state whose action does not move the batch.
+`next_action` answers `build`, the recipe re-enters `building`, and the fold
+records `building -> building` as no progress on purpose — so the staleness
+window reads the same age forever, no counter in `caps` moves, and there is no
+push for `futile_push_run` to score. Resuming is right; resuming without a bound
+is a work loop that never reaches anybody.
+
+`attempts.build_resumes` counts the re-entries, and `stalled_build` escalates at
+three. It reads only while the batch is still in `building`: a build picked up
+four times that then reached `built` converged, and its old resumes are history.
+
+Like `futile_pushes`, the ceiling has a **default** — a repo with no
+`.foreman/config.json` is still bounded. `caps.build_resumes` overrides it.
 
 ## Never escalate
 

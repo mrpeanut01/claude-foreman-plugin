@@ -193,6 +193,7 @@ def test_counters_track_pushes_reviews_and_reruns(root):
         "review_rounds": 1,
         "reruns": 1,
         "futile_pushes": 0,
+        "build_resumes": 0,
     }
 
 
@@ -265,6 +266,36 @@ def test_recreating_an_existing_batch_id_does_not_erase_it():
     assert state.batches["b-001"]["issues"] == [1, 2]
 
 
+# --- issue #58: which issues a triage pass found open ------------------------
+
+
+def test_a_completed_triage_records_when_each_open_issue_was_last_seen(root):
+    ledger.append(root, "triage.completed", triaged=1, open_issues=[5, 9])
+    state = ledger.fold(ledger.read_events(root))
+    assert set(state.open_seen_at) == {5, 9}
+    assert state.open_seen_at[5] == state.last_triage_at
+
+
+def test_a_triaged_issue_is_itself_a_sighting(root):
+    """`fetch_issues` asks for open issues only, so a record is a sighting too."""
+    ledger.append(root, "issue.triaged", issue=5, verdict="actionable")
+    state = ledger.fold(ledger.read_events(root))
+    assert state.open_seen_at[5] == state.issues[5]["ts"]
+
+
+def test_a_later_pass_that_did_not_list_an_issue_leaves_its_last_sighting_alone(root):
+    ledger.append(root, "triage.completed", triaged=0, open_issues=[5])
+    first = ledger.fold(ledger.read_events(root)).open_seen_at[5]
+    ledger.append(root, "triage.completed", triaged=0, open_issues=[])
+    assert ledger.fold(ledger.read_events(root)).open_seen_at[5] == first
+
+
+def test_an_older_ledger_with_no_open_issues_field_still_folds(root):
+    ledger.append(root, "triage.completed", triaged=0, failed=0)
+    state = ledger.fold(ledger.read_events(root))
+    assert state.open_seen_at == {} and state.last_triage_at
+
+
 # --- issue #17: the push cap must measure diagnosis, not volume ---------------
 
 
@@ -332,6 +363,47 @@ def test_re_entering_building_is_allowed_so_an_interrupted_build_can_resume(root
     batch = ledger.fold(ledger.read_events(root)).batches["b-001"]
     assert batch["state"] == "building"
     assert batch["progress_at"] == before, "restarting is not progress"
+
+
+def test_each_resume_of_an_interrupted_build_is_counted(root):
+    """`building -> building` records no progress, so a counter is the only
+    thing that can tell one resume from eleven."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    for _ in range(4):
+        ledger.transition(root, "b-001", "building")
+    attempts = ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]
+    assert attempts["build_resumes"] == 3, "the first entry is the build, not a resume"
+
+
+def test_starting_a_build_is_not_a_resume(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.transition(root, "b-001", "building")
+    assert ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]["build_resumes"] == 0
+
+
+def test_a_build_picked_up_past_the_ceiling_is_reported_as_stalled():
+    batch = {"state": "building", "attempts": {"build_resumes": 3}}
+    reason = ledger.stalled_build(batch, {})
+    assert reason and "3" in reason
+
+
+def test_a_build_below_the_ceiling_is_still_the_loops_own_problem():
+    assert ledger.stalled_build({"state": "building", "attempts": {"build_resumes": 2}}, {}) is None
+
+
+def test_a_batch_that_got_out_of_building_is_not_stalled_by_its_old_resumes():
+    """The resumes happened, but the build finished; the count is history now."""
+    batch = {"state": "open", "attempts": {"build_resumes": 9}}
+    assert ledger.stalled_build(batch, {}) is None
+
+
+def test_the_resume_ceiling_can_be_tightened_from_the_config():
+    batch = {"state": "building", "attempts": {"build_resumes": 1}}
+    assert ledger.stalled_build(batch, {"build_resumes": 1})
+
+
+def test_a_batch_with_no_resume_counter_at_all_is_not_stalled():
+    assert ledger.stalled_build({"state": "building"}, {}) is None
 
 
 # --- issue #64: a ledger path must not follow the caller around --------------

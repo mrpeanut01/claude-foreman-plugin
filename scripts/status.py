@@ -110,15 +110,23 @@ def main(argv: list[str] | None = None) -> int:
     # /foreman:status command and every command line written before this fix
     # pass, and breaking those to tidy a flag name is not a trade worth making.
     parser.add_argument("--ledger", "--root", default=f"./{ledger.LEDGER_DIR}")
-    parser.add_argument("--config", default=None)
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=f"foreman config (default {ledger.LEDGER_DIR}/{ledger.CONFIG_FILE} "
+        "in the repository root)",
+    )
     parser.add_argument("--json", action="store_true", help="emit raw state instead of the digest")
     args = parser.parse_args(argv)
 
     root = Path(args.ledger)
-    config = {}
-    cfg_path = Path(args.config) if args.config else root / "config.json"
-    if cfg_path.exists():
-        config = json.loads(cfg_path.read_text(encoding="utf-8"))
+    # Anchored to the repository, and loud when it is not there — the same
+    # mechanism loop.py, land.py and triage.py use (issue #70). This script
+    # resolves its events file correctly from a build worktree but used to
+    # resolve the config against the caller, so the digest rendered with
+    # `caps={}`: every counter shown without its ceiling, NEEDS YOU empty
+    # however far past its cap a batch was, and not a word about why.
+    config = ledger.load_config(args.config)
 
     state = ledger.load(root)
     if args.json:

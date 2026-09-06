@@ -618,9 +618,20 @@ def main(argv: list[str] | None = None) -> int:
             continue
         applied += 1
         ledger_mod.append(root, "issue.triaged", **record)
-    # Written even when it labelled nothing: loop.triage_due reads it to decide
-    # when to look for new issues, and without it the loop asks every tick.
-    ledger_mod.append(root, "triage.completed", triaged=applied, failed=len(failed))
+    # Every issue in the plan came back from `fetch_issues`, which asks GitHub
+    # for open issues only — so the plan is a list of issues that were open when
+    # it was built, whether or not this run re-recorded them. The skipped ones
+    # are the point: `should_skip` guarantees no `issue.triaged` is ever written
+    # for an issue whose `updatedAt` has not moved, and a PR merging without a
+    # closing keyword does not move it. Without this list, `loop._grouped_issues`
+    # had no way to learn that a merged batch left its issue open (issue #58).
+    # A failed label write is recorded here too: whether a label stuck says
+    # nothing about whether the issue is open.
+    listed = [r["issue"] for r in plan.get("triaged", [])] + list(plan.get("skipped", []))
+    seen_open = list(dict.fromkeys(listed))
+    ledger_mod.append(
+        root, "triage.completed", triaged=applied, failed=len(failed), open_issues=seen_open
+    )
     print(json.dumps({"applied": applied, "failed": failed}))
     return 1 if failed else 0
 
