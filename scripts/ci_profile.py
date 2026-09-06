@@ -62,6 +62,25 @@ def _on_block(doc: dict) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
+def _listed(value: object) -> list:
+    """A filter value as the list Actions reads it as.
+
+    `branches`, `tags`, `paths`, `types` and their `-ignore` forms take a
+    list, and a bare scalar is read as a one-item list — the same shape `on:`
+    and `needs:` take, and the same guard those two already had. Without it
+    `list("docs/**")` was six single-character globs, one of them a bare `*`
+    that matched every top-level file in the repository, and `branches: main`
+    was four one-letter branch names. A mapping is not a filter at all, and
+    reads as no filter: the conservative answer, since a job with no filter is
+    one that fires on everything.
+    """
+    if value is None or isinstance(value, dict):
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
 def _path_filters(on: dict, events: set[str] | None = None) -> list[str]:
     """Path filters declared by the given events (all of them when None).
 
@@ -74,7 +93,7 @@ def _path_filters(on: dict, events: set[str] | None = None) -> list[str]:
         if events is not None and str(event) not in events:
             continue
         if isinstance(cfg, dict):
-            paths.extend(cfg.get("paths", []) or [])
+            paths.extend(_listed(cfg.get("paths")))
     return sorted(dict.fromkeys(paths))
 
 
@@ -97,13 +116,13 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
         pr_filters = _path_filters(on, {"pull_request", "pull_request_target"})
         events = {
             str(event): {
-                "paths": list((cfg or {}).get("paths") or []),
-                "paths_ignore": list((cfg or {}).get("paths-ignore") or []),
-                "branches": list((cfg or {}).get("branches") or []),
-                "tags": list((cfg or {}).get("tags") or []),
-                "types": list((cfg or {}).get("types") or []),
-                "branches_ignore": list((cfg or {}).get("branches-ignore") or []),
-                "tags_ignore": list((cfg or {}).get("tags-ignore") or []),
+                "paths": _listed((cfg or {}).get("paths")),
+                "paths_ignore": _listed((cfg or {}).get("paths-ignore")),
+                "branches": _listed((cfg or {}).get("branches")),
+                "tags": _listed((cfg or {}).get("tags")),
+                "types": _listed((cfg or {}).get("types")),
+                "branches_ignore": _listed((cfg or {}).get("branches-ignore")),
+                "tags_ignore": _listed((cfg or {}).get("tags-ignore")),
             }
             for event, cfg in on.items()
             if isinstance(cfg, dict) or cfg is None
