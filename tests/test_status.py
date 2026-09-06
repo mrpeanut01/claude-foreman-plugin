@@ -222,3 +222,35 @@ def test_an_explicit_config_path_is_still_obeyed(worktree, monkeypatch, tmp_path
 
     assert status.main(["--config", str(elsewhere)]) == 0
     assert "pushes = 3/1" in capsys.readouterr().out
+
+
+# --- the rubber-stamp signal counts reverts of clean reviews, not every revert -
+
+
+def test_a_revert_of_a_batch_never_reviewed_clean_does_not_count_against_the_gate(root):
+    """The numerator was every `merge.reverted` in the ledger. A batch the
+    reviewer refused and a person merged anyway, then reverted, made the gate
+    look like it was rubber-stamping when it had done its job."""
+    ledger.append(root, "review.verdict", batch="b-001", verdict="changes_requested")
+    ledger.append(root, "merge.reverted", batch="b-001")
+    ledger.append(root, "review.verdict", batch="b-002", verdict="clean")
+    out = status.render(ledger.load(root), config={})
+    assert "0/1" in out
+    assert "approving too easily" not in out
+
+
+def test_a_revert_of_a_clean_reviewed_batch_still_counts(root):
+    ledger.append(root, "review.verdict", batch="b-002", verdict="clean")
+    ledger.append(root, "merge.reverted", batch="b-002")
+    out = status.render(ledger.load(root), config={})
+    assert "1/1" in out and "approving too easily" in out
+
+
+def test_a_cap_on_a_counter_the_record_lacks_does_not_crash_the_digest(root):
+    """`batch.meta` may replace `attempts` wholesale, which the LEDGER warning
+    itself recommends; `cap_breached` reads the missing key as 0 and so must this."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.transition(root, "b-001", "building")
+    ledger.append(root, "batch.meta", batch="b-001", attempts={"pushes": 0, "review_rounds": 0})
+    out = status.render(ledger.load(root), config={"caps": {"reruns": 0}})
+    assert "reruns = 0/0" in out

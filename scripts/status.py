@@ -42,7 +42,10 @@ def _needs_human(state: ledger.State, caps: dict) -> list[str]:
             continue
         breached = ledger.cap_breached(batch, caps)
         if breached:
-            hit = batch["attempts"][breached]
+            # `.get`, as cap_breached reads it: a batch.meta correction may have
+            # replaced `attempts` with a partial mapping, and the LEDGER warning
+            # below is what tells an operator to write one.
+            hit = batch["attempts"].get(breached, 0)
             lines.append(
                 f"  {bid:<10} at cap — {breached} = {hit}/{caps[breached]}, loop will not retry"
             )
@@ -101,7 +104,11 @@ def render(state: ledger.State, config: dict | None = None) -> str:
     # until you count how much of what it approved came back out of trunk.
     clean = [r for r in state.reviews if r.get("verdict") == "clean"]
     if clean:
-        reverted = len(state.reverts)
+        # Reverts of batches the reviewer approved, and only those. Counting
+        # every revert in the ledger charged the gate for a batch it had
+        # refused and a person merged anyway.
+        approved = {r.get("batch") for r in clean}
+        reverted = sum(1 for e in state.reverts if e.get("batch") in approved)
         pct = round(100 * reverted / len(clean))
         out.append("REVIEW QUALITY")
         out.append(f"  clean reviews later reverted: {reverted}/{len(clean)} ({pct}%)")
