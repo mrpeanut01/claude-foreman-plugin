@@ -64,11 +64,27 @@ band, the same complaint reworded — means the builder and reviewer are trading
 the same objection, and another round will trade it again. That is deadlock, and it
 escalates.
 
-*The same complaint reworded* means one summary reads as an elaboration of the
-other. Two summaries that each name something the other does not are two defects
-in one file, not one defect repeated: "missing null check in parse_config" and
-"missing type check in parse_config" share most of their words and describe
-unrelated bugs, and escalating that pair would call a converging PR a deadlock.
+*The same complaint reworded* is decided by shape, not by how much the two
+summaries share. Half the content words of any two findings in one file are the
+locus and the verb, so overlap alone ranks them backwards: "missing null check in
+parse_config" and "missing type check in parse_config" name unrelated bugs and
+overlap *more* (0.67) than a genuine rewording does (0.50). What marks that pair
+out is that one is the other with a term swapped in place — same sentence, same
+length, the swapped term carrying the whole complaint. A rewording never keeps
+the sentence; it elaborates, compresses or reorders, so something is always
+inserted or dropped. "unbounded retry loop in the fetch helper" and "the retry
+loop in fetch has no ceiling" are one objection stated twice, and count as a
+repeat.
+
+The rule is lexical, and it has a floor. Two statements of one objection that
+share too few words — "race condition in flush when the queue is empty" and
+"flush races with the queue drain on an empty buffer" overlap 0.30 — read as
+progress; so does a reviewer alternating between two files, which gets no locus
+signal either. Both fall through to the ceiling of 5 rounds. In the other
+direction, a genuinely new defect named by swapping a term *and* adding a locator
+reads as a repeat and escalates to a human a round early. That is the affordable
+error of the two. A reviewer that restates a surviving finding in the words it
+used before is what keeps this rule sharp.
 
 Different findings each round is the opposite: the reviewer is working through
 layers, and quality is rising. Let it run — unless they keep landing in the same

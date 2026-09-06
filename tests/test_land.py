@@ -965,3 +965,48 @@ def test_a_green_for_this_commit_is_still_green_beside_a_dropped_stale_red():
     """Waiting is for what has not reported, not for what has."""
     mixed = [sha_check("lint", "FAILURE", OLD), sha_check("lint", "SUCCESS", NEW)]
     assert land.ci_gate(mixed, UNREQUIRED, None, NEW) == "full_green"
+
+
+# --- review: mutual containment dropped genuine rewordings -------------------
+
+
+def test_a_rewording_that_both_adds_and_drops_words_is_still_a_repeat():
+    """The shape the containment rule lost: neither summary contains the other.
+
+    One objection, stated twice. Requiring one word set to contain the other read
+    it as two rounds of progress and let the review run to the hard ceiling.
+    """
+    a = finding("scripts/fetch.py", "high", "unbounded retry loop in the fetch helper")
+    b = finding("scripts/fetch.py", "high", "the retry loop in fetch has no ceiling")
+    assert land.same_finding(a, b) is True
+    assert land.review_stalled([[a], [b]], hard_ceiling=5) is not None
+
+
+def test_two_terms_swapped_in_place_are_still_two_defects():
+    """#29 stays fixed, and holds for more than a single swapped word."""
+    a = finding("scripts/parse.py", "high", "missing null check in parse_config header")
+    b = finding("scripts/parse.py", "high", "missing type check in parse_config footer")
+    assert land.same_finding(a, b) is False
+
+
+def test_the_same_words_in_another_order_are_the_same_complaint():
+    a = finding("scripts/flush.py", "high", "the flush path races with the queue drain")
+    b = finding("scripts/flush.py", "high", "the queue drain races with the flush path")
+    assert land.same_finding(a, b) is True
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("unbounded retry loop in the fetch helper", "the retry loop in fetch has no ceiling"),
+        ("missing null check in parse_config", "missing type check in parse_config"),
+        ("connection pool leaks handles on timeout", "connection pool leaks handles on shutdown"),
+        ("the retry loop has no ceiling", "retry loop has no upper ceiling at all"),
+    ],
+)
+def test_which_finding_came_first_never_changes_the_answer(left, right):
+    """Rounds are compared in one direction, but a rule that is not symmetric is
+    a rule nobody can reason about."""
+    a = finding("scripts/x.py", "high", left)
+    b = finding("scripts/x.py", "high", right)
+    assert land.same_finding(a, b) is land.same_finding(b, a)
