@@ -44,6 +44,91 @@ def test_corrupt_line_is_skipped_not_fatal(root):
     assert [e["issue"] for e in events] == [1, 2]
 
 
+# --- a line the fold cannot use is skipped, exactly like an unparseable one ---
+
+
+def test_a_wrong_typed_field_does_not_take_the_fold_down(root):
+    """`ledger.py append --type triage.completed --json '{"open_issues": 5}'`.
+
+    A documented CLI, reachable by any agent, and the log is append-only — the
+    line cannot be taken back out. `fold` is the single reader every script goes
+    through, so this crashed `loop.py`, `status.py` and `land.py` from that line
+    on, permanently.
+    """
+    ledger.append(root, "issue.triaged", issue=1, verdict="actionable")
+    ledger.append(root, "triage.completed", open_issues=5)
+    ledger.append(root, "issue.triaged", issue=2, verdict="actionable")
+    state = ledger.fold(ledger.read_events(root))
+    assert sorted(state.issues) == [1, 2]
+    assert state.skipped_lines == 1
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": "triage.completed", "open_issues": 5},
+        {"type": "issue.triaged", "verdict": "actionable"},
+        {"type": "batch.state", "batch": "b-001", "from": "planned"},
+        {"type": "gate.set", "batch": "b-001", "value": "failed"},
+        {"type": "gate.set", "batch": "b-001", "gate": "ci"},
+    ],
+)
+def test_an_event_missing_or_mistyping_a_field_it_needs_is_counted_and_skipped(event):
+    """`open_issues` is only the newest way in. A missing `to` or `gate` raises
+    the same way through the same CLI, and guarding one field at a time leaves
+    the next one to be found in production."""
+    events = [
+        {"ts": "2026-01-01T00:00:00Z", "type": "batch.created", "batch": "b-001", "issues": [1]},
+        {"ts": "2026-01-02T00:00:00Z", **event},
+        {"ts": "2026-01-03T00:00:00Z", "type": "batch.state", "batch": "b-001", "to": "building"},
+    ]
+    state = ledger.fold(events)
+    assert state.skipped_lines == 1
+    assert state.batches["b-001"]["state"] == "building"
+
+
+def test_a_skipped_event_leaves_nothing_half_applied():
+    """It must not count as movement either: `updated` is what staleness reads."""
+    events = [
+        {"ts": "2026-01-01T00:00:00Z", "type": "batch.created", "batch": "b-001", "issues": [1]},
+        {"ts": "2026-01-09T00:00:00Z", "type": "gate.set", "batch": "b-001", "gate": "ci"},
+    ]
+    batch = ledger.fold(events).batches["b-001"]
+    assert batch["updated"] == "2026-01-01T00:00:00Z"
+    assert batch["ci_gate"] == "pending"
+
+
+def test_a_healthy_ledger_skips_nothing(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.append(root, "triage.completed", triaged=1, open_issues=[1])
+    assert ledger.fold(ledger.read_events(root)).skipped_lines == 0
+
+
+def test_a_torn_line_is_counted_the_same_way_when_the_ledger_is_loaded(root):
+    """From outside, a torn write and an unreadable event are one thing: the log
+    holds something the state does not. Both have to reach the same counter, or
+    the digest can only warn about half of them."""
+    ledger.append(root, "issue.triaged", issue=1, verdict="actionable")
+    (root / "events.jsonl").open("a").write("{ this is not json\n")
+    ledger.append(root, "triage.completed", open_issues=5)
+    state = ledger.load(root)
+    assert sorted(state.issues) == [1]
+    assert state.skipped_lines == 2
+
+
+def test_a_triage_pass_that_could_not_be_recorded_does_not_move_the_clock():
+    """`triage_due` reads `last_triage_at`. A pass whose sightings were thrown away
+    must not count as the loop having looked, or the issues it failed to record
+    go unlooked-for until the next window."""
+    events = [
+        {"ts": "2026-01-01T00:00:00Z", "type": "triage.completed", "open_issues": [1]},
+        {"ts": "2026-01-02T00:00:00Z", "type": "triage.completed", "open_issues": 5},
+    ]
+    state = ledger.fold(events)
+    assert state.skipped_lines == 1
+    assert state.last_triage_at == "2026-01-01T00:00:00Z"
+
+
 # --- folding ------------------------------------------------------------------
 
 

@@ -93,3 +93,14 @@ for bid, batch in state.batches.items():
 crash costs one event, not the whole ledger. If a batch looks impossible,
 reconcile against GitHub — `gh pr view` is the tiebreaker — and append a
 `batch.meta` correction.
+
+The fold makes the same trade for a line that parses but cannot be read: a
+`triage.completed` whose `open_issues` is a number, a `batch.state` with no
+`to`, a `gate.set` with no `gate`. Each is one `ledger.py append --json` away,
+the line cannot be taken back out, and `fold` is the single reader every script
+goes through — so before this, one such line crashed `loop.py`, `status.py` and
+`land.py` from then on. Now it is skipped **whole** (every branch reads what it
+needs before it writes anything, so nothing is half-applied) and counted in
+`State.skipped_lines` alongside the torn lines. `/foreman:status` prints a
+`LEDGER` warning whenever that count is non-zero, because a state that has
+quietly dropped an event is a state that has stopped matching the repository.

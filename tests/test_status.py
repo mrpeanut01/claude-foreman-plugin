@@ -54,6 +54,23 @@ def test_batch_at_its_cap_is_flagged_as_needing_a_human(root):
     assert "needs you" in out.lower()
 
 
+def test_the_digest_says_when_the_ledger_could_not_be_fully_read(root):
+    """A skipped line is the right outcome for one bad append and the wrong
+    outcome to keep quiet about: from here on the state may not match the
+    repository, and the person reading this is the only one who can tell."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.append(root, "triage.completed", open_issues=5)
+    out = status.render(ledger.load(root), config={})
+    assert "LEDGER" in out
+    assert "1 line(s)" in out and "skipped" in out
+
+
+def test_a_fully_readable_ledger_gets_no_such_warning(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    out = status.render(ledger.load(root), config={})
+    assert "LEDGER" not in out
+
+
 def test_merged_batches_are_counted_not_listed(root):
     for i in (1, 2):
         bid = f"b-00{i}"

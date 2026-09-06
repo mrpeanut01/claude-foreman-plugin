@@ -77,6 +77,19 @@ def render(state: ledger.State, config: dict | None = None) -> str:
     out.extend(attention or ["  Nothing blocked."])
     out.append("")
 
+    # A line the fold could not use was dropped rather than crashing every
+    # script, which is the right trade — but a state quietly missing an event
+    # is a state that has stopped matching the repository. Say it here, once,
+    # where a person reads.
+    if state.skipped_lines:
+        out.append("LEDGER")
+        out.append(
+            f"  ⚠ {state.skipped_lines} line(s) in events.jsonl could not be read and were "
+            "skipped; the state above may be missing what they recorded. Reconcile "
+            "against GitHub and append a batch.meta correction."
+        )
+        out.append("")
+
     if state.flakes:
         out.append("FLAKES (most seen first)")
         for key, count in sorted(state.flakes.items(), key=lambda kv: (-kv[1], kv[0]))[:5]:
