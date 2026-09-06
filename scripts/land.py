@@ -64,6 +64,17 @@ HUMAN_GATE = re.compile(
 
 BLOCKING_LABELS = {"needs-human", "do-not-merge", "wip", "blocked", "hold"}
 
+# The `gh pr merge` strategies. `merge_method` in config chooses one; the
+# recipes hard-coded --squash and nothing read the key at all.
+MERGE_METHODS = ("squash", "merge", "rebase")
+DEFAULT_MERGE_METHOD = "squash"
+
+
+def merge_method(config: dict) -> str:
+    """The configured strategy, as the `gh pr merge` flag name without dashes."""
+    return str(config.get("merge_method") or DEFAULT_MERGE_METHOD)
+
+
 VERDICTS = {"clean", "changes_requested"}
 SERIOUS = {"high", "medium", "critical", "blocker"}
 FLAKE_CONFIDENCE = 0.7
@@ -834,6 +845,10 @@ def merge_blockers(
     if not config.get("auto_merge"):
         blockers.append("auto_merge is disabled in config")
 
+    method = merge_method(config)
+    if method not in MERGE_METHODS:
+        blockers.append(f"merge_method {method!r} is not one of {', '.join(MERGE_METHODS)}")
+
     for gate, wanted in CLEAR.items():
         actual = batch.get(f"{gate}_gate")
         if actual != wanted:
@@ -1101,9 +1116,19 @@ def main(argv: list[str] | None = None) -> int:
     # Not `load_json`: a relative config has to be anchored to the repository the
     # way the ledger already is, and a missing one has to say so rather than
     # quietly dropping every cap and every protected path.
-    blockers = merge_blockers(batch, pr, ledger_mod.load_config(args.config))
+    config = ledger_mod.load_config(args.config)
+    blockers = merge_blockers(batch, pr, config)
     print(
-        json.dumps({"batch": args.batch, "mergeable": not blockers, "blockers": blockers}, indent=2)
+        json.dumps(
+            {
+                "batch": args.batch,
+                "mergeable": not blockers,
+                "blockers": blockers,
+                # The flag the merge recipe passes to `gh pr merge`, from config.
+                "merge_method": merge_method(config),
+            },
+            indent=2,
+        )
     )
     return 0 if not blockers else 2
 

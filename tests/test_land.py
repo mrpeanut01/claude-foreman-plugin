@@ -1414,3 +1414,33 @@ def test_a_change_with_no_behaviour_cannot_also_claim_its_test_survived_a_revert
         clean(behaviour_change=False, tests_covering=[], revert_check="still_passed")
     )
     assert not ok and any("contradicts" in e for e in errors)
+
+
+# --- merge_method is read, not just written -----------------------------------
+
+
+def test_the_configured_merge_method_is_reported_with_the_blockers(worktree, capsys):
+    """config.example.json shipped the key and nothing read it; the recipes
+    hard-coded --squash."""
+    checkout, _ = worktree
+    config = checkout / ".foreman" / "config.json"
+    config.write_text(json.dumps({**CFG, "merge_method": "rebase"}))
+    ledger_dir = str(checkout / ".foreman")
+    land.main(["blockers", "--batch", "b-001", "--ledger", ledger_dir, "--config", str(config)])
+    assert json.loads(capsys.readouterr().out)["merge_method"] == "rebase"
+
+
+def test_the_merge_method_defaults_to_squash(worktree, capsys):
+    checkout, _ = worktree
+    config = str(checkout / ".foreman" / "config.json")  # CFG, which names no method
+    ledger_dir = str(checkout / ".foreman")
+    land.main(["blockers", "--batch", "b-001", "--ledger", ledger_dir, "--config", config])
+    assert json.loads(capsys.readouterr().out)["merge_method"] == "squash"
+
+
+def test_an_unknown_merge_method_blocks_the_merge():
+    blockers = land.merge_blockers(ready_batch(), {"labels": []}, {**CFG, "merge_method": "ff"})
+    assert any("merge_method" in b for b in blockers)
+    assert (
+        land.merge_blockers(ready_batch(), {"labels": []}, {**CFG, "merge_method": "merge"}) == []
+    )

@@ -104,9 +104,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" paths --batch <id> --base <trun
   --repo-dir ../foreman-<id> --apply
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> --repo OWNER/NAME
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> ready
-"${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --squash
+"${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --<merge_method>
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> merging
 ```
+
+`<merge_method>` is the value `blockers` printed under `merge_method`: `squash`
+unless `.foreman/config.json` says `merge` or `rebase`. The key used to be
+written by the example config and read by nothing.
 
 `ready` is the state both gates clear into, and it is the only state `merging`
 can be reached from: `open -> merging` is not a move, and `transition` refuses
