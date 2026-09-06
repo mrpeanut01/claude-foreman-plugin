@@ -1155,3 +1155,45 @@ def test_which_finding_came_first_never_changes_the_answer(left, right):
     a = finding("scripts/x.py", "high", left)
     b = finding("scripts/x.py", "high", right)
     assert land.same_finding(a, b) is land.same_finding(b, a)
+
+
+# --- issue #79: a synonym or a plural swapped in place is not a new defect -----
+
+
+def test_a_synonym_swapped_in_place_is_the_same_finding():
+    """Same shape as `null` -> `type` — one word exchanged, nothing added or
+    dropped — and only the words tell the two apart. `review_stalled` therefore
+    missed the round-2 repeat, and the locus rule caught it a round later."""
+    a = finding("scripts/fetch.py", "high", "unbounded retry loop in fetch_data")
+    b = finding("scripts/fetch.py", "high", "unlimited retry loop in fetch_data")
+    assert land.same_finding(a, b) is True
+    assert land.review_stalled([[a], [b]], hard_ceiling=5) is not None
+
+
+def test_a_plural_swapped_in_place_is_the_same_finding():
+    a = finding("scripts/fetch.py", "high", "unbounded retry loops in fetch_data")
+    b = finding("scripts/fetch.py", "high", "unbounded retry loop in fetch_data")
+    assert land.same_finding(a, b) is True
+
+
+def test_synonymy_does_not_reach_the_term_that_carries_the_defect():
+    """`missing` and `absent` are one word; `null` and `bounds` are not, and must
+    never be, or #29 comes back."""
+    a = finding("scripts/parse.py", "high", "missing null check in parse_config")
+    b = finding("scripts/parse.py", "high", "absent bounds check in parse_config")
+    assert land.same_finding(a, b) is False
+
+
+@pytest.mark.parametrize(
+    "word,expected",
+    [("loops", "loop"), ("retries", "retry"), ("checks", "check"), ("boxes", "box")],
+)
+def test_plurals_fold_to_their_singular(word, expected):
+    assert land._stem(word) == expected
+
+
+@pytest.mark.parametrize("word", ["class", "process", "status", "is", "as"])
+def test_words_that_merely_end_in_s_are_not_mangled_into_something_else(word):
+    """Stemming `status` to `statu` is harmless only because both sides get the
+    same treatment; the rule must not turn a word into a different real word."""
+    assert land._stem(word) in {word, word[:-1]}

@@ -76,6 +76,16 @@ inserted or dropped. "unbounded retry loop in the fetch helper" and "the retry
 loop in fetch has no ceiling" are one objection stated twice, and count as a
 repeat.
 
+Before comparing, each summary's words are folded to one spelling per meaning:
+plurals to singulars, and a short table of review synonyms (`unlimited`,
+`uncapped` and `infinite` to `unbounded`; `absent` and `omitted` to `missing`;
+the whole table sits above `_terms` in `land.py`). Otherwise "unbounded retry
+loop in fetch_data" and "unlimited retry loop in fetch_data" have exactly the
+shape of a genuine swap — same length, one term exchanged in place — and only
+the words themselves tell the two apart. The table is deliberately small; what
+is *not* in it is the point, because `null` and `type` swapped in place must
+keep reading as two defects.
+
 The rule is lexical, and it has a floor. Two statements of one objection that
 share too few words — "race condition in flush when the queue is empty" and
 "flush races with the queue drain on an empty buffer" overlap 0.30 — read as

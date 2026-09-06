@@ -81,6 +81,27 @@ DEFAULT_REVIEW_CEILING = 5
 # useful than "you ran out of rounds".
 LOCUS_REPEAT_ROUNDS = 3
 _WORD = re.compile(r"[a-z0-9]+")
+# Words a reviewer exchanges for one another without meaning anything new by
+# it. This is the whole list, and it is kept to pairs that are synonyms in
+# every sentence a finding is written in. What is NOT here matters more than
+# what is: "null" and "type", "read" and "write", "before" and "after" name
+# different defects when swapped in place, and the substitution rule below
+# depends on them staying different (issues #29, #79).
+_SYNONYMS = {
+    "unlimited": "unbounded",
+    "uncapped": "unbounded",
+    "unbound": "unbounded",
+    "infinite": "unbounded",
+    "endless": "unbounded",
+    "absent": "missing",
+    "omitted": "missing",
+    "lacking": "missing",
+    "lack": "missing",
+    "unhandled": "uncaught",
+    "incorrect": "wrong",
+    "quietly": "silently",
+    "quiet": "silent",
+}
 _NOISE = {
     "the",
     "a",
@@ -463,12 +484,44 @@ def validate_review(verdict: dict) -> tuple[bool, list[str]]:
 # --- review convergence -------------------------------------------------------
 
 
+def _stem(word: str) -> str:
+    """Plural to singular, and nothing subtler.
+
+    `loops` and `loop` are one word; so are `retries` and `retry`. A fuller
+    stemmer would fold `missing` into `miss` and `parsing` into `parse`, which
+    starts merging words that mean different things, and the substitution rule
+    needs different words to stay different.
+    """
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 4 and word.endswith(("sses", "shes", "ches", "xes", "zes")):
+        return word[:-2]
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _canon(word: str) -> str:
+    """One spelling per meaning, as far as a table and a plural rule can get.
+
+    The substitution rule reads an in-place swap as a new defect, which is
+    right for `null` -> `type` and wrong for `unbounded` -> `unlimited`: the
+    second preserves term count and swaps one word in place, so it is
+    structurally identical to a genuine swap, and only the words themselves
+    tell the two apart (issue #79). Normalising here lets that rule stay
+    exactly as strict as it is while no longer counting a synonym or a plural
+    as a swap.
+    """
+    stemmed = _stem(word)
+    return _SYNONYMS.get(stemmed, _SYNONYMS.get(word, stemmed))
+
+
 def _terms(text: str) -> list[str]:
     """The content words of a summary, in order, first occurrence only."""
     seen: dict[str, None] = {}
     for word in _WORD.findall((text or "").lower()):
         if word not in _NOISE and len(word) > 1:
-            seen.setdefault(word, None)
+            seen.setdefault(_canon(word), None)
     return list(seen)
 
 
