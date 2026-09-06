@@ -16,8 +16,8 @@ as given. Two ledgers is the worst outcome available here: the push that resets
 
 | `type` | Required fields | Effect on folded state |
 |--------|-----------------|------------------------|
-| `issue.triaged` | `issue`, `verdict` | Upserts `issues[n]`. Re-triage overwrites; the log keeps both. Its `ts` matters: triage asks GitHub for **open** issues only, so a record newer than a merged batch is the loop's only evidence that the merge did not close the issue, and `loop._grouped_issues` hands it back to batching. |
-| `triage.completed` | — | Sets `last_triage_at`. Written once per `triage.py apply`, **even when it labelled nothing** — it marks that a pass happened, and `loop.triage_due` reads it to decide when to look for new issues. Without it the loop asks for triage on every tick. |
+| `issue.triaged` | `issue`, `verdict` | Upserts `issues[n]`. Re-triage overwrites; the log keeps both. Its `ts` is also a sighting (see below). |
+| `triage.completed` | `open_issues` | Sets `last_triage_at`, and stamps every issue in `open_issues` into `open_seen_at`. Written once per `triage.py apply`, **even when it labelled nothing** — it marks that a pass happened, and `loop.triage_due` reads it to decide when to look for new issues. Without it the loop asks for triage on every tick. |
 | `batch.created` | `batch`, `issues` | Creates the batch in `planned`, both gates `pending`. Optional `branch`, `pr`. **Ignored when the id already exists** — ids are unique, so a repeat is a numbering bug, and replacing the record would discard a merge. |
 | `batch.state` | `batch`, `from`, `to` | Moves the batch. Only ever written by `ledger.transition`. `building -> building` is the resume: it records no progress, so it increments `attempts.build_resumes` instead — the only number that grows while a batch is parked mid-build. |
 | `batch.pushed` | `batch`, `sha` | **Resets both gates to `pending`** and increments `attempts.pushes`. Remembers the CI verdict it was pushed into, so the next CI result can score the push: red again the same way increments `attempts.futile_pushes`, any green resets that run to 0. |
@@ -31,6 +31,24 @@ as given. Two ledgers is the worst outcome available here: the push that resets
 
 `ts` and `type` are added by `ledger.append`. Every event carrying `batch` also
 refreshes that batch's `updated`.
+
+## Sightings: how the loop learns an issue is still open
+
+`triage.fetch_issues` asks GitHub for **open** issues only, so every issue that
+reaches a triage plan was open when the plan was built. `open_seen_at[n]` records
+when each was last seen that way, and `loop._grouped_issues` reads it: a sighting
+newer than a merged batch's `progress_at` is the loop's only evidence that the
+merge did not close the issue, and the issue goes back to batching.
+
+`open_issues` on `triage.completed` carries **skipped** issues as well as
+recorded ones, and that is the whole point. `triage.should_skip` refuses to
+re-triage an issue whose `updatedAt` has not changed, and a PR that merges
+without a closing keyword changes nothing about the issue — so no `issue.triaged`
+newer than the merge is ever written for exactly the issues this rule exists to
+catch. Reading the records alone left the rule with no producer (issue #58).
+
+A ledger written before this field folds fine; those passes simply record no
+sightings.
 
 ## Why a push resets both gates
 

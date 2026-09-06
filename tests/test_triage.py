@@ -909,3 +909,53 @@ def test_an_explicit_config_path_is_still_obeyed(worktree, monkeypatch, tmp_path
 
     plan, _ = _plan_from(monkeypatch, capsys, "--config", str(elsewhere))
     assert plan["triaged"][0]["risk"] == "medium"
+
+
+# --- issue #58: a skipped issue is still an issue triage saw open -------------
+
+
+def _plan_with_skips(tmp_path, triaged=(), skipped=()):
+    path = tmp_path / "plan.json"
+    path.write_text(
+        json.dumps({"repo": "me/mine", "triaged": list(triaged), "skipped": list(skipped)})
+    )
+    return path
+
+
+def _completed(tmp_path):
+    import ledger as ledger_mod
+
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    return next(e for e in events if e["type"] == "triage.completed")
+
+
+def test_an_issue_skipped_because_nothing_changed_is_still_recorded_as_open(tmp_path):
+    """`fetch_issues` asks GitHub for open issues only, so appearing in the plan
+    at all — skipped or not — is evidence the issue was open when triage ran.
+
+    Without it the only evidence available was a *new* `issue.triaged` record,
+    and `should_skip` guarantees one is never written for an issue whose
+    `updatedAt` has not moved. The rule that releases an issue from a merged
+    batch had no producer.
+    """
+    _apply(tmp_path, _plan_with_skips(tmp_path, skipped=[5]))
+    assert _completed(tmp_path)["open_issues"] == [5]
+
+
+def test_triaged_and_skipped_issues_are_recorded_together(tmp_path, monkeypatch):
+    monkeypatch.setattr(triage, "apply_labels", lambda *a, **k: (True, ""))
+    _apply(tmp_path, _plan_with_skips(tmp_path, triaged=[_record(1)], skipped=[5, 7]))
+    assert _completed(tmp_path)["open_issues"] == [1, 5, 7]
+
+
+def test_an_issue_whose_label_write_failed_was_still_seen_open(tmp_path, monkeypatch):
+    """Whether a label stuck says nothing about whether the issue is open."""
+    _refusing_gh(monkeypatch)
+    _apply(tmp_path, _plan_with_skips(tmp_path, triaged=[_record(3)]))
+    assert _completed(tmp_path)["open_issues"] == [3]
+
+
+def test_an_issue_listed_twice_is_recorded_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(triage, "apply_labels", lambda *a, **k: (True, ""))
+    _apply(tmp_path, _plan_with_skips(tmp_path, triaged=[_record(4)], skipped=[4]))
+    assert _completed(tmp_path)["open_issues"] == [4]

@@ -107,6 +107,10 @@ class State:
     reverts: list[dict] = field(default_factory=list)
     ci_spend: list[dict] = field(default_factory=list)
     last_triage_at: str | None = None
+    # When triage last found each issue on the tracker's *open* list. Separate
+    # from `issues` because the most useful sighting is usually of an issue
+    # triage deliberately did not re-record — see `triage.should_skip`.
+    open_seen_at: dict[int, str] = field(default_factory=dict)
     skipped_lines: int = 0
 
 
@@ -319,9 +323,15 @@ def fold(events: list[dict]) -> State:
 
         if kind == "triage.completed":
             state.last_triage_at = event.get("ts")
+            # Every issue the pass looked at, including the ones it skipped.
+            # `triage.fetch_issues` asks GitHub for open issues only, so this is
+            # a sighting: proof the issue was still open at this timestamp.
+            for number in event.get("open_issues") or []:
+                state.open_seen_at[number] = event.get("ts")
 
         elif kind == "issue.triaged":
             state.issues[event["issue"]] = {k: v for k, v in event.items() if k != "type"}
+            state.open_seen_at[event["issue"]] = event.get("ts")
 
         elif kind == "batch.created":
             # Ids are meant to be unique. A repeat means an upstream numbering

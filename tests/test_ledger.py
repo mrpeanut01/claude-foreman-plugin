@@ -266,6 +266,36 @@ def test_recreating_an_existing_batch_id_does_not_erase_it():
     assert state.batches["b-001"]["issues"] == [1, 2]
 
 
+# --- issue #58: which issues a triage pass found open ------------------------
+
+
+def test_a_completed_triage_records_when_each_open_issue_was_last_seen(root):
+    ledger.append(root, "triage.completed", triaged=1, open_issues=[5, 9])
+    state = ledger.fold(ledger.read_events(root))
+    assert set(state.open_seen_at) == {5, 9}
+    assert state.open_seen_at[5] == state.last_triage_at
+
+
+def test_a_triaged_issue_is_itself_a_sighting(root):
+    """`fetch_issues` asks for open issues only, so a record is a sighting too."""
+    ledger.append(root, "issue.triaged", issue=5, verdict="actionable")
+    state = ledger.fold(ledger.read_events(root))
+    assert state.open_seen_at[5] == state.issues[5]["ts"]
+
+
+def test_a_later_pass_that_did_not_list_an_issue_leaves_its_last_sighting_alone(root):
+    ledger.append(root, "triage.completed", triaged=0, open_issues=[5])
+    first = ledger.fold(ledger.read_events(root)).open_seen_at[5]
+    ledger.append(root, "triage.completed", triaged=0, open_issues=[])
+    assert ledger.fold(ledger.read_events(root)).open_seen_at[5] == first
+
+
+def test_an_older_ledger_with_no_open_issues_field_still_folds(root):
+    ledger.append(root, "triage.completed", triaged=0, failed=0)
+    state = ledger.fold(ledger.read_events(root))
+    assert state.open_seen_at == {} and state.last_triage_at
+
+
 # --- issue #17: the push cap must measure diagnosis, not volume ---------------
 
 

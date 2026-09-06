@@ -473,6 +473,69 @@ def test_an_issue_a_live_batch_is_working_on_is_never_re_batched():
     assert loop.next_action(st, CONFIG)["do"] == "watch"
 
 
+def _merged_batch_events(issue, triaged_at, merged_at):
+    """#5 triaged, batched, and merged without a closing keyword."""
+    return [
+        {
+            "ts": triaged_at,
+            "type": "issue.triaged",
+            "issue": issue,
+            "verdict": "actionable",
+            "issue_updated_at": "2026-01-02T00:00:00Z",
+        },
+        {"ts": triaged_at, "type": "batch.created", "batch": "b-001", "issues": [issue]},
+        *(
+            {"ts": merged_at, "type": "batch.state", "batch": "b-001", "from": prev, "to": nxt}
+            for prev, nxt in (
+                ("planned", "building"),
+                ("building", "built"),
+                ("built", "open"),
+                ("open", "ready"),
+                ("ready", "merging"),
+                ("merging", "merged"),
+            )
+        ),
+    ]
+
+
+def _triage_pass(at, saw):
+    """A completed triage run and the open issues it listed."""
+    return {"ts": at, "type": "triage.completed", "triaged": 0, "open_issues": list(saw)}
+
+
+def test_a_merged_batch_releases_an_issue_a_later_triage_saw_open_without_re_triaging_it():
+    """The ordering the release rule was written for, played end to end.
+
+    #5 is triaged, a PR quotes it, the PR merges without a closing keyword, and
+    every triage after that *skips* it — `triage.should_skip` refuses to
+    re-triage an issue whose `updatedAt` has not moved, and merging without
+    closing does not move it. So no `issue.triaged` newer than the merge is ever
+    written, and the rule that hands the issue back had no producer at all.
+
+    The triage pass itself is the evidence: it asked GitHub for open issues and
+    #5 came back.
+    """
+    events = _merged_batch_events(5, triaged_at=_aged(72), merged_at=_aged(48))
+    events.append(_triage_pass(_aged(0.2), saw=[5]))
+    action = loop.next_action(ledger.fold(events), CONFIG)
+    assert action["do"] == "batch" and action["issues"] == [5]
+
+
+def test_a_triage_pass_that_did_not_see_the_issue_leaves_it_with_its_batch():
+    """The merge closed it, so it is not in the open list any more."""
+    events = _merged_batch_events(5, triaged_at=_aged(72), merged_at=_aged(48))
+    events.append(_triage_pass(_aged(0.2), saw=[9]))
+    assert loop.next_action(ledger.fold(events), CONFIG)["do"] == "idle"
+
+
+def test_a_triage_pass_from_before_the_merge_is_not_evidence():
+    """It saw the issue open, but that was before the PR that might have closed it."""
+    events = _merged_batch_events(5, triaged_at=_aged(72), merged_at=_aged(48))
+    events.insert(1, _triage_pass(_aged(70), saw=[5]))
+    events.append(_triage_pass(_aged(0.2), saw=[]))
+    assert loop.next_action(ledger.fold(events), CONFIG)["do"] == "idle"
+
+
 # --- issue #62: a batch mid-build is in flight, not nowhere ------------------
 
 
