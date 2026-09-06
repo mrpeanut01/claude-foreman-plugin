@@ -22,6 +22,12 @@ Read `Skill(foreman:issue-triage)` before reviewing the output — the determini
 scoring is in the script, but deciding whether a verdict is *right* means reading
 the issue.
 
+The plan carries `observed_at`: the moment it asked the tracker. Everything
+`apply` records is dated by that, not by when you get round to applying it, so
+a plan is safe to read slowly — but it is a snapshot, and one built before a
+batch merged still describes the queue from before the merge. Re-plan rather
+than apply a plan older than the work that has landed since.
+
 ## Show the plan, then apply
 
 Render the plan as a table (issue, kind, size, risk, verdict, labels, why) and

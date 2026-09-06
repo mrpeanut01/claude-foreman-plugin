@@ -23,6 +23,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -583,6 +584,10 @@ def main(argv: list[str] | None = None) -> int:
         # nothing was ever skipped, and every open issue was re-triaged and its
         # labels rewritten on every pass (issue #73).
         prior = ledger_mod.load(Path(args.ledger)).issues
+        # The moment the tracker was asked. `apply` may run any time after this
+        # — a plan is a file, and a person reads it before applying — and the
+        # sightings it records are true as of now, not as of then (issue #80).
+        observed_at = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
         issues = fetch_issues(args.repo, args.limit)
         available = fetch_labels(args.repo)
         records, skipped = [], []
@@ -595,6 +600,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     "repo": args.repo,
+                    "observed_at": observed_at,
                     "triaged": records,
                     "skipped": skipped,
                     "queueable": [r["issue"] for r in queueable(records)],
@@ -610,6 +616,13 @@ def main(argv: list[str] | None = None) -> int:
 
     root = Path(args.ledger)
     ledger_mod.init(root.parent if root.name == ledger_mod.LEDGER_DIR else root)
+    # Every sighting this apply writes is dated by when the plan looked at the
+    # tracker, not by when apply ran. `loop.merged_leaving_open` compares the
+    # sighting against a merged batch's `progress_at`, and a plan built before
+    # a merge and applied after it would otherwise assert the issue was open
+    # after the merge closed it (issue #80). A plan without the field — one
+    # written before it existed — is stamped at apply time, as before.
+    stamp = {"observed_at": plan["observed_at"]} if plan.get("observed_at") else {}
     failed, applied = [], 0
     for record in plan.get("triaged", []):
         ok, error = apply_labels(
@@ -623,7 +636,7 @@ def main(argv: list[str] | None = None) -> int:
             failed.append({"issue": record["issue"], "error": error})
             continue
         applied += 1
-        ledger_mod.append(root, "issue.triaged", **record)
+        ledger_mod.append(root, "issue.triaged", **{**record, **stamp})
     # Every issue in the plan came back from `fetch_issues`, which asks GitHub
     # for open issues only — so the plan is a list of issues that were open when
     # it was built, whether or not this run re-recorded them. The skipped ones
@@ -636,7 +649,12 @@ def main(argv: list[str] | None = None) -> int:
     listed = [r["issue"] for r in plan.get("triaged", [])] + list(plan.get("skipped", []))
     seen_open = list(dict.fromkeys(listed))
     ledger_mod.append(
-        root, "triage.completed", triaged=applied, failed=len(failed), open_issues=seen_open
+        root,
+        "triage.completed",
+        triaged=applied,
+        failed=len(failed),
+        open_issues=seen_open,
+        **stamp,
     )
     print(json.dumps({"applied": applied, "failed": failed}))
     return 1 if failed else 0

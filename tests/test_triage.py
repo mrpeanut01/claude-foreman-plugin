@@ -984,3 +984,49 @@ def test_an_issue_listed_twice_is_recorded_once(tmp_path, monkeypatch):
     monkeypatch.setattr(triage, "apply_labels", lambda *a, **k: (True, ""))
     _apply(tmp_path, _plan_with_skips(tmp_path, triaged=[_record(4)], skipped=[4]))
     assert _completed(tmp_path)["open_issues"] == [4]
+
+
+# --- issue #80: a sighting is dated by when the plan looked, not when it was applied
+
+
+def test_a_plan_records_the_moment_it_looked_at_the_tracker(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    plan, _ = _plan_from(monkeypatch, capsys)
+    assert plan["observed_at"].endswith("Z")
+
+
+def test_apply_dates_every_sighting_by_when_the_plan_looked(tmp_path, monkeypatch):
+    """The plan is a file a person reads before applying, and nothing bounds how
+    long that takes. `loop.merged_leaving_open` compares a sighting against a
+    merged batch's `progress_at`, so a plan built before a merge and applied
+    after it used to assert, after the merge, that the issue it closed was
+    still open — and released it for duplicate work."""
+    monkeypatch.setattr(triage, "apply_labels", lambda *a, **k: (True, ""))
+    path = tmp_path / "plan.json"
+    path.write_text(
+        json.dumps(
+            {
+                "repo": "me/mine",
+                "observed_at": "2026-01-01T00:00:00Z",
+                "triaged": [_record(1)],
+                "skipped": [5],
+            }
+        )
+    )
+    _apply(tmp_path, path)
+    import ledger as ledger_mod
+
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert [e["type"] for e in events] == ["issue.triaged", "triage.completed"]
+    assert all(e["observed_at"] == "2026-01-01T00:00:00Z" for e in events)
+    assert all(e["ts"] != "2026-01-01T00:00:00Z" for e in events), "ts is still when apply ran"
+
+
+def test_a_plan_from_before_the_field_existed_is_stamped_at_apply_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(triage, "apply_labels", lambda *a, **k: (True, ""))
+    _apply(tmp_path, _plan_with_skips(tmp_path, triaged=[_record(1)], skipped=[5]))
+    import ledger as ledger_mod
+
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert not any("observed_at" in e for e in events)
+    assert ledger_mod.load(tmp_path / ".foreman").open_seen_at[5] == events[-1]["ts"]

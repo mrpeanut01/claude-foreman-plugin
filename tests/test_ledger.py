@@ -263,6 +263,27 @@ def test_new_push_resets_gates_to_pending(root):
     assert batch["attempts"]["pushes"] == 1
 
 
+def test_a_sighting_is_dated_by_when_triage_looked_not_when_it_was_written(root):
+    """`ts` is the apply; `observed_at` is the plan. The plan is what saw the
+    tracker, so the plan's time is the one a merge is compared against (#80)."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[5])
+    ledger.append(
+        root, "issue.triaged", issue=5, verdict="actionable", observed_at="2026-01-01T00:00:00Z"
+    )
+    ledger.append(
+        root, "triage.completed", triaged=1, open_issues=[5, 9], observed_at="2026-01-02T00:00:00Z"
+    )
+    state = ledger.load(root)
+    assert state.open_seen_at == {5: "2026-01-02T00:00:00Z", 9: "2026-01-02T00:00:00Z"}
+    assert state.last_triage_at == "2026-01-02T00:00:00Z"
+
+
+def test_an_event_without_observed_at_is_dated_by_its_ts_as_before(root):
+    ledger.append(root, "issue.triaged", issue=5, verdict="actionable")
+    state = ledger.load(root)
+    assert state.open_seen_at[5] == state.issues[5]["ts"]
+
+
 # --- attempt counters (these drive escalation) --------------------------------
 
 

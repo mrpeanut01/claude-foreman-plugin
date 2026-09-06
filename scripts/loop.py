@@ -132,7 +132,7 @@ def _seen_open_since(state: ledger.State, issue: int, batch: dict) -> bool:
     stamps = [
         s
         for s in (
-            when((state.issues.get(issue) or {}).get("ts")),
+            when(ledger.observed_at(state.issues.get(issue) or {})),
             when(state.open_seen_at.get(issue)),
         )
         if s is not None

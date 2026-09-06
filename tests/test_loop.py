@@ -488,6 +488,26 @@ def _triaged(number, at):
     return {number: {"issue": number, "verdict": "actionable", "ts": at}}
 
 
+def test_a_plan_built_before_the_merge_and_applied_after_it_is_not_a_sighting_after_it():
+    """Issue #80. The record was written an hour ago, after b-001 merged two
+    hours ago — but the plan it came from looked at the tracker five hours ago,
+    when #5 was legitimately open. Dating the sighting by the apply made the
+    merge look as though it had failed to close the issue."""
+    st = state_with({"id": "b-001", "state": "merged", "issues": [5], "pr": 7})
+    st.batches["b-001"]["progress_at"] = _aged(2)
+    st.issues = {5: {"issue": 5, "verdict": "actionable", "ts": _aged(1), "observed_at": _aged(5)}}
+    st.open_seen_at = {5: _aged(5)}
+    assert loop.merged_leaving_open(st) == []
+    assert loop.next_action(st, CONFIG)["do"] != "escalate"
+
+
+def test_a_plan_that_looked_after_the_merge_is_still_a_sighting_after_it():
+    st = state_with({"id": "b-001", "state": "merged", "issues": [5], "pr": 7})
+    st.batches["b-001"]["progress_at"] = _aged(2)
+    st.issues = {5: {"issue": 5, "verdict": "actionable", "ts": _aged(0), "observed_at": _aged(1)}}
+    assert loop.merged_leaving_open(st) == [{"batch": "b-001", "issues": [5]}]
+
+
 def test_an_issue_its_merged_batch_left_open_reaches_a_human():
     """b-001 merged as PR #7, but issue #5 is still open on the tracker.
 

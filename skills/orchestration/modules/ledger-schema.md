@@ -23,8 +23,8 @@ its `--root` belongs to, since from a build worktree that is the main checkout.
 
 | `type` | Required fields | Effect on folded state |
 |--------|-----------------|------------------------|
-| `issue.triaged` | `issue`, `verdict` | Upserts `issues[n]`. Re-triage overwrites; the log keeps both. Its `ts` is also a sighting (see below). |
-| `triage.completed` | `open_issues` | Sets `last_triage_at`, and stamps every issue in `open_issues` into `open_seen_at`. Written once per `triage.py apply`, **even when it labelled nothing** — it marks that a pass happened, and `loop.triage_due` reads it to decide when to look for new issues. Without it the loop asks for triage on every tick. |
+| `issue.triaged` | `issue`, `verdict` | Upserts `issues[n]`. Re-triage overwrites; the log keeps both. It is also a sighting (see below), dated by `observed_at` when present and by `ts` otherwise. |
+| `triage.completed` | `open_issues` | Sets `last_triage_at`, and stamps every issue in `open_issues` into `open_seen_at` — both dated by `observed_at` when present, `ts` otherwise. Written once per `triage.py apply`, **even when it labelled nothing** — it marks that a pass happened, and `loop.triage_due` reads it to decide when to look for new issues. Without it the loop asks for triage on every tick. |
 | `batch.created` | `batch`, `issues` | Creates the batch in `planned`, both gates `pending`. Optional `branch`, `pr`. **Ignored when the id already exists** — ids are unique, so a repeat is a numbering bug, and replacing the record would discard a merge. |
 | `batch.state` | `batch`, `from`, `to` | Moves the batch. Only ever written by `ledger.transition`. `building -> building` is the resume: it records no progress, so it increments `attempts.build_resumes` instead — the only number that grows while a batch is parked mid-build. |
 | `batch.pushed` | `batch`, `sha` | **Resets both gates to `pending`** and increments `attempts.pushes`. Remembers the CI verdict it was pushed into, so the next CI result can score the push: red again the same way increments `attempts.futile_pushes`, any green resets that run to 0. |
@@ -56,6 +56,14 @@ catch. Reading the records alone left the rule with no producer (issue #58).
 
 A ledger written before this field folds fine; those passes simply record no
 sightings.
+
+A sighting is dated by **when the plan looked**, not when `apply` ran.
+`triage.py plan` stamps `observed_at` on its output, and `apply` copies it onto
+both events it writes. `plan` and `apply` are separate invocations with a
+person reading a table in between, and nothing bounds that gap: a plan built
+before a batch merged and applied after it would otherwise assert, after the
+merge, that the issue it closed was still open (issue #80). A plan file from
+before the field existed is stamped at apply time, as before.
 
 ### What a sighting produces: an escalation, not a re-batch
 

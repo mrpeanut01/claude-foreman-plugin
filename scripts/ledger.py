@@ -309,6 +309,20 @@ def read_events(root: Path) -> list[dict]:
 # --- folding ------------------------------------------------------------------
 
 
+def observed_at(event: dict) -> str | None:
+    """When a triage event actually looked at the tracker.
+
+    `ts` is when the line was appended, which for triage is when `apply` ran.
+    The plan it applied was built earlier — a file a person reads first — and
+    what it saw was true then, not now. `loop.merged_leaving_open` compares a
+    sighting against a merged batch's `progress_at`, so dating it by the apply
+    let a plan built before a merge assert, after the merge, that the issue it
+    closed was still open (issue #80). Events written before the field existed
+    fall back to `ts`, as they always did.
+    """
+    return event.get("observed_at") or event.get("ts")
+
+
 def _new_batch(event: dict) -> dict:
     return {
         "id": event.get("batch"),
@@ -367,13 +381,14 @@ def _apply(state: State, event: dict) -> None:
         # in full before anything is written: a wrong-typed field raises here,
         # and a pass that could not be recorded must not have moved the clock.
         seen = list(event.get("open_issues") or [])
-        state.last_triage_at = event.get("ts")
+        when = observed_at(event)
+        state.last_triage_at = when
         for number in seen:
-            state.open_seen_at[number] = event.get("ts")
+            state.open_seen_at[number] = when
 
     elif kind == "issue.triaged":
         state.issues[event["issue"]] = {k: v for k, v in event.items() if k != "type"}
-        state.open_seen_at[event["issue"]] = event.get("ts")
+        state.open_seen_at[event["issue"]] = observed_at(event)
 
     elif kind == "batch.created":
         # Ids are meant to be unique. A repeat means an upstream numbering
