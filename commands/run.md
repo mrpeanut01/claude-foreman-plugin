@@ -21,7 +21,7 @@ session merged something).
 | `do` | Then |
 |------|------|
 | `triage` | `/foreman:triage` |
-| `batch` | `/foreman:batch` |
+| `batch` | `/foreman:batch` — it plans from the ledger, so the `issues` listed need no triage file |
 | `build` | `/foreman:build <batch>` |
 | `open_pr` / `watch` / `merge` | `/foreman:land <batch>` |
 | `advance` | `/foreman:land <batch>` step 5: both gates are clear, so move the batch to `ready` and merge |

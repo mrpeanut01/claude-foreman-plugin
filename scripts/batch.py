@@ -7,7 +7,7 @@ slow CI. The cost of grouping is that a failure is harder to attribute — which
 why every issue gets its own commit and `split()` exists.
 
 CLI:
-    batch.py plan --triage triage.json [--ledger .foreman] [--config .foreman/config.json]
+    batch.py plan [--triage triage.json] [--ledger .foreman] [--config .foreman/config.json]
         [--profile .foreman/ci-profile.json]
     batch.py apply --plan batches.json [--ledger .foreman]
     batch.py paths --batch b-001 --base main [--head HEAD] [--ledger .foreman]
@@ -15,6 +15,10 @@ CLI:
 
 `plan` reads the ledger too, to allocate ids that continue past the ones already
 issued, so its --ledger must name the same directory `apply` will write to.
+Without --triage it plans from the ledger alone: every issue triage recorded as
+actionable that no batch yet holds. That is the set `loop.py next` names when it
+answers `batch`, and the only source that survives a new session — the triage
+file lives in /tmp.
 """
 
 from __future__ import annotations
@@ -149,6 +153,29 @@ def group_issues(records: list[dict], config: dict, taken: set[str] | None = Non
             }
         )
     return batches
+
+
+def grouped_issues(state) -> set[int]:
+    """Issues some batch already holds, in any state. Same rule as `loop._grouped_issues`."""
+    return {issue for batch in state.batches.values() for issue in batch.get("issues") or []}
+
+
+def ungrouped_records(state, records: list[dict] | None = None) -> list[dict]:
+    """The actionable issues still waiting for a batch.
+
+    From `records` (a triage plan) when given, else from the ledger's own
+    issue records. Either way an issue a batch already holds is left out:
+    triage re-records an issue whenever its `updatedAt` moves, and a second
+    batch for work already in flight or on trunk is the outcome
+    `loop._grouped_issues` exists to prevent.
+    """
+    taken = grouped_issues(state)
+    source = records if records is not None else list(state.issues.values())
+    return [
+        r
+        for r in sorted(source, key=lambda r: r.get("issue") or 0)
+        if r.get("verdict") == "actionable" and r.get("issue") not in taken
+    ]
 
 
 def estimate_savings(batches: list[dict], profile: dict) -> dict:
@@ -298,7 +325,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("plan")
-    p.add_argument("--triage", required=True, help="output of `triage.py plan`")
+    p.add_argument(
+        "--triage",
+        help="output of `triage.py plan`; without it, the ledger's actionable issues "
+        "not yet in a batch",
+    )
     p.add_argument("--ledger", default=".foreman")
     p.add_argument(
         "--config", help="foreman config (default .foreman/config.json in the repository root)"
@@ -323,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.cmd == "plan":
-        triage_out = json.loads(Path(args.triage).read_text())
+        triage_out = json.loads(Path(args.triage).read_text()) if args.triage else None
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import ledger as ledger_mod
 
@@ -351,8 +382,11 @@ def main(argv: list[str] | None = None) -> int:
             # Every issue comes out solo below, which is safe and useless;
             # without this line it is also silent.
             print(f"warning: {problem}", file=sys.stderr)
-        taken = set(ledger_mod.load(ledger_root).batches)
-        batches = group_issues(triage_out.get("triaged", []), config, taken=taken)
+        state = ledger_mod.load(ledger_root)
+        records = ungrouped_records(
+            state, triage_out.get("triaged", []) if triage_out is not None else None
+        )
+        batches = group_issues(records, config, taken=set(state.batches))
         print(
             json.dumps(
                 {"batches": batches, "savings": estimate_savings(batches, profile)}, indent=2

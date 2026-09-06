@@ -10,14 +10,16 @@ same whether the PR fixes one issue or five, so grouping compatible issues is th
 largest saving available.
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" plan \
-  --triage /tmp/foreman-triage.json --ledger .foreman
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" plan --ledger .foreman > /tmp/foreman-batches.json
 ```
 
-`plan` reads the ledger to allocate ids that continue past the ones already
-issued. Point `--ledger` at the same directory `apply` writes to, or ids restart
-at `b-001` and collide with batches that already exist — from any directory but
-the repo root, the default is not that directory.
+`plan` reads the ledger twice over: for the actionable issues no batch yet
+holds, which is what it groups, and for the ids already issued, so new ids
+continue past them. Point `--ledger` at the same directory `apply` writes to, or
+ids restart at `b-001` and collide with batches that already exist — from any
+directory but the repo root, the default is not that directory. `--triage
+/tmp/foreman-triage.json` groups a triage file's records instead; an issue a
+batch already holds is left out from either source.
 
 ## The arithmetic
 

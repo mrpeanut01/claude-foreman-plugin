@@ -560,3 +560,61 @@ def test_apply_records_every_batch_into_a_ledger_that_did_not_exist_yet(tmp_path
     state = ledger.load(fresh)
     assert state.batches["b-001"]["issues"] == [1, 2]
     assert state.batches["b-002"]["state"] == "planned"
+
+
+# --- planning from the ledger, so the batch action survives a new session -----
+
+
+def _triaged_into(root, *numbers, paths=("same.py",)):
+    for n in numbers:
+        ledger.append(
+            root,
+            "issue.triaged",
+            issue=n,
+            verdict="actionable",
+            size="small",
+            risk="low",
+            paths=list(paths),
+            title=f"issue {n}",
+        )
+
+
+def test_plan_without_a_triage_file_groups_the_ledgers_ungrouped_actionable_issues(
+    tmp_path, capsys, monkeypatch
+):
+    """`loop.py next` answers `batch` with issue numbers no recipe consumed: the
+    triage file lives in /tmp, is gone after a crash, and re-triage skips
+    every issue it already recorded, so the plan came back empty forever."""
+    monkeypatch.chdir(tmp_path)
+    root = ledger.init(tmp_path)
+    _triaged_into(root, 11, 12, 13)
+    ledger.append(root, "batch.created", batch="b-001", issues=[11])
+    rc = batch.main(["plan", "--ledger", str(root)])
+    assert rc == 0
+    planned = json.loads(capsys.readouterr().out)["batches"]
+    assert [b["issues"] for b in planned] == [[12], [13]]
+    assert [b["id"] for b in planned] == ["b-002", "b-003"]
+
+
+def test_a_triage_file_is_still_filtered_against_what_batches_already_hold(
+    tmp_path, capsys, monkeypatch
+):
+    """Triage re-records an issue whenever its updatedAt moves; a second batch
+    for work already in flight is the loop's runaway case."""
+    monkeypatch.chdir(tmp_path)
+    root = ledger.init(tmp_path)
+    ledger.append(root, "batch.created", batch="b-001", issues=[11])
+    triage_file = tmp_path / "triage.json"
+    triage_file.write_text(json.dumps({"triaged": _actionable(11, 12)}))
+    batch.main(["plan", "--triage", str(triage_file), "--ledger", str(root)])
+    planned = json.loads(capsys.readouterr().out)["batches"]
+    assert [b["issues"] for b in planned] == [[12]]
+
+
+def test_a_ledger_holding_no_ungrouped_issue_plans_nothing(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    root = ledger.init(tmp_path)
+    _triaged_into(root, 11)
+    ledger.append(root, "batch.created", batch="b-001", issues=[11])
+    batch.main(["plan", "--ledger", str(root)])
+    assert json.loads(capsys.readouterr().out)["batches"] == []
