@@ -8,7 +8,7 @@ from one that stalls on its first surprise.
 
 | Trigger | Why not retry |
 |---------|---------------|
-| `cap_breached` returns a counter | Three failed pushes means the diagnosis is wrong, not the attempt count. |
+| `cap_breached` returns a counter | A runaway ceiling was reached. These are loose (`pushes: 8`, `review_rounds: 5`) because they count events elapsed, not progress — see issue #17. |
 | Same test fails identically twice | A second identical failure is evidence, not noise. |
 | Diff touches `protected_paths` | Auth, migrations, payments, and CI config are never auto-merged, however green. |
 | The same finding survives a review round | Builder and reviewer are trading one objection. Rounds elapsed is not the test — see `review-gate.md`. |

@@ -29,7 +29,18 @@ from ci_profile import attribute  # noqa: E402
 from globs import matches_any  # noqa: E402
 
 PASSED = {"SUCCESS", "PASS", "NEUTRAL", "SKIPPED"}
-FAILED = {"FAILURE", "FAIL", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+# A cancelled check is not a pass. Leaving it in neither set parks it in
+# actionable_pending forever, which is a hang.
+FAILED = {
+    "FAILURE",
+    "FAIL",
+    "ERROR",
+    "TIMED_OUT",
+    "ACTION_REQUIRED",
+    "STARTUP_FAILURE",
+    "CANCELLED",
+    "CANCELED",
+}
 
 # A pending entry matching any of these needs a person, so the loop must not
 # sit waiting on it.
@@ -86,26 +97,52 @@ _NOISE = {
 # --- reading the check list ---------------------------------------------------
 
 
-def _can_report(spec: dict) -> bool:
-    """Whether this job is expected to produce a check on a pull request.
+PR_TRIGGERS = ("pull_request", "pull_request_target")
+FILTER_KEYS = ("paths", "paths_ignore", "branches", "tags")
 
-    Requiring a job that cannot report is worse than the early-merge bug the
-    requirement was added to prevent: the gate never clears, and a loop that
-    neither merges nor escalates is a silent hang.
-    """
+
+def _unconditional(cfg: dict) -> bool:
+    """A trigger with no filter of any kind will fire on every pull request."""
+    return not any(cfg.get(key) for key in FILTER_KEYS)
+
+
+def _legacy_can_report(spec: dict) -> bool:
+    """Profiles written before per-event data. Filters are known only in union."""
     if not (PR_EVENTS & set(spec.get("triggers") or [])):
-        return False  # schedule, workflow_dispatch, release...
-    # Filters belong to the event that declared them; a push-only `paths:` says
-    # nothing about pull requests. Fall back to the union only when the profile
-    # predates pr_path_filters.
+        return False
     conditional = spec.get("pr_path_filters")
     if conditional is None:
         conditional = spec.get("path_filters")
-    if conditional:
-        return False  # conditional on the diff; counts only if it actually reports
+    return not conditional
+
+
+def can_report_on_pr(spec: dict) -> bool:
+    """Whether this job will produce a check on every pull request.
+
+    Requirable means *unconditional*: some trigger fires on a PR with no filter
+    attached. Anything narrower — paths, paths-ignore, branches, tags — is
+    conditional and counts only once it actually reports.
+
+    Being conservative here is safe in both directions, which is the point.
+    Excluding a job that would have reported cannot cause an early merge,
+    because a job that reports lands in `actionable_pending` while it runs and
+    in `failed` if it fails. Including a job that can never report is what hangs
+    the gate forever.
+    """
     if "${{" in str(spec.get("display") or ""):
         return False  # a templated name cannot be attributed back to this job
-    return True
+    events = spec.get("events")
+    if events is None:
+        return _legacy_can_report(spec)
+    for name in (*PR_TRIGGERS, "push"):
+        cfg = events.get(name)
+        if isinstance(cfg, dict) and _unconditional(cfg):
+            return True
+    return False
+
+
+# Retained for callers that predate the rename.
+_can_report = can_report_on_pr
 
 
 def _is_advisory(name: str, profile: dict) -> bool:
@@ -162,24 +199,26 @@ def ci_gate(checks: list[dict], profile: dict) -> str:
     required = list(profile.get("required_checks") or [])
     if not required:
         if not profile.get("protection_known", False):
-            # No protection to read, so nothing is known to be optional. Green
-            # requires every job the workflows declare to have actually passed —
-            # a partially reported list is not a complete one.
+            # Nothing is known to be optional, so decide from what the workflows
+            # declare plus what has actually reported.
             declared = profile.get("jobs") or {}
-            if not declared:
-                return "full_green" if not summary["actionable_pending"] else "pending"
             shapes = [
                 {"name": name, "display": spec.get("display")} for name, spec in declared.items()
             ]
-            requirable = {n: s for n, s in declared.items() if _can_report(s)}
-            if not requirable:
-                return "full_green" if not summary["actionable_pending"] else "pending"
+            requirable = {n: s for n, s in declared.items() if can_report_on_pr(s)}
             covered = {attribute(name, shapes) for name in summary["passed"]}
-            if not all(n in covered for n in requirable):
+
+            if requirable:
+                if not all(n in covered for n in requirable):
+                    return "pending"  # a job that always runs has not reported yet
+            elif not checks:
+                # No unconditional job to wait for and nothing has reported.
+                # That is ignorance, not success.
                 return "pending"
-            # A job excluded from `requirable` counts once it actually reports.
-            # Ignoring that lets a running required check slip past the gate.
+
+            # Anything that did report counts, requirable or not.
             return "full_green" if not summary["actionable_pending"] else "pending"
+
         # Protection says nothing is required, so nothing can block.
         return "full_green" if not summary["actionable_pending"] else "pending"
 

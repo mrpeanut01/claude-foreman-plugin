@@ -91,6 +91,16 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
         triggers = sorted(str(k) for k in on)
         filters = _path_filters(on)
         pr_filters = _path_filters(on, {"pull_request", "pull_request_target"})
+        events = {
+            str(event): {
+                "paths": list((cfg or {}).get("paths") or []),
+                "paths_ignore": list((cfg or {}).get("paths-ignore") or []),
+                "branches": list((cfg or {}).get("branches") or []),
+                "tags": list((cfg or {}).get("tags") or []),
+            }
+            for event, cfg in on.items()
+            if isinstance(cfg, dict) or cfg is None
+        }
         for name, spec in (doc.get("jobs") or {}).items():
             spec = spec if isinstance(spec, dict) else {}
             needs = spec.get("needs", [])
@@ -104,6 +114,7 @@ def parse_workflows(workflow_dir: Path, report_problems: bool = False):
                     "triggers": triggers,
                     "path_filters": filters,
                     "pr_path_filters": pr_filters,
+                    "events": events,
                 }
             )
     return (jobs, problems) if report_problems else jobs
@@ -288,6 +299,20 @@ def build_profile(
     flakes = flake_rates(attributed)
     required = set(required_checks(protection))
 
+    # A job name reused across workflows is one check name, so merge rather than
+    # overwrite: a release-only `test` job must not erase the PR `test` job.
+    by_name: dict[str, dict] = {}
+    for job in jobs:
+        seen = by_name.get(job["name"])
+        if seen is None:
+            by_name[job["name"]] = dict(job)
+            continue
+        seen["triggers"] = sorted(set(seen["triggers"]) | set(job["triggers"]))
+        seen["events"] = {**job.get("events", {}), **seen.get("events", {})}
+        seen["path_filters"] = sorted(set(seen["path_filters"]) & set(job["path_filters"]))
+        seen["pr_path_filters"] = sorted(set(seen["pr_path_filters"]) & set(job["pr_path_filters"]))
+    jobs = list(by_name.values())
+
     merged, unmeasured = {}, []
     for job in jobs:
         name = job["name"]
@@ -304,6 +329,7 @@ def build_profile(
                     "triggers",
                     "path_filters",
                     "pr_path_filters",
+                    "events",
                 )
             },
             "display": job.get("display"),

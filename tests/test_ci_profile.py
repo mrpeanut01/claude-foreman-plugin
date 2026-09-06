@@ -388,3 +388,59 @@ def test_build_profile_carries_pr_path_filters_through(tmp_path):
     profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
     assert profile["jobs"]["lint"]["pr_path_filters"] == []
     assert profile["jobs"]["lint"]["path_filters"] == ["src/**"]
+
+
+# --- issues #32/#33: per-event data, and job names that collide -------------
+
+
+def test_each_trigger_records_its_own_filters(tmp_path):
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          push:
+            branches: [main]
+            paths: ['src/**']
+          pull_request:
+            paths-ignore: ['**.md']
+        jobs:
+          lint:
+            steps: [{run: ruff check}]
+    """)
+    )
+    events = {j["name"]: j["events"] for j in ci_profile.parse_workflows(d)}["lint"]
+    assert events["push"]["branches"] == ["main"]
+    assert events["push"]["paths"] == ["src/**"]
+    assert events["pull_request"]["paths_ignore"] == ["**.md"]
+    assert events["pull_request"]["paths"] == []
+
+
+def test_a_job_name_reused_in_another_workflow_does_not_overwrite_the_first(tmp_path):
+    """Otherwise a release-only `test` job makes the real PR `test` job vanish."""
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on: {pull_request: }
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    (d / "release.yml").write_text(
+        textwrap.dedent("""
+        name: Release
+        on: {workflow_dispatch: }
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
+    events = profile["jobs"]["test"]["events"]
+    assert "pull_request" in events, "the PR trigger must survive the collision"
+    assert "workflow_dispatch" in events
+    assert set(profile["jobs"]["test"]["triggers"]) == {"pull_request", "workflow_dispatch"}
