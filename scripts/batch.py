@@ -7,10 +7,14 @@ slow CI. The cost of grouping is that a failure is harder to attribute — which
 why every issue gets its own commit and `split()` exists.
 
 CLI:
-    batch.py plan --triage triage.json [--config .foreman/config.json]
+    batch.py plan --triage triage.json [--ledger .foreman] [--config .foreman/config.json]
+        [--profile .foreman/ci-profile.json]
     batch.py apply --plan batches.json [--ledger .foreman]
     batch.py paths --batch b-001 --base main [--head HEAD] [--ledger .foreman]
         [--repo-dir .] [--apply]
+
+`plan` reads the ledger too, to allocate ids that continue past the ones already
+issued, so its --ledger must name the same directory `apply` will write to.
 """
 
 from __future__ import annotations
@@ -220,7 +224,7 @@ def observed_paths(
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("plan")
@@ -238,8 +242,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ledger", default=".foreman")
     p.add_argument("--repo-dir", default=".", help="the working tree holding the branch")
     p.add_argument("--apply", action="store_true", help="record the recomputed paths in the ledger")
+    return parser
 
-    args = parser.parse_args(argv)
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if args.cmd == "plan":
         triage_out = json.loads(Path(args.triage).read_text())
@@ -248,7 +255,19 @@ def main(argv: list[str] | None = None) -> int:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import ledger as ledger_mod
 
-        taken = set(ledger_mod.load(Path(args.ledger)).batches)
+        ledger_root = Path(args.ledger)
+        if not ledger_root.exists():
+            # Without the ledger the taken set is empty and ids restart at b-001,
+            # colliding with batches the ledger already holds — and the fold keeps
+            # the first record of an id, so apply's collision is silently dropped
+            # while still being printed under created. Running from a directory
+            # other than the repo root is the usual cause, and it is invisible
+            # unless it is said out loud.
+            print(
+                f"warning: no ledger at {ledger_root}; batch ids will restart at b-001",
+                file=sys.stderr,
+            )
+        taken = set(ledger_mod.load(ledger_root).batches)
         batches = group_issues(triage_out.get("triaged", []), config, taken=taken)
         print(
             json.dumps(

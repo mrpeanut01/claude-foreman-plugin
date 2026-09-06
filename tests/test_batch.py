@@ -1,6 +1,8 @@
 """Batching: group issues so one slow suite run covers several fixes."""
 
+import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -307,3 +309,52 @@ def test_recomputing_paths_for_a_batch_the_ledger_does_not_know_is_refused(repo,
         ]
     )
     assert rc == 1, "a batch.meta event for an unknown batch is silently dropped by the fold"
+
+
+# --- issue #67: the docstring is the CLI's documentation, so it must be true --
+
+
+def _documented_flags(subcommand: str) -> set[str]:
+    """The flags the module docstring shows for one subcommand, continuations included."""
+    lines, collecting = [], False
+    for line in batch.__doc__.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("batch.py "):
+            collecting = stripped.startswith(f"batch.py {subcommand} ")
+        elif not stripped:
+            collecting = False
+        if collecting:
+            lines.append(stripped)
+    assert lines, f"the docstring documents no {subcommand!r} subcommand at all"
+    return set(re.findall(r"--[a-z-]+", " ".join(lines)))
+
+
+def _accepted_flags(subcommand: str) -> set[str]:
+    """The flags argparse really accepts. argparse exposes subparsers privately only."""
+    parser = batch.build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    return {
+        option
+        for action in sub.choices[subcommand]._actions
+        for option in action.option_strings
+        if option.startswith("--") and option != "--help"
+    }
+
+
+@pytest.mark.parametrize("subcommand", ["plan", "apply", "paths"])
+def test_the_docstring_documents_every_flag_a_subcommand_accepts(subcommand):
+    """plan reads the ledger to allocate ids. A caller following a docstring that
+    omitted --ledger got an empty taken set and ids restarting at b-001."""
+    assert _accepted_flags(subcommand) <= _documented_flags(subcommand)
+
+
+def test_planning_against_a_ledger_that_is_not_there_says_so(tmp_path, capsys):
+    """Silence looks identical to a fresh repo, and the ids collide either way."""
+    triage_file = tmp_path / "triage.json"
+    triage_file.write_text(json.dumps({"triaged": _actionable(11)}))
+    missing = tmp_path / "elsewhere" / ".foreman"
+    rc = batch.main(["plan", "--triage", str(triage_file), "--ledger", str(missing)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert str(missing) in captured.err
+    assert json.loads(captured.out)["batches"][0]["id"] == "b-001"
