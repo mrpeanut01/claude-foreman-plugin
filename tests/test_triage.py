@@ -901,6 +901,31 @@ def test_triage_says_so_when_it_is_scoring_risk_with_no_protected_paths(
     assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in warnings
 
 
+def test_a_prior_verdict_is_still_found_when_triage_runs_from_a_worktree(
+    worktree, monkeypatch, capsys
+):
+    """Issue #73. `ledger.load` anchors the path, but an `.exists()` test in front
+    of it still asked about the cwd-relative one, which from a linked worktree is
+    not there. So `prior` read empty, `should_skip` never skipped, and every open
+    issue was re-triaged and relabelled on every pass — the exact GitHub writes
+    the skip rule exists to avoid."""
+    checkout, linked = worktree
+    import ledger
+
+    ledger.append(
+        checkout / ledger.LEDGER_DIR,
+        "issue.triaged",
+        issue=7,
+        verdict="actionable",
+        issue_updated_at=_workflow_issue()["updatedAt"],
+    )
+    monkeypatch.chdir(linked)
+
+    plan, _ = _plan_from(monkeypatch, capsys)
+    assert plan["skipped"] == [7]
+    assert plan["triaged"] == []
+
+
 def test_an_explicit_config_path_is_still_obeyed(worktree, monkeypatch, tmp_path, capsys):
     checkout, linked = worktree
     elsewhere = tmp_path / "elsewhere.json"

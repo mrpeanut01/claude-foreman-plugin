@@ -576,7 +576,13 @@ def main(argv: list[str] | None = None) -> int:
         # auth and workflow change as medium and lets it into a batch.
         config = ledger_mod.load_config(args.config)
 
-        prior = ledger_mod.load(Path(args.ledger)).issues if Path(args.ledger).exists() else {}
+        # No `.exists()` guard in front of this. `ledger.load` anchors a relative
+        # path to the repository and reads a missing file as no events, so the
+        # guard could only ever disagree with it — and from a build worktree it
+        # did: `.foreman` is not there relative to the cwd, so `prior` read empty,
+        # nothing was ever skipped, and every open issue was re-triaged and its
+        # labels rewritten on every pass (issue #73).
+        prior = ledger_mod.load(Path(args.ledger)).issues
         issues = fetch_issues(args.repo, args.limit)
         available = fetch_labels(args.repo)
         records, skipped = [], []
