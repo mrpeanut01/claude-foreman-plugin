@@ -29,12 +29,27 @@ It is not an estimate, and nothing schedules on it.
 
 | Risk | Batched? | Auto-merged? | Signals |
 |------|----------|--------------|---------|
-| `low` | yes | yes | docs, tests, comments, formatting, renames |
+| `low` | yes | yes | docs, tests, comments, formatting, renames — **in the title** |
 | `medium` | yes | yes | anything not otherwise classified |
-| `high` | **never** | **never** | protected paths; auth (any inflection, en-GB included), token, password, session, credential, permission, migration, schema, payment, billing, secret, csrf, xss, injection, encryption, privilege; or a `security`/`critical`/`data-loss`/`p0` label |
+| `high` | **never** | **never** | protected paths; a `security`/`critical`/`data-loss`/`p0` label; any security word in the title; an unambiguous one in the body; two different collision-prone ones in the body |
 
 `medium` is the default because most issues are ordinary, and defaulting to
 `high` would mean nothing ever batches.
+
+The security vocabulary is two lists. `STRONG_RISK_HINTS` are words that mean
+one thing — authentication and authorisation (any inflection, en-GB included),
+oauth, password, credential, migration, payment, billing, secret, csrf, xss,
+injection, encryption, privilege, "logged in" — and one anywhere scores high.
+`COLLIDING_RISK_HINTS` — bare auth, token, session, permission, schema — are
+the subject of an auth issue and, just as often, of a tokeniser, an agent
+session, an API call or a JSON file. In the title they score high. In the body
+one on its own is a mention and scores nothing, though `risk_reason` reports
+it; two *different* ones together score high, because an issue about the
+dangerous thing keeps talking about it and a tokeniser issue never says
+`session`.
+
+The low-risk words are read from the title only. A body that mentions a test
+says nothing about whether the change is safe.
 
 ## Extending the vocabularies
 

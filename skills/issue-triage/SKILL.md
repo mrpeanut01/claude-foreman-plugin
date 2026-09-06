@@ -68,13 +68,25 @@ path, a security-ish keyword, or a `security`/`critical`/`data-loss` label.
 Rounding risk **up** is cheap: the issue still gets fixed, just in a solo PR.
 Rounding it down puts an auth change into a five-issue batch that merges itself.
 
-So it over-scores on purpose, and `risk_reason` on every record says what it
-saw: `"tokens" in the body` on an issue about a tokeniser, `protected path
-src/auth/session.py`, `the security label`. Keyword collisions are expected —
-the body is searched because a real auth bug is often titled neutrally — and
-reading one and downgrading it is part of the job, not a sign the vocabulary is
-wrong. Read the issue before you downgrade; a hit in the *title* almost never
-is one.
+So it rounds up where it can, and `risk_reason` on every record says what it
+saw: `protected path src/auth/session.py`, `the security label`, `"token" in
+the title`.
+
+The title is authoritative both ways. The body is read more carefully, because
+that is where the collisions live: on this repo's own queue eleven of twelve
+`high` scores came from a single word in the body — `tokens` about a
+tokeniser, `sessions` about agent sessions, `schema` about JSON — and every one
+was a collision. An unambiguous word in the body (`password`, `csrf`,
+`migration`) scores high on its own. A collision-prone one (`token`, `session`,
+`schema`, `permission`, bare `auth`) needs a second, different one beside it,
+because an issue *about* auth keeps talking about it and a tokeniser issue
+never says `session`. One on its own is a mention, and the record says so:
+`"tokens" in the body only — one such word is a mention, not a subject`.
+That is the line to read before overriding in either direction.
+
+The low-risk words (`docs`, `test`, `typo`) are read from the title only.
+Nothing about a body that mentions a test makes a change safe, and fifteen
+issues on this repo's queue were `low` for exactly that.
 
 See [modules/taxonomy.md](modules/taxonomy.md) for the size and risk vocabularies
 and how to extend them.

@@ -81,10 +81,11 @@ can see it touches something dangerous, override it in the plan before applying 
 and if the same mistake recurs, the fix belongs in `HIGH_RISK_HINTS`, not in a
 one-off correction.
 
-The commonest disagreement runs the other way: `risk_reason` reads
-`"tokens" in the body` on an issue about a tokeniser. Risk matches the title and
-the body, and no pattern can tell an issue *about* auth from one that mentions
-it — a real auth bug often has a neutral title and a single mention in the body,
-which is why the score rounds up. Downgrading a mention you have read is a
-correct override, not a workaround; it just has to be a reading, not a guess.
-Nothing about the vocabulary needs changing for it.
+The other direction is the one to read carefully. A single collision-prone
+word in the body — `token`, `session`, `schema`, `permission`, bare `auth` —
+no longer scores on its own; the record reads `"tokens" in the body only — one
+such word is a mention, not a subject`, and the score is `medium`. That is the
+score to check against the issue: an auth bug with a neutral title and one
+mention in the body is exactly what it under-scores, and upgrading it after
+reading is a correct override. Two different such words, or one unambiguous
+one (`password`, `migration`, `csrf`), still score high without help.

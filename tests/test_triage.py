@@ -578,16 +578,20 @@ def test_needs_info_is_a_verdict_a_record_can_actually_carry():
     assert triage.queueable([record]) == []
 
 
-# --- issue #5 (reopened): a risk score must say what set it -------------------
-# The substring half is fixed. The half that remains is a keyword collision:
-# risk reads title *and* body, so an issue that merely discusses a dangerous
-# word scores high. That cannot be scored away — the same word in the same
-# place is the only evidence a real auth bug with a neutral title leaves, and
-# rounding down puts it in a batch that merges itself. What it can do is stop
-# being silent, so the override the command documents can be made on evidence.
+# --- issue #5 (reopened): the body is where the collisions live ----------------
+# The substring half was fixed first. The half that remained was a keyword
+# collision: risk read title and body as one text, so an issue that merely
+# discussed a dangerous word scored high, and one that mentioned a test scored
+# low. On this repo's own queue eleven of twelve `high` scores were one such
+# word in the body, every one a collision, and fifteen issues were `low` for
+# mentioning a test. The title stays authoritative both ways; the body needs
+# either an unambiguous word or two different collision-prone ones; and the
+# low-risk words are not read from the body at all. Every score still says
+# what it saw, including the mention that did not score.
 
 
-def test_a_high_risk_score_says_which_word_set_it_and_where():
+def test_one_security_word_in_the_body_is_a_mention_and_says_so():
+    """The reopened case: #3 discussed `_tokens` and scored high for it."""
     record = triage.triage_issue(
         issue(
             number=3,
@@ -599,9 +603,46 @@ def test_a_high_risk_score_says_which_word_set_it_and_where():
         protected=[],
         available_labels=AVAILABLE,
     )
-    assert record["risk"] == "high"
+    assert record["risk"] == "medium"
     assert "token" in record["risk_reason"]
-    assert "body" in record["risk_reason"], "a reviewer needs to know it was only mentioned"
+    assert "body" in record["risk_reason"], "a reviewer needs to know it was seen and not scored"
+
+
+def test_two_different_security_words_in_the_body_are_a_subject():
+    """A tokeniser issue says `tokens`; it does not also say `session`."""
+    got = triage._scored(
+        issue(
+            title="Login page 500s", body="the session cookie is not renewed when the token rotates"
+        ),
+        [],
+    )
+    assert got == ("high", '"token" and "session" in the body')
+
+
+def test_the_same_security_word_twice_in_the_body_is_still_one_mention():
+    got = triage.risk_level(issue(title="Lexer is slow", body="tokens, tokens, more tokens"), [])
+    assert got == "medium"
+
+
+@pytest.mark.parametrize("body", ["reset password mail is never sent", "needs a migration", "csrf"])
+def test_an_unambiguous_security_word_in_the_body_scores_high_on_its_own(body):
+    assert triage.risk_level(issue(title="Form does nothing", body=body), []) == "high"
+
+
+def test_a_security_word_in_the_title_scores_high_whatever_the_body_says():
+    assert triage.risk_level(issue(title="Token refresh fails", body="Details."), []) == "high"
+
+
+def test_mentioning_a_test_in_the_body_does_not_make_a_change_safe():
+    """Fifteen of this repo's issues were `low` for a body that said "test"."""
+    got = triage._scored(
+        issue(title="Required flag is read off the wrong key", body="No test asserts it."), []
+    )
+    assert got[0] == "medium"
+
+
+def test_a_low_risk_word_in_the_title_still_scores_low():
+    assert triage.risk_level(issue(title="Fix typo in the docs", body="s/teh/the/"), []) == "low"
 
 
 def test_a_risk_score_from_the_title_says_so():

@@ -73,24 +73,19 @@ LOW_RISK_HINTS = (
     r"renames?",
     r"changelogs?",
 )
-HIGH_RISK_HINTS = (
-    # Bare `auth` is safe: the trailing \b already excludes Author and authoring.
+# Words that mean one thing. Nobody writes `password`, `csrf` or `billing`
+# about anything but the dangerous subject, so one of these anywhere in an
+# issue — title or body — is the subject.
+STRONG_RISK_HINTS = (
+    r"oauth\d*",
     # The leading \w* catches Reauthentication and Unauthorised. en-GB spellings
     # matter because this project writes en-GB, so its reporters will too.
-    r"auth",
-    r"authn",
-    r"authz",
-    r"oauth\d*",
     r"\w*authentic\w*",
     r"\w*authoriz\w*",
     r"\w*authoris\w*",
-    r"tokens?",
     r"password\w*",
-    r"sessions?",
     r"credentials?",
-    r"permissions?",
     r"migrat\w*",
-    r"schemas?",
     r"payments?",
     r"billing",
     r"secrets?",
@@ -101,6 +96,24 @@ HIGH_RISK_HINTS = (
     r"privileges?",
     r"logged in",
 )
+# Words that are the subject of an auth issue and, just as often, of nothing of
+# the kind: a tokeniser has tokens, an agent has sessions, a JSON file has a
+# schema, an API call needs permissions. In the title they are the subject. In
+# the body, one on its own is a mention — on this repo's own queue eleven of
+# twelve `high` scores came from exactly one such word in the body, and every
+# one was a collision (issue #5). Two different ones in the body is an issue
+# that keeps talking about the dangerous thing, and that is a subject again.
+COLLIDING_RISK_HINTS = (
+    # Bare `auth` is safe: the trailing \b already excludes Author and authoring.
+    r"auth",
+    r"authn",
+    r"authz",
+    r"tokens?",
+    r"sessions?",
+    r"permissions?",
+    r"schemas?",
+)
+HIGH_RISK_HINTS = STRONG_RISK_HINTS + COLLIDING_RISK_HINTS
 HIGH_RISK_LABELS = ("security", "critical", "data-loss", "p0")
 
 # Evidence that a reporter has already given someone enough to work with.
@@ -274,17 +287,34 @@ def classify_size(issue: dict) -> str:
 # --- risk ---------------------------------------------------------------------
 
 
+def _each_hit(text: str, needles: tuple) -> list[str]:
+    """The first match of every hint pattern that matches at all, in list order."""
+    return [
+        hit.group(0)
+        for hit in (_hint_matcher((needle,)).search(text or "") for needle in needles)
+        if hit
+    ]
+
+
 def _scored(issue: dict, protected: list[str]) -> tuple[str, str]:
     """Risk, and the evidence for it.
 
-    Hints are read from the title *and* the body, which means a keyword
-    collision: an issue that only discusses a dangerous word scores high. That
-    cannot be scored away. A real auth bug often has a neutral title and one
-    mention in the body, so the same signal in the same place is all there is
-    to go on, and rounding down puts an auth change into a batch that merges
-    itself. So the score rounds up and says what it saw instead, because an
-    override the reviewer can make on evidence is the thing that was missing —
-    see "When you disagree with the score" in commands/triage.md.
+    The title is authoritative in both directions: a security word there is the
+    subject, and a `typo` or `docs` there is what the issue is. The body is
+    where the collisions live. Read as one text, a body that merely *discussed*
+    a dangerous word scored high, and a body that mentioned a test scored low
+    (issue #5) — and on this repo's own queue that was nearly every issue, in
+    both directions. So the body is read differently: an unambiguous word
+    (`password`, `csrf`, `migration`) scores high on its own; a collision-prone
+    one (`token`, `session`, `schema`, `permission`, bare `auth`) needs a second,
+    different one beside it before the issue counts as being *about* the
+    dangerous thing; and the low-risk words are not read from the body at all,
+    because nothing about mentioning a test makes a change safe.
+
+    Still rounds up where it can: two different collision-prone words is not a
+    high bar, and `risk_reason` says what was seen either way, including a
+    single body mention that did not score — the override in commands/triage.md
+    is made on that evidence.
     """
     labelled = sorted(set(issue.get("labels") or []) & set(HIGH_RISK_LABELS))
     if labelled:
@@ -294,14 +324,26 @@ def _scored(issue: dict, protected: list[str]) -> tuple[str, str]:
     for path in _paths_in(text):
         if any(m.match(path) for m in matchers):
             return "high", f"protected path {path}"
-    # Title and body are searched separately only to report which one matched;
-    # the verdict is the same either way.
-    parts = (("title", issue.get("title") or ""), ("body", issue.get("body") or ""))
-    for level, hints in (("high", HIGH_RISK_HINTS), ("low", LOW_RISK_HINTS)):
-        for where, part in parts:
-            hit = _hint_matcher(tuple(hints)).search(part)
-            if hit:
-                return level, f'"{hit.group(0)}" in the {where}'
+
+    title, body = issue.get("title") or "", issue.get("body") or ""
+    hit = _hint_matcher(HIGH_RISK_HINTS).search(title)
+    if hit:
+        return "high", f'"{hit.group(0)}" in the title'
+    hit = _hint_matcher(STRONG_RISK_HINTS).search(body)
+    if hit:
+        return "high", f'"{hit.group(0)}" in the body'
+    colliding = _each_hit(body, COLLIDING_RISK_HINTS)
+    if len(colliding) >= 2:
+        return "high", f'"{colliding[0]}" and "{colliding[1]}" in the body'
+    hit = _hint_matcher(LOW_RISK_HINTS).search(title)
+    if hit:
+        return "low", f'"{hit.group(0)}" in the title'
+    if colliding:
+        return "medium", (
+            f'"{colliding[0]}" in the body only — one such word is a mention, not a '
+            "subject; a second security word beside it, or one in the title, would "
+            "score high"
+        )
     return "medium", "no risk or safety signal in the text"
 
 
