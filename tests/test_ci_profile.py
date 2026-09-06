@@ -566,3 +566,79 @@ def test_a_positive_class_branch_filter_makes_the_job_requirable(tmp_path):
     spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
     assert land.can_report_on_pr(spec, "v1.x") is True
     assert land.can_report_on_pr(spec, "v3.x") is False
+
+
+# --- issue #50: the hyphenated ignore keys ------------------------------------
+#
+# `branches-ignore` and `tags-ignore` are the only filters whose YAML spelling
+# differs from the profile field they land in, so they are the only ones a
+# copy-paste regression to the underscore spelling would silently empty. An
+# empty ignore list reads as "no filter", which makes an unrunnable job
+# requirable and hangs the gate — so assert the spelling through the parser
+# rather than hand-building the dict the parser is supposed to produce.
+
+
+def test_parse_workflows_reads_the_hyphenated_ignore_keys(tmp_path):
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          pull_request:
+            branches-ignore: ['release/**']
+          push:
+            tags-ignore: ['v*']
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    events = {j["name"]: j["events"] for j in ci_profile.parse_workflows(d)}["test"]
+    assert events["pull_request"]["branches_ignore"] == ["release/**"]
+    assert events["push"]["tags_ignore"] == ["v*"]
+
+
+def test_a_branches_ignore_on_the_base_keeps_the_job_out_of_the_gate(tmp_path):
+    """The consequence of losing that key: a job GitHub never runs on this PR
+    would be waited for until the staleness timer escalated the batch."""
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          pull_request:
+            branches-ignore: [main]
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "main") is False
+    assert land.can_report_on_pr(spec, "develop") is True
+
+
+def test_a_tags_ignore_push_trigger_keeps_the_job_out_of_the_gate(tmp_path):
+    """A push filtered by tags only never fires on a branch push, so it can
+    never report on a pull request."""
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          push:
+            tags-ignore: ['v*']
+        jobs:
+          test:
+            steps: [{run: pytest}]
+    """)
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "main") is False
