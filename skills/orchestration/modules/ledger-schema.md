@@ -3,6 +3,15 @@
 `.foreman/events.jsonl` — one JSON object per line, append-only. Current state is
 a fold over the file (`ledger.fold`). Never rewrite a line; correct by appending.
 
+## Where it lives
+
+One ledger per repository, in the checkout — **not** in whatever directory you
+happen to be standing in. A build runs from `../foreman-<batch>`, so `ledger.py`
+anchors a relative `--ledger` to the repository root (the main checkout, even
+from a linked worktree) before it reads or writes. An absolute path is obeyed
+as given. Two ledgers is the worst outcome available here: the push that resets
+`review_gate` lands in one file while the merge decision reads the other.
+
 ## Event types
 
 | `type` | Required fields | Effect on folded state |

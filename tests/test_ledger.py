@@ -1,5 +1,6 @@
 """Ledger: an append-only event log folded into current state."""
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -330,3 +331,75 @@ def test_re_entering_building_is_allowed_so_an_interrupted_build_can_resume(root
     batch = ledger.fold(ledger.read_events(root)).batches["b-001"]
     assert batch["state"] == "building"
     assert batch["progress_at"] == before, "restarting is not progress"
+
+
+# --- issue #64: a ledger path must not follow the caller around --------------
+
+
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", "-c", "user.email=f@example.com", "-c", "user.name=foreman", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """A repo plus the build worktree `commands/build.md` prescribes.
+
+    Returns (checkout, worktree). The whole build and push happens with the cwd
+    inside the worktree, which is where the second ledger used to appear.
+    """
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    _git(checkout, "init", "-q", "-b", "main")
+    _git(checkout, "commit", "-q", "--allow-empty", "-m", "root")
+    linked = tmp_path / "foreman-b-002"
+    _git(checkout, "worktree", "add", "-q", str(linked), "-b", "foreman/b-002")
+    return checkout, linked
+
+
+def test_a_write_from_a_build_worktree_lands_in_the_real_ledger(worktree, monkeypatch):
+    checkout, linked = worktree
+    ledger.init(checkout)
+    monkeypatch.chdir(linked)
+    ledger.append(Path(ledger.LEDGER_DIR), "batch.pushed", batch="b-002", sha="abc123")
+    assert not (linked / ledger.LEDGER_DIR).exists(), "no second ledger in the worktree"
+    events = ledger.read_events(checkout / ledger.LEDGER_DIR)
+    assert [e["type"] for e in events] == ["batch.pushed"]
+
+
+def test_a_read_from_a_build_worktree_sees_the_real_ledger(worktree, monkeypatch):
+    checkout, linked = worktree
+    root = ledger.init(checkout)
+    ledger.append(root, "batch.created", batch="b-002", issues=[1])
+    monkeypatch.chdir(linked)
+    assert "b-002" in ledger.load(Path(ledger.LEDGER_DIR)).batches
+
+
+def test_init_from_a_build_worktree_does_not_create_a_second_ledger(worktree, monkeypatch):
+    checkout, linked = worktree
+    monkeypatch.chdir(linked)
+    ledger.init(Path("."))
+    assert (checkout / ledger.LEDGER_DIR).is_dir()
+    assert not (linked / ledger.LEDGER_DIR).exists()
+
+
+def test_an_explicit_ledger_path_still_wins(worktree, monkeypatch, tmp_path):
+    checkout, linked = worktree
+    elsewhere = ledger.init(tmp_path / "elsewhere")
+    monkeypatch.chdir(linked)
+    ledger.append(elsewhere, "batch.pushed", batch="b-002", sha="abc123")
+    assert len(ledger.read_events(elsewhere)) == 1
+    assert not (checkout / ledger.LEDGER_DIR).exists()
+
+
+def test_a_directory_outside_any_repo_still_works(tmp_path, monkeypatch):
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    ledger.init(Path("."))
+    ledger.append(Path(ledger.LEDGER_DIR), "issue.triaged", issue=1, verdict="actionable")
+    assert len(ledger.read_events(outside / ledger.LEDGER_DIR)) == 1

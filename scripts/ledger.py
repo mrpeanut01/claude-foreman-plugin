@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import cache
 from pathlib import Path
 
 LEDGER_DIR = ".foreman"
@@ -100,11 +102,90 @@ class State:
     skipped_lines: int = 0
 
 
+# --- where the ledger lives ---------------------------------------------------
+# Every script defaults `--ledger` to a relative `.foreman`, and a build runs
+# with its cwd inside `../foreman-<batch>`, so a relative path used to name a
+# different directory depending on who was calling. `init` then created it on
+# demand, and the write went into a second ledger nobody reads: pushes stayed
+# uncounted, gates were never reset, and the loop merged commits whose review
+# had been recorded somewhere else entirely (issue #64). A relative path is
+# therefore anchored to the repository, never to the caller.
+
+
+@cache
+def _git_dir(start: str) -> str | None:
+    """The shared `.git` directory for `start`, or None outside a repository.
+
+    `--git-common-dir` rather than `--show-toplevel` on purpose: inside a linked
+    worktree the toplevel is the worktree, which is exactly the wrong answer
+    here. The common dir is the one thing every worktree of a repo agrees on.
+
+    Cached per directory because `append` is called in loops and a directory
+    does not change which repository it belongs to while a process runs.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=start,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None  # no git on PATH: a directory is still a fine place for a ledger
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    return out.stdout.strip()
+
+
+@cache
+def _toplevel(start: str) -> str | None:
+    """The working tree root, for the layouts `--git-common-dir` cannot place."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=start, capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
+def repo_root(start: Path | str | None = None) -> Path:
+    """The checkout that owns the ledger, or `start` when there is no repository.
+
+    From a linked worktree this is the main checkout, so a build writing from
+    `../foreman-b-002` and the loop reading from the repo see one ledger.
+    """
+    here = Path(start) if start else Path.cwd()
+    common = _git_dir(str(here))
+    if common:
+        path = Path(common)
+        if not path.is_absolute():
+            path = here / path
+        # A `.git` directory sits in its working tree; anything else (a bare
+        # repo, or --separate-git-dir) does not, so ask where the tree is.
+        if path.name == ".git" and path.parent.is_dir():
+            return path.parent
+    top = _toplevel(str(here))
+    return Path(top) if top else here
+
+
+def resolve_root(root: Path | str | None) -> Path:
+    """A ledger directory, anchored to the repository unless it was given absolutely.
+
+    An absolute path is always obeyed as given — that is how a caller says
+    "this ledger, not the one you would have picked".
+    """
+    if root is None:
+        return repo_root() / LEDGER_DIR
+    path = Path(root)
+    return path if path.is_absolute() else repo_root() / path
+
+
 # --- storage ------------------------------------------------------------------
 
 
-def init(repo_root: Path | str) -> Path:
-    root = Path(repo_root) / LEDGER_DIR
+def init(repo_root_dir: Path | str) -> Path:
+    root = resolve_root(Path(repo_root_dir) / LEDGER_DIR)
     root.mkdir(parents=True, exist_ok=True)
     (root / EVENTS).touch()
     return root
@@ -116,13 +197,13 @@ def _now() -> str:
 
 def append(root: Path, event_type: str, **fields) -> dict:
     event = {"ts": _now(), "type": event_type, **fields}
-    with (Path(root) / EVENTS).open("a", encoding="utf-8") as fh:
+    with (resolve_root(root) / EVENTS).open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event, sort_keys=False) + "\n")
     return event
 
 
 def read_events(root: Path) -> list[dict]:
-    path = Path(root) / EVENTS
+    path = resolve_root(root) / EVENTS
     if not path.exists():
         return []
     events = []
@@ -345,12 +426,14 @@ def gate(root: Path, batch_id: str, which: str, value: str) -> dict:
 
 
 def _resolve(root_arg: str | None) -> Path:
-    return Path(root_arg) if root_arg else Path.cwd() / LEDGER_DIR
+    return resolve_root(root_arg)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--root", help=f"ledger directory (default ./{LEDGER_DIR})")
+    parser.add_argument(
+        "--root", help=f"ledger directory (default {LEDGER_DIR} in the repository root)"
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init")
@@ -370,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.cmd == "init":
-            print(init(Path(args.root) if args.root else Path.cwd()))
+            print(init(Path(args.root) if args.root else repo_root()))
             return 0
         root = _resolve(args.root)
         if args.cmd == "append":
