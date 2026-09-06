@@ -36,7 +36,7 @@ time. A wrongly-parked one sits there until someone notices, which may be never.
 | `actionable` | Someone could start now | Enters batching |
 | `needs-repro` | Bug, no evidence, no stated expectation | Parked on the reporter |
 | `needs-info` | Missing environment or version detail | Parked on the reporter |
-| `duplicate` | Title overlap ≥ 0.6 with an **open** issue | Linked, not queued |
+| `duplicate` | Title overlap ≥ 0.6 with an **open** issue, on two or more words | Linked, not queued |
 
 ## What counts as evidence
 
@@ -48,6 +48,10 @@ report and must not be asked for steps.
 
 Never mark a duplicate against a closed issue. Pointing someone at a closed
 thread as though it answers them is worse than saying nothing.
+
+One shared word is never a duplicate, however high the ratio. "Bug 1" and
+"Bug 2" overlap completely once the digit is discounted, and a duplicate
+verdict at 1.0 parks the newer issue until someone reads both.
 
 ## Risk drives everything downstream
 

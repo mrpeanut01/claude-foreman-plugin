@@ -483,3 +483,33 @@ def test_a_relative_dot_prefixed_path_keeps_the_directory_dot():
 def test_a_separator_prefixed_protected_path_still_scores_high_risk():
     text = "the deploy script ./infra/deploy.py needs a retry"
     assert triage.risk_level({"title": text, "body": ""}, ["**/infra/**"]) == "high"
+
+
+# --- issue #3: short titles must not collide at score 1.0 ---------------------
+
+
+def test_a_single_distinguishing_digit_survives_tokenising():
+    """Dropping one-character tokens made "Bug 1" and "Bug 2" the same title."""
+    assert triage._tokens("Bug 1") == {"bug", "1"}
+    assert triage._tokens("Bug 2") == {"bug", "2"}
+
+
+def test_titles_that_differ_only_by_a_digit_are_not_duplicates():
+    new = issue(number=10, title="Bug 2")
+    others = [issue(number=3, title="Bug 1")]
+    assert triage.dedupe(new, others) == []
+
+
+def test_one_shared_word_is_never_enough_to_call_a_duplicate():
+    """A ratio alone cannot see that the overlap is a single word: two
+    one-word titles reach 1.0 on it, which is the worst false positive there
+    is because a wrongly closed duplicate needs a human to notice."""
+    new = issue(number=10, title="Crash")
+    others = [issue(number=3, title="Crash")]
+    assert triage.dedupe(new, others) == []
+
+
+def test_a_real_pair_still_overlaps_on_more_than_one_word():
+    new = issue(number=10, title="Upload fails with 503 on large files")
+    others = [issue(number=3, title="Upload fails with 503 for large files")]
+    assert triage.dedupe(new, others)[0]["number"] == 3

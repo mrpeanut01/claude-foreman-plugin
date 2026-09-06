@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 CATEGORIES = ("bug", "enhancement", "question", "duplicate")
 DUPLICATE_THRESHOLD = 0.6
+MIN_SHARED_TOKENS = 2
 
 # Hint fragments, matched as whole words with \b on both sides. They are regex
 # rather than plain words because a plain-word list silently loses every
@@ -268,11 +269,13 @@ def actionability(issue: dict) -> dict:
 
 
 def _tokens(title: str) -> set[str]:
-    return {
-        t
-        for t in re.findall(r"[a-z0-9]+", (title or "").lower())
-        if t not in STOPWORDS and len(t) > 1
-    }
+    """Comparable words in a title, stopwords removed.
+
+    Single characters count. They read as noise, but a title's only
+    distinguishing content is often one of them — "Bug 1" and "Bug 2" become
+    the same title the moment the digit is dropped, and then match at 1.0.
+    """
+    return {t for t in re.findall(r"[a-z0-9]+", (title or "").lower()) if t not in STOPWORDS}
 
 
 def dedupe(issue: dict, others: list[dict], threshold: float = DUPLICATE_THRESHOLD) -> list[dict]:
@@ -292,7 +295,16 @@ def dedupe(issue: dict, others: list[dict], threshold: float = DUPLICATE_THRESHO
         theirs = _tokens(other.get("title"))
         if not theirs:
             continue
-        score = len(mine & theirs) / len(mine | theirs)
+        shared = mine & theirs
+        # A ratio cannot see how much agreement it is made of: two two-word
+        # titles reach 1.0 on a single shared word, and a duplicate verdict at
+        # maximum confidence takes the newer issue out of the queue until a
+        # human notices. Overlap has to be about something, so one word is
+        # never enough. The cost is a pair of one-word titles that never gets
+        # flagged, which is the direction the skill asks for.
+        if len(shared) < MIN_SHARED_TOKENS:
+            continue
+        score = len(shared) / len(mine | theirs)
         if score >= threshold:
             hits.append(
                 {"number": other["number"], "score": round(score, 3), "title": other.get("title")}

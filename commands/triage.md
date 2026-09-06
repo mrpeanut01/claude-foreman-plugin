@@ -53,7 +53,7 @@ file path, a command, or numbered steps.
 | `actionable` | Someone can start on it | Enters the batching queue |
 | `needs-repro` | Bug with nothing to go on | Waits on the reporter |
 | `needs-info` | Missing environment or version detail | Waits on the reporter |
-| `duplicate` | Title overlaps an open issue ≥ 0.6 | Linked, not queued |
+| `duplicate` | Title overlaps an open issue ≥ 0.6 on two or more words | Linked, not queued |
 
 Only `actionable` reaches `/foreman:batch`.
 
