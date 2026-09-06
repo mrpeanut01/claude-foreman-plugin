@@ -35,7 +35,7 @@ time. A wrongly-parked one sits there until someone notices, which may be never.
 |---------|------|-------------|
 | `actionable` | Someone could start now | Enters batching |
 | `needs-repro` | Bug, no evidence, no stated expectation | Parked on the reporter |
-| `needs-info` | Missing environment or version detail | Parked on the reporter |
+| `needs-info` | Bug that blames an environment it never names | Parked on the reporter |
 | `duplicate` | Title overlap ≥ 0.6 with an **open** issue, on two or more words | Linked, not queued |
 
 ## What counts as evidence
@@ -45,6 +45,13 @@ path; a backticked command; numbered steps; an all-caps error code; an HTTP
 status. So does an expectation stated under a condition — *"when the file is empty
 it suggests deleting it, which should never happen"* is a perfectly good bug
 report and must not be asked for steps.
+
+`needs-info` is the other half of that rule, and the narrower half. It is for a
+bug that has shown its failure but pins it on something the report does not
+give: *"works on my machine"*, *"only on Windows"*, *"since upgrading"*, with no
+version, OS or runtime anywhere in the text. Any gesture at a version counts.
+Absence of environment detail on its own never does — most bugs do not depend on
+one, and asking anyway is a round trip that reads as dismissal.
 
 Never mark a duplicate against a closed issue. Pointing someone at a closed
 thread as though it answers them is worse than saying nothing.

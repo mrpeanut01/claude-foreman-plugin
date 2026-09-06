@@ -44,7 +44,11 @@ is correct. Adding `size:small` to a repo that has no such label is noise.
 **A false lifecycle label is worse than a missing one.** `needs-repro` only
 applies to bugs with no evidence *and* no stated expectation. A narrative
 description of expected-versus-actual counts as a repro; so does a traceback, a
-file path, a command, or numbered steps.
+file path, a command, or numbered steps. `needs-info` is tighter still: the
+failure has been shown, and the reporter's own words make it environment-
+specific — *"works locally, fails in production"*, *"since upgrading"* — without
+naming the version or the machine. A bug that never blames an environment is
+never asked for one.
 
 ## Verdicts
 
@@ -52,7 +56,7 @@ file path, a command, or numbered steps.
 |---------|-------|------|
 | `actionable` | Someone can start on it | Enters the batching queue |
 | `needs-repro` | Bug with nothing to go on | Waits on the reporter |
-| `needs-info` | Missing environment or version detail | Waits on the reporter |
+| `needs-info` | Bug that blames an environment it never names | Waits on the reporter |
 | `duplicate` | Title overlaps an open issue ≥ 0.6 on two or more words | Linked, not queued |
 
 Only `actionable` reaches `/foreman:batch`.

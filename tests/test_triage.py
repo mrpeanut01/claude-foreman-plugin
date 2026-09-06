@@ -513,3 +513,64 @@ def test_a_real_pair_still_overlaps_on_more_than_one_word():
     new = issue(number=10, title="Upload fails with 503 on large files")
     others = [issue(number=3, title="Upload fails with 503 for large files")]
     assert triage.dedupe(new, others)[0]["number"] == 3
+
+
+# --- issue #4: needs-info was documented but unreachable ---------------------
+
+
+def test_a_bug_that_blames_an_environment_it_never_names_needs_info():
+    """The gap needs-info is for: a failure that has been shown, but only
+    makes sense with a version or a machine the reporter did not give."""
+    verdict = triage.actionability(
+        issue(
+            title="Upload fails",
+            body="Works fine locally but fails in production with a 500.",
+            labels=["bug"],
+        )
+    )
+    assert verdict["lifecycle"] == "needs-info"
+    assert verdict["actionable"] is False
+
+
+def test_a_bug_that_names_the_version_it_broke_on_is_actionable():
+    verdict = triage.actionability(
+        issue(
+            title="Upload fails",
+            body="Worked on 1.4.2. Since upgrading to 1.5.0 every upload returns a 500.",
+            labels=["bug"],
+        )
+    )
+    assert verdict["lifecycle"] is None
+    assert verdict["actionable"] is True
+
+
+def test_a_bug_that_never_blames_an_environment_is_not_asked_for_one():
+    """Asking every reporter for a version is a round trip that reads as
+    dismissal, so the trigger is the reporter's own claim, not its absence."""
+    verdict = triage.actionability(
+        issue(
+            title="Parser drops trailing commas",
+            body="It fails in src/parser/lexer.py when the input ends with a comma.",
+            labels=["bug"],
+        )
+    )
+    assert verdict["lifecycle"] is None
+
+
+def test_needs_info_is_a_verdict_a_record_can_actually_carry():
+    """`grep -c needs-info scripts/triage.py` returned 0: the verdict was in
+    both verdict tables and reachable from neither."""
+    record = triage.triage_issue(
+        issue(
+            number=12,
+            title="Build fails",
+            body="Works on my machine. On CI the third case fails with ECONNREFUSED.",
+            labels=["bug"],
+        ),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["verdict"] == "needs-info"
+    assert "needs-info" in record["labels"]
+    assert triage.queueable([record]) == []

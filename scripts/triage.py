@@ -118,6 +118,38 @@ EVIDENCE = (
 EXPECTATION = re.compile(r"\b(should|expected|instead of|rather than|ought to)\b", re.I)
 CONDITION = re.compile(r"\b(when|if|after|whenever|once)\b", re.I)
 
+# needs-info is a narrower gap than needs-repro, not a weaker one. The failure
+# has been shown; what is missing is the where. Asking every reporter for a
+# version is a round trip that reads as dismissal, so the trigger is the
+# reporter's own claim that the failure depends on an environment — "works
+# locally but not in production", "since upgrading", "only on Windows". That
+# claim is what cannot be followed up without knowing which version or which
+# machine.
+ENV_CLAIM = re.compile(
+    r"\b(?:only (?:on|in|with|under)"
+    r"|works?(?:ed)? (?:on|in|fine|locally|for me|correctly)"
+    r"|used to work"
+    r"|(?:since|after) (?:the )?(?:upgrad|updat|bump|switch)\w*"
+    r"|stopped working"
+    r"|no longer works"
+    r"|on my (?:machine|laptop|box)"
+    r"|in (?:production|staging|prod))\b",
+    re.I,
+)
+# Anything that names a which or a where. Deliberately generous: a report that
+# gestures at a version at all does not need a round trip to start work, and
+# over-matching here can only cost a label, never park an issue wrongly.
+ENV_DETAIL = re.compile(
+    r"\bv?\d+\.\d+(?:\.\d+)?\b"
+    r"|\b(?:versions?|os"
+    r"|mac ?os|osx|windows|linux|ubuntu|debian|alpine|fedora|arch|wsl"
+    r"|docker|kubernetes|k8s|node|npm|python|ruby|rust|golang|java|deno|bun"
+    r"|chrome|chromium|firefox|safari|edge"
+    r"|arm64|aarch64|x86_64|amd64"
+    r"|github actions|runners?)\b",
+    re.I,
+)
+
 STOPWORDS = {
     "a",
     "an",
@@ -236,11 +268,28 @@ def risk_level(issue: dict, protected: list[str]) -> str:
 # --- actionability ------------------------------------------------------------
 
 
+def _grounded(labels: set[str], text: str, reason: str) -> dict:
+    """The verdict for a bug that has shown its failure.
+
+    Usually actionable. The exception is a report that pins the failure on an
+    environment it never names: that is `needs-info`, and it is the only route
+    to that verdict, so the gate stays deliberately tight.
+    """
+    if "bug" in labels and ENV_CLAIM.search(text) and not ENV_DETAIL.search(text):
+        return {
+            "actionable": False,
+            "lifecycle": "needs-info",
+            "reason": "failure is blamed on an environment the report never names",
+        }
+    return {"actionable": True, "lifecycle": None, "reason": reason}
+
+
 def actionability(issue: dict) -> dict:
     """Can someone start on this, or does it need something from the reporter?
 
     Lifecycle labels apply to bugs only. Anything already carrying evidence, or
-    describing an expectation that was violated, is actionable.
+    describing an expectation that was violated, is actionable — unless the
+    report itself says the failure depends on an environment it never gives.
     """
     labels = set(issue.get("labels") or [])
     if not labels & {"bug"} and (labels & {"question", "enhancement", "feature"}):
@@ -249,13 +298,11 @@ def actionability(issue: dict) -> dict:
     body = issue.get("body") or ""
     text = _text(issue)
     if any(rx.search(body) for rx in EVIDENCE):
-        return {"actionable": True, "lifecycle": None, "reason": "body carries concrete evidence"}
+        return _grounded(labels, text, "body carries concrete evidence")
     if EXPECTATION.search(text) and CONDITION.search(text):
-        return {
-            "actionable": True,
-            "lifecycle": None,
-            "reason": "describes expected vs actual behaviour under a stated condition",
-        }
+        return _grounded(
+            labels, text, "describes expected vs actual behaviour under a stated condition"
+        )
     if "bug" in labels:
         return {
             "actionable": False,
