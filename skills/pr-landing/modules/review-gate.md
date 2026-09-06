@@ -39,14 +39,25 @@ it anyway defeats the only gate standing between the loop and trunk.
 ## The revert check
 
 ```bash
-git stash push -- <source files, not test files>
-pytest <the covering test>     # must FAIL
-git stash pop
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" revert-check --base <trunk> \
+  --source <source files the fix changed> --test <covering test ids> \
+  --repo-dir ../foreman-<id>
 ```
 
 The most valuable thing the reviewer does, because it is a fact rather than a
 judgement. It catches the most common failure of autonomous building: a test that
 asserts what the code does rather than what the issue asked for.
+
+It is a command rather than a recipe because the recipe was wrong. It said
+`git stash push -- <source files>`, and by the time a review runs the fix is
+committed and pushed: stash finds no local changes, leaves the fix in place,
+and the covering test passes against it. An honest reviewer then had to report
+`still_passed` for every behaviour-changing PR, and a less honest one wrote
+`failed_as_expected` unverified. The command cuts a detached worktree of HEAD,
+runs the tests with the fix, puts the source files back to `<trunk>`, runs them
+again, and answers `failed_as_expected` only when they pass first and fail
+second. `not_run` carries a `reason`: the tests do not pass with the fix, or a
+named file exists nowhere. The builder's checkout is never touched.
 
 ## Two lenses for risky changes
 

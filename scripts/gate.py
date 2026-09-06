@@ -316,28 +316,83 @@ def _load_workflow(path: str) -> dict:
     return doc if isinstance(doc, dict) else {}
 
 
-def job_steps(workflow_dir: Path, job: dict) -> tuple[list[dict], str | None]:
-    """The declared steps of one job, or the reason they cannot be read.
+def job_spec(workflow_dir: Path, job: dict) -> tuple[dict, dict, str | None]:
+    """The workflow and the job's own mapping, or the reason they cannot be read.
 
     A profile is a snapshot and workflows move underneath it. Not knowing a job's
     commands is not the same as that job having none, so this reports the
-    difference rather than returning an empty list for both.
+    difference rather than returning an empty mapping for both.
     """
     name = job["name"]
     filename = job.get("workflow_file")
     if not filename:
-        return [], f"the profile records no workflow file for `{name}`"
+        return {}, {}, f"the profile records no workflow file for `{name}`"
     path = Path(workflow_dir) / filename
     if not path.is_file():
-        return [], f"`{name}` is declared in {filename}, which is not there any more"
+        return {}, {}, f"`{name}` is declared in {filename}, which is not there any more"
     try:
         doc = _load_workflow(str(path))
     except (OSError, yaml.YAMLError) as exc:
-        return [], f"{filename} could not be read ({type(exc).__name__})"
+        return {}, {}, f"{filename} could not be read ({type(exc).__name__})"
     spec = (doc.get("jobs") or {}).get(name)
     if not isinstance(spec, dict):
-        return [], f"{filename} no longer declares a job named `{name}` (stale profile?)"
+        return doc, {}, f"{filename} no longer declares a job named `{name}` (stale profile?)"
+    return doc, spec, None
+
+
+def job_steps(workflow_dir: Path, job: dict) -> tuple[list[dict], str | None]:
+    """The declared steps of one job, or the reason they cannot be read."""
+    _, spec, problem = job_spec(workflow_dir, job)
+    if problem:
+        return [], problem
     return [step for step in (spec.get("steps") or []) if isinstance(step, dict)], None
+
+
+def _env_text(value: object) -> str:
+    """An `env:` value the way Actions hands it to the step: booleans lower-case."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "" if value is None else str(value)
+
+
+def job_context(doc: dict, spec: dict) -> dict:
+    """What every step of a job inherits before its own keys apply.
+
+    `env:` and `defaults.run.working-directory` are set at workflow level and at
+    job level at least as often as on the step, and Actions folds all three
+    together for each step. The gate read only the step's own block, so a job
+    whose steps relied on `env: {FOO: bar}` one level up failed here with a red
+    CI would never produce — or passed with one CI would never produce, when
+    the variable gated behaviour.
+
+    A `${{ }}` expression in an inherited value is Actions context no laptop
+    has. It is left out rather than passed through unsubstituted, and named
+    under `env_dropped`, so a step that reads it can be blocked by `plan_step`
+    rather than run against a variable that is silently unset.
+    """
+    env: dict[str, str] = {}
+    dropped: list[str] = []
+    for scope in (doc.get("env"), spec.get("env")):
+        if not isinstance(scope, dict):
+            continue
+        for key, value in scope.items():
+            text = _env_text(value)
+            if GITHUB_EXPRESSION.search(text):
+                dropped.append(str(key))
+                env.pop(str(key), None)
+            else:
+                env[str(key)] = text
+    working_directory = None
+    for scope in (doc.get("defaults"), spec.get("defaults")):
+        run = scope.get("run") if isinstance(scope, dict) else None
+        if isinstance(run, dict) and run.get("working-directory"):
+            working_directory = str(run["working-directory"])
+    return {
+        "env": env,
+        "env_dropped": dropped,
+        "working_directory": working_directory,
+        "continue_on_error": bool(spec.get("continue-on-error")),
+    }
 
 
 # --- turning steps into a plan ------------------------------------------------
@@ -398,13 +453,20 @@ def run_text(value: object) -> str:
     return ""
 
 
-def plan_step(job_name: str, index: int, step: dict) -> dict:
+def _reads_variable(command: str, name: str) -> bool:
+    return re.search(rf"\$\{{?{re.escape(name)}\b", command) is not None
+
+
+def plan_step(job_name: str, index: int, step: dict, inherited: dict | None = None) -> dict:
+    inherited = inherited or {}
     entry = _entry(
         f"{job_name}#{index}",
         job_name,
         name=step.get("name"),
-        continue_on_error=bool(step.get("continue-on-error")),
-        working_directory=step.get("working-directory"),
+        continue_on_error=bool(
+            step.get("continue-on-error", inherited.get("continue_on_error", False))
+        ),
+        working_directory=step.get("working-directory") or inherited.get("working_directory"),
     )
     if "run" not in step:
         uses = step.get("uses") or "no run: block"
@@ -421,10 +483,22 @@ def plan_step(job_name: str, index: int, step: dict) -> dict:
         )
     if "if" in step:
         return _blocked(entry, f"conditional on `{step['if']}`, which only Actions can evaluate")
-    env = {str(k): str(v) for k, v in (step.get("env") or {}).items()}
-    if GITHUB_EXPRESSION.search(command) or any(GITHUB_EXPRESSION.search(v) for v in env.values()):
+    own = {str(k): _env_text(v) for k, v in (step.get("env") or {}).items()}
+    if GITHUB_EXPRESSION.search(command) or any(GITHUB_EXPRESSION.search(v) for v in own.values()):
         return _blocked(entry, "carries a ${{ }} expression that only Actions can substitute")
-    entry["env"] = env
+    # An inherited value Actions would have substituted and this machine cannot:
+    # harmless to a step that never reads it, and a silent wrong answer to one
+    # that does.
+    unset = [name for name in inherited.get("env_dropped", []) if _reads_variable(command, name)]
+    if unset:
+        return _blocked(
+            entry,
+            f"reads ${unset[0]}, which the workflow sets from a ${{{{ }}}} expression "
+            "only Actions can substitute",
+        )
+    entry["env"] = {**inherited.get("env", {}), **own}
+    if inherited.get("env_dropped"):
+        entry["env_dropped"] = list(inherited["env_dropped"])
     return _runnable(entry)
 
 
@@ -488,12 +562,42 @@ def build_plan(
 
     steps: list[dict] = []
     for job in jobs:
-        declared, problem = job_steps(workflow_dir, job)
+        name = job["name"]
+        doc, spec, problem = job_spec(workflow_dir, job)
         if problem:
-            steps.append(_blocked(_entry(f"{job['name']}#?", job["name"]), problem))
+            steps.append(_blocked(_entry(f"{name}#?", name), problem))
             continue
+        # A job-level `if:` is evaluated by Actions before any step of the job
+        # runs. The gate cannot evaluate it, and running the steps anyway is
+        # how a job gated to `github.event_name == 'push'` — a publish, a
+        # deploy — ran on a laptop. Same answer as a conditional step.
+        if "if" in spec:
+            steps.append(
+                _blocked(
+                    _entry(f"{name}#?", name),
+                    f"the whole job is conditional on `{spec['if']}`, which only Actions "
+                    "can evaluate",
+                )
+            )
+            continue
+        declared = [step for step in (spec.get("steps") or []) if isinstance(step, dict)]
+        # A job with `uses:` and no steps calls a reusable workflow, and that is
+        # where a repo's real suite often lives. It used to contribute nothing to
+        # the plan at all, so a green could be reported having verified nothing
+        # about it. Unrunnable, said out loud, like any other check this
+        # machine cannot run.
+        if not declared and spec.get("uses"):
+            steps.append(
+                _blocked(
+                    _entry(f"{name}#?", name),
+                    f"calls the reusable workflow {spec['uses']}, which the gate cannot run "
+                    "here; CI will be the first to",
+                )
+            )
+            continue
+        inherited = job_context(doc, spec)
         for index, step in enumerate(declared, start=1):
-            steps.append(plan_step(job["name"], index, step))
+            steps.append(plan_step(name, index, step, inherited))
 
     tests, complete = ci_profile.impacted_tests(changed, root)
     ci_runs_tests = any(s["action"] == "run" and s["kind"] == "test" for s in steps)
@@ -556,17 +660,40 @@ def run_command(command: str, cwd: Path, env: dict[str, str]) -> dict:
     }
 
 
-def execute(steps: list[dict], root: Path | str, keep_going: bool = False, progress=None):
+def execute(
+    steps: list[dict],
+    root: Path | str,
+    keep_going: bool = False,
+    progress=None,
+    run_past_unrunnable: bool = False,
+):
+    """Run the plan. A failure stops everything after it; an unrunnable step stops
+    the rest of its job.
+
+    The second rule mirrors Actions: a step whose tool is missing exits non-zero
+    there, and the job halts on it exactly as on any failure. Running the later
+    steps of that job here reaches commands CI would never have reached — and
+    the report has already said the job cannot be certified, so nothing those
+    steps prove can be counted. `run_past_unrunnable` is for the caller that
+    has decided to let CI be the first to run the missing check and wants to
+    see everything else here anyway.
+    """
     root = Path(root)
     stop = False
+    halted: set[str] = set()
     for step in steps:
         if step["action"] == "skip":
             step["status"] = "skipped"
         elif step["action"] == "block":
             step["status"] = "unrunnable"
+            if not run_past_unrunnable and not step["continue_on_error"]:
+                halted.add(step["job"])
         elif stop:
             step["status"] = "not_run"
             step["reason"] = "an earlier step failed"
+        elif step["job"] in halted:
+            step["status"] = "not_run"
+            step["reason"] = "an earlier step in this job could not run, and CI would stop there"
         else:
             cwd = root / (step.get("working_directory") or ".")
             step.update(run_command(step["command"], cwd, step.get("env") or {}))
@@ -643,7 +770,7 @@ def run_gate(
     progress=None,
 ) -> dict:
     steps, context = build_plan(root, changed or [], profile, workflow_dir, test_command)
-    execute(steps, root, keep_going, progress)
+    execute(steps, root, keep_going, progress, run_past_unrunnable=keep_going or allow_unrunnable)
     return summarise(steps, context, allow_unrunnable)
 
 

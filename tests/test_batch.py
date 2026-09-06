@@ -428,7 +428,7 @@ def _accepted_flags(subcommand: str) -> set[str]:
     }
 
 
-@pytest.mark.parametrize("subcommand", ["plan", "apply", "paths"])
+@pytest.mark.parametrize("subcommand", ["plan", "apply", "paths", "split"])
 def test_the_docstring_documents_every_flag_a_subcommand_accepts(subcommand):
     """plan reads the ledger to allocate ids. A caller following a docstring that
     omitted --ledger got an empty taken set and ids restarting at b-001."""
@@ -498,3 +498,203 @@ def test_plan_reads_its_config_and_profile_from_the_repository_when_run_from_a_w
     assert [b["issues"] for b in plan["batches"]] == [[1], [2]], "max_batch_issues was read"
     assert plan["savings"]["suite_seconds"] == 1000, "the profile was read"
     assert "warning" not in captured.err, captured.err
+
+
+# --- an unrecognised risk ceiling fails closed --------------------------------
+
+
+def test_a_misspelled_risk_ceiling_refuses_to_group_rather_than_grouping_everything():
+    """An unknown ceiling ranked above `high`, so `"Medium"` switched the risk
+    gate off: two high-risk issues shared a PR and nothing said a word."""
+    a, b = rec(1, risk="high", paths=["a.py"]), rec(2, risk="high", paths=["b.py"])
+    for ceiling in ("Medium", "strict", "", None):
+        ok, why = batch.can_group(a, b, {"risk_ceiling": ceiling})
+        assert not ok, ceiling
+        assert "risk_ceiling" in why
+
+
+def test_a_misspelled_risk_ceiling_is_said_out_loud_when_planning(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    triage_file = tmp_path / "triage.json"
+    triage_file.write_text(json.dumps({"triaged": _actionable(11, 12)}))
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"risk_ceiling": "strict"}))
+    rc = batch.main(
+        [
+            "plan",
+            "--triage",
+            str(triage_file),
+            "--ledger",
+            str(tmp_path / ".foreman"),
+            "--config",
+            str(config),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "risk_ceiling" in captured.err and "strict" in captured.err
+    assert [b["issues"] for b in json.loads(captured.out)["batches"]] == [[11], [12]]
+
+
+# --- apply must not need a ledger to exist before the first batch -------------
+
+
+def test_apply_records_every_batch_into_a_ledger_that_did_not_exist_yet(tmp_path, capsys):
+    """The only runtime exercise of `batch.py apply` in the suite. It crashed on
+    a fresh checkout, silently dropping every batch.created in the plan."""
+    plan = tmp_path / "batches.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "batches": [
+                    {"id": "b-001", "issues": [1, 2], "paths": ["a.py"], "risk": "low"},
+                    {"id": "b-002", "issues": [3], "paths": [], "risk": "medium"},
+                ]
+            }
+        )
+    )
+    fresh = tmp_path / "repo" / ".foreman"
+    rc = batch.main(["apply", "--plan", str(plan), "--ledger", str(fresh)])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["created"] == ["b-001", "b-002"]
+    state = ledger.load(fresh)
+    assert state.batches["b-001"]["issues"] == [1, 2]
+    assert state.batches["b-002"]["state"] == "planned"
+
+
+# --- planning from the ledger, so the batch action survives a new session -----
+
+
+def _triaged_into(root, *numbers, paths=("same.py",)):
+    for n in numbers:
+        ledger.append(
+            root,
+            "issue.triaged",
+            issue=n,
+            verdict="actionable",
+            size="small",
+            risk="low",
+            paths=list(paths),
+            title=f"issue {n}",
+        )
+
+
+def test_plan_without_a_triage_file_groups_the_ledgers_ungrouped_actionable_issues(
+    tmp_path, capsys, monkeypatch
+):
+    """`loop.py next` answers `batch` with issue numbers no recipe consumed: the
+    triage file lives in /tmp, is gone after a crash, and re-triage skips
+    every issue it already recorded, so the plan came back empty forever."""
+    monkeypatch.chdir(tmp_path)
+    root = ledger.init(tmp_path)
+    _triaged_into(root, 11, 12, 13)
+    ledger.append(root, "batch.created", batch="b-001", issues=[11])
+    rc = batch.main(["plan", "--ledger", str(root)])
+    assert rc == 0
+    planned = json.loads(capsys.readouterr().out)["batches"]
+    assert [b["issues"] for b in planned] == [[12], [13]]
+    assert [b["id"] for b in planned] == ["b-002", "b-003"]
+
+
+def test_a_triage_file_is_still_filtered_against_what_batches_already_hold(
+    tmp_path, capsys, monkeypatch
+):
+    """Triage re-records an issue whenever its updatedAt moves; a second batch
+    for work already in flight is the loop's runaway case."""
+    monkeypatch.chdir(tmp_path)
+    root = ledger.init(tmp_path)
+    ledger.append(root, "batch.created", batch="b-001", issues=[11])
+    triage_file = tmp_path / "triage.json"
+    triage_file.write_text(json.dumps({"triaged": _actionable(11, 12)}))
+    batch.main(["plan", "--triage", str(triage_file), "--ledger", str(root)])
+    planned = json.loads(capsys.readouterr().out)["batches"]
+    assert [b["issues"] for b in planned] == [[12]]
+
+
+def test_a_ledger_holding_no_ungrouped_issue_plans_nothing(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    root = ledger.init(tmp_path)
+    _triaged_into(root, 11)
+    ledger.append(root, "batch.created", batch="b-001", issues=[11])
+    batch.main(["plan", "--ledger", str(root)])
+    assert json.loads(capsys.readouterr().out)["batches"] == []
+
+
+# --- why a batch had to start is reported, not discarded ---------------------
+
+
+def test_each_batch_says_why_its_first_issue_could_not_join_the_one_before():
+    """can_group always said why; group_issues threw it away, so the strings
+    batch.md tells the operator to read appeared in no output."""
+    groups = batch.group_issues(
+        [
+            rec(1, paths=["a.py"]),
+            rec(2, paths=["a.py"]),
+            rec(3, risk="high", paths=["c.py"]),
+            rec(4, paths=[]),
+        ],
+        CONFIG,
+    )
+    why = {g["issues"][0]: g["started_because"] for g in groups}
+    assert why[1] is None
+    assert "both touch a.py" in why[2]
+    assert "exceeds the batching ceiling" in why[3]
+    assert "unknown paths" in why[4]
+
+
+def test_a_full_batch_is_named_as_the_reason_too():
+    records = [rec(n, paths=[f"f{n}.py"]) for n in range(1, 5)]
+    groups = batch.group_issues(records, CONFIG)  # max_batch_issues is 3
+    assert "max_batch_issues" in groups[1]["started_because"]
+
+
+# --- splitting is a subcommand, so the recipes can actually do it -------------
+
+
+def _open_batch(root, *issues):
+    ledger.append(
+        root, "batch.created", batch="b-001", issues=list(issues), paths=["a.py"], risk="low"
+    )
+    for s in ("building", "built", "open"):
+        ledger.transition(root, "b-001", s)
+
+
+def test_split_keeps_the_rest_on_the_batch_and_gives_the_failing_issue_its_own(tmp_path, capsys):
+    """`split()` had unit tests and no caller; the skills called it load-bearing."""
+    root = ledger.init(tmp_path)
+    _open_batch(root, 1, 2, 3)
+    rc = batch.main(["split", "--batch", "b-001", "--failing", "2", "--ledger", str(root)])
+    assert rc == 0
+    state = ledger.load(root)
+    assert state.batches["b-001"]["issues"] == [1, 3]
+    assert state.batches["b-001"]["state"] == "open", "the branch and PR carry on"
+    assert state.batches["b-001a"]["issues"] == [2]
+    assert state.batches["b-001a"]["state"] == "planned"
+    out = json.loads(capsys.readouterr().out)
+    assert out["failing"]["id"] == "b-001a" and out["keeps"] == [1, 3]
+    assert any("force-with-lease" in step for step in out["then"])
+
+
+def test_split_refuses_a_batch_of_one_and_writes_nothing(tmp_path, capsys):
+    root = ledger.init(tmp_path)
+    _open_batch(root, 1)
+    before = len(ledger.read_events(root))
+    assert batch.main(["split", "--batch", "b-001", "--failing", "1", "--ledger", str(root)]) == 1
+    assert "nothing to split" in capsys.readouterr().err
+    assert len(ledger.read_events(root)) == before
+
+
+def test_split_refuses_an_issue_the_batch_does_not_hold(tmp_path, capsys):
+    root = ledger.init(tmp_path)
+    _open_batch(root, 1, 2)
+    assert batch.main(["split", "--batch", "b-001", "--failing", "9", "--ledger", str(root)]) == 1
+    assert "#9" in capsys.readouterr().err
+
+
+def test_split_refuses_to_split_the_same_batch_twice(tmp_path, capsys):
+    root = ledger.init(tmp_path)
+    _open_batch(root, 1, 2, 3)
+    batch.main(["split", "--batch", "b-001", "--failing", "2", "--ledger", str(root)])
+    capsys.readouterr()
+    assert batch.main(["split", "--batch", "b-001", "--failing", "3", "--ledger", str(root)]) == 1
+    assert "before" in capsys.readouterr().err

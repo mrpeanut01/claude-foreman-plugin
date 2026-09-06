@@ -1,5 +1,6 @@
 """Landing: read CI honestly, judge the reviewer, and refuse to merge on doubt."""
 
+import importlib
 import json
 import subprocess
 import sys
@@ -1257,3 +1258,189 @@ def test_the_loop_may_treat_confirming_the_paths_as_part_of_merging():
     batch = ready_batch(paths_head=None)
     assert land.merge_blockers(batch, {"labels": []}, CFG) != []
     assert land.merge_blockers(batch, {"labels": []}, CFG, observed_paths_required=False) == []
+
+
+# --- the revert check is a command, not a stash ------------------------------
+# By the time a review runs the fix is committed. `git stash push -- <file>` on
+# a clean tree saves nothing and reports success, so the covering test kept
+# passing against the very fix it was meant to lose.
+
+
+def _write(root, rel, text):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+@pytest.fixture
+def fixed(tmp_path):
+    """A repo whose branch fixes a bug, adds the test that catches it, adds a
+    module, and adds a test that would pass whatever the code did."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _write(root, "conftest.py", "")
+    _write(root, "src/__init__.py", "")
+    _write(root, "src/calc.py", "def add(a, b):\n    return a - b\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "base: add subtracts")
+
+    _git(root, "checkout", "-q", "-b", "foreman/b-001")
+    _write(root, "src/calc.py", "def add(a, b):\n    return a + b\n")
+    _write(root, "src/extra.py", "def twice(x):\n    return 2 * x\n")
+    _write(
+        root,
+        "tests/test_calc.py",
+        "from src.calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+    )
+    _write(
+        root,
+        "tests/test_extra.py",
+        "from src.extra import twice\n\n\ndef test_twice():\n    assert twice(2) == 4\n",
+    )
+    _write(root, "tests/test_tautology.py", "def test_nothing():\n    assert True\n")
+    _write(
+        root,
+        "tests/test_broken.py",
+        "from src.calc import add\n\n\ndef test_wrong():\n    assert add(1, 1) == 3\n",
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "fix: add adds")
+    return root
+
+
+def _porcelain(root):
+    return subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain"], capture_output=True, text=True
+    ).stdout
+
+
+def test_a_test_that_catches_the_fix_fails_once_the_fix_is_reverted(fixed):
+    result = land.revert_check(fixed, "main", ["src/calc.py"], ["tests/test_calc.py::test_add"])
+    assert result["revert_check"] == "failed_as_expected", result
+    assert result["reverted"] == ["src/calc.py"]
+
+
+def test_a_test_that_passes_either_way_guards_nothing(fixed):
+    result = land.revert_check(fixed, "main", ["src/calc.py"], ["tests/test_tautology.py"])
+    assert result["revert_check"] == "still_passed"
+
+
+def test_a_file_the_branch_added_is_removed_to_revert_it(fixed):
+    """`git checkout main -- src/extra.py` cannot restore what main never had."""
+    result = land.revert_check(fixed, "main", ["src/extra.py"], ["tests/test_extra.py"])
+    assert result["revert_check"] == "failed_as_expected"
+    assert result["removed"] == ["src/extra.py"]
+
+
+def test_the_builders_checkout_is_never_touched_and_nothing_is_left_behind(fixed):
+    land.revert_check(fixed, "main", ["src/calc.py", "src/extra.py"], ["tests/test_calc.py"])
+    assert (fixed / "src" / "calc.py").read_text().endswith("a + b\n")
+    assert (fixed / "src" / "extra.py").exists()
+    assert _porcelain(fixed) == ""
+    listed = subprocess.run(
+        ["git", "-C", str(fixed), "worktree", "list"], capture_output=True, text=True
+    ).stdout
+    assert len(listed.splitlines()) == 1, "the scratch worktree must be removed"
+
+
+def test_tests_that_fail_with_the_fix_in_place_measure_nothing(fixed):
+    """A failure after the revert is only evidence if there was a pass before it."""
+    result = land.revert_check(fixed, "main", ["src/calc.py"], ["tests/test_broken.py"])
+    assert result["revert_check"] == "not_run"
+    assert "with the fix" in result["reason"]
+
+
+def test_a_source_file_that_exists_nowhere_is_a_reason_not_a_verdict(fixed):
+    result = land.revert_check(fixed, "main", ["src/imaginary.py"], ["tests/test_calc.py"])
+    assert result["revert_check"] == "not_run"
+    assert "imaginary" in result["reason"]
+
+
+def test_nothing_named_is_not_a_pass(fixed):
+    assert land.revert_check(fixed, "main", [], ["tests/test_calc.py"])["revert_check"] == "not_run"
+    assert land.revert_check(fixed, "main", ["src/calc.py"], [])["revert_check"] == "not_run"
+
+
+def test_the_cli_exits_zero_only_for_failed_as_expected(fixed, capsys):
+    base = ["revert-check", "--base", "main", "--repo-dir", str(fixed), "--source", "src/calc.py"]
+    assert land.main([*base, "--test", "tests/test_calc.py::test_add"]) == 0
+    assert json.loads(capsys.readouterr().out)["revert_check"] == "failed_as_expected"
+    assert land.main([*base, "--test", "tests/test_tautology.py"]) == 1
+    assert json.loads(capsys.readouterr().out)["revert_check"] == "still_passed"
+
+
+def test_the_recipes_run_the_command_rather_than_stashing():
+    root = Path(__file__).resolve().parents[1]
+    for doc in ("agents/reviewer.md", "skills/pr-landing/modules/review-gate.md"):
+        text = (root / doc).read_text()
+        assert 'land.py" revert-check' in text, doc
+        assert "git stash push --" not in text.split("```bash")[1].split("```")[0] or (
+            "revert-check" in text.split("```bash")[1]
+        ), f"{doc} still tells the reviewer to stash"
+
+
+# --- no gh on PATH is one more way to have no answer --------------------------
+
+
+@pytest.mark.parametrize("module_name", ["land", "triage", "findings", "ci_profile"])
+def test_a_missing_gh_binary_reads_as_no_answer_rather_than_a_traceback(module_name, monkeypatch):
+    """Every other failure of the same call already reads as None. A fresh
+    runner without gh raised FileNotFoundError through `checks` and
+    `blockers` instead, where the documented answer is "unprovable is pending"."""
+    module = importlib.import_module(module_name)
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "gh")
+
+    monkeypatch.setattr(module.subprocess, "run", missing)
+    assert module._gh_json(["pr", "view", "1"]) is None
+
+
+def test_checks_without_gh_report_pending_not_a_crash(monkeypatch, capsys):
+    def missing(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "gh")
+
+    monkeypatch.setattr(land.subprocess, "run", missing)
+    assert land.main(["checks", "--pr", "1", "--repo", "o/r"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["gate"] == "pending" and out["head_sha"] is None
+
+
+def test_a_change_with_no_behaviour_cannot_also_claim_its_test_survived_a_revert():
+    """The one branch of validate_review nothing exercised: behaviour_change
+    false and revert_check still_passed contradict each other."""
+    ok, errors = land.validate_review(
+        clean(behaviour_change=False, tests_covering=[], revert_check="still_passed")
+    )
+    assert not ok and any("contradicts" in e for e in errors)
+
+
+# --- merge_method is read, not just written -----------------------------------
+
+
+def test_the_configured_merge_method_is_reported_with_the_blockers(worktree, capsys):
+    """config.example.json shipped the key and nothing read it; the recipes
+    hard-coded --squash."""
+    checkout, _ = worktree
+    config = checkout / ".foreman" / "config.json"
+    config.write_text(json.dumps({**CFG, "merge_method": "rebase"}))
+    ledger_dir = str(checkout / ".foreman")
+    land.main(["blockers", "--batch", "b-001", "--ledger", ledger_dir, "--config", str(config)])
+    assert json.loads(capsys.readouterr().out)["merge_method"] == "rebase"
+
+
+def test_the_merge_method_defaults_to_squash(worktree, capsys):
+    checkout, _ = worktree
+    config = str(checkout / ".foreman" / "config.json")  # CFG, which names no method
+    ledger_dir = str(checkout / ".foreman")
+    land.main(["blockers", "--batch", "b-001", "--ledger", ledger_dir, "--config", config])
+    assert json.loads(capsys.readouterr().out)["merge_method"] == "squash"
+
+
+def test_an_unknown_merge_method_blocks_the_merge():
+    blockers = land.merge_blockers(ready_batch(), {"labels": []}, {**CFG, "merge_method": "ff"})
+    assert any("merge_method" in b for b in blockers)
+    assert (
+        land.merge_blockers(ready_batch(), {"labels": []}, {**CFG, "merge_method": "merge"}) == []
+    )

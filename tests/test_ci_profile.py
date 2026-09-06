@@ -843,3 +843,86 @@ def test_probe_writes_the_profile_into_the_repository_when_run_from_a_worktree(
     assert written == checkout / ledger.LEDGER_DIR / ledger.PROFILE_FILE
     assert written.is_file()
     assert not (linked / ledger.LEDGER_DIR).exists()
+
+
+# --- a scalar filter is one pattern, not a list of its characters ------------
+
+
+def test_a_scalar_branch_or_path_filter_is_read_as_one_pattern(tmp_path):
+    """`paths: docs/**` came back as ['*', '/', 'c', 'd', 'o', 's'], and the
+    bare `*` then matched every top-level file in the repository; `branches:
+    main` was four one-letter branch names. `on:` and `needs:` already had
+    this guard."""
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        textwrap.dedent("""
+        name: CI
+        on:
+          pull_request:
+            paths: docs/**
+            types: opened
+          push:
+            branches: main
+            tags: v*
+            paths-ignore: '**.md'
+        jobs:
+          docs: {steps: [{run: make docs}]}
+    """)
+    )
+    (job,) = ci_profile.parse_workflows(d)
+    assert job["path_filters"] == ["docs/**"]
+    assert job["pr_path_filters"] == ["docs/**"]
+    assert job["events"]["pull_request"]["paths"] == ["docs/**"]
+    assert job["events"]["pull_request"]["types"] == ["opened"]
+    assert job["events"]["push"]["branches"] == ["main"]
+    assert job["events"]["push"]["tags"] == ["v*"]
+    assert job["events"]["push"]["paths_ignore"] == ["**.md"]
+
+
+def test_a_scalar_branch_filter_gates_the_job_the_way_a_list_would(tmp_path):
+    import land
+
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        "name: CI\non:\n  pull_request:\n    branches: main\n"
+        "jobs:\n  test: {steps: [{run: pytest}]}\n"
+    )
+    spec = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)["jobs"]["test"]
+    assert land.can_report_on_pr(spec, "main") is True
+    assert land.can_report_on_pr(spec, "develop") is False
+
+
+def test_a_mapping_where_a_filter_belongs_reads_as_no_filter(tmp_path):
+    """Not a shape Actions accepts. No filter is the conservative reading: a
+    job with none fires on everything."""
+    d = tmp_path / ".github" / "workflows"
+    d.mkdir(parents=True)
+    (d / "ci.yml").write_text(
+        "name: CI\non:\n  pull_request:\n    paths: {oops: true}\n"
+        "jobs:\n  test: {steps: [{run: pytest}]}\n"
+    )
+    (job,) = ci_profile.parse_workflows(d)
+    assert job["path_filters"] == []
+    assert job["events"]["pull_request"]["paths"] == []
+
+
+def test_the_collision_merge_unions_needs_whichever_file_sorts_first(tmp_path):
+    """`triggers` and the filters were merged; `needs` was whichever
+    declaration was read first, so renaming a workflow file changed the job
+    graph the profile reported."""
+    answers = []
+    for names in (("a", "b"), ("b", "a")):
+        d = tmp_path / "".join(names) / ".github" / "workflows"
+        d.mkdir(parents=True)
+        (d / f"{names[0]}.yml").write_text(
+            "name: x\non: {pull_request: }\njobs:\n  lint: {steps: [{run: ruff}]}\n"
+            "  test: {needs: [lint], steps: [{run: pytest}]}\n"
+        )
+        (d / f"{names[1]}.yml").write_text(
+            "name: y\non: {workflow_dispatch: }\njobs:\n  test: {steps: [{run: pytest}]}\n"
+        )
+        profile = ci_profile.build_profile(workflow_dir=d, job_runs=[], protection=None)
+        answers.append(profile["jobs"]["test"]["needs"])
+    assert answers == [["lint"], ["lint"]]

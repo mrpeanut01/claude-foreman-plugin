@@ -103,9 +103,24 @@ reviewer with the errors; do not record it and do not argue with the validator.
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" paths --batch <id> --base <trunk> \
   --repo-dir ../foreman-<id> --apply
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> --repo OWNER/NAME
-"${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --squash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> ready
+"${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --<merge_method>
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> merging
 ```
+
+`<merge_method>` is the value `blockers` printed under `merge_method`: `squash`
+unless `.foreman/config.json` says `merge` or `rebase`. The key used to be
+written by the example config and read by nothing.
+
+`ready` is the state both gates clear into, and it is the only state `merging`
+can be reached from: `open -> merging` is not a move, and `transition` refuses
+it. The `ready` line therefore comes **before** the merge is requested, so a
+refusal costs nothing — the recipe used to request the merge first and move
+the batch second, and when the move was refused GitHub was already merging a
+batch the ledger still called `open`. `loop.py` answers `advance` for an open
+batch whose gates are clear and `merge` for one already in `ready`; both land
+here. If `ledger.py state --batch <id>` already says `ready` (an earlier pass
+got that far and stopped), skip the `ready` line and carry on.
 
 The first line replaces the batch's `paths` — until now the file names its
 issues' prose happened to mention — with what the branch really changes, and
@@ -156,7 +171,17 @@ tracker. Closing it here is the cheap version.
 ## On a red gate
 
 CI failed → classify flake vs bug (`modules/ci-watch.md`), then rerun, fix, or
-escalate as `flake_decision` says. Review requested changes → address the
+escalate as `flake_decision` says. When the bug is one issue's commit and the
+rest of the batch is fine, split rather than fix in place:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" split --batch <id> --failing <issue>
+```
+
+The batch keeps the rest; the failing issue becomes `<id>a`, planned. Then drop
+its commit from the branch in the worktree and push with `--force-with-lease`
+(git, not gh), which is a push like any other: record `batch.pushed`, and both
+gates run again on what is left. See `Skill(foreman:work-batching)`. Review requested changes → address the
 findings, push, and record the push (`batch.pushed`, as in step 1); the gates
 reset and both run again, and step 5 will confirm the paths afresh for the new
 head. Rounds continue while the

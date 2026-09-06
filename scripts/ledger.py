@@ -64,6 +64,19 @@ CLEAR = {"ci": "full_green", "review": "clean"}
 
 COUNTER_ORDER = ("pushes", "review_rounds", "reruns")
 
+# Fields a `batch.meta` event may not set. Each has an event of its own whose
+# validation is what stands between the loop and a merge nobody reviewed:
+# `state` moves through `transition`, which checks the gates before `ready`;
+# the gates move through `gate`; the clocks move only when the fold says
+# something happened. A correction is for what the loop learned late — `pr`,
+# `branch`, `head_sha`, `paths`, a reduced `issues` list — and for `attempts`
+# when a person forgives a cap on the record. One `append --type batch.meta
+# --json '{"state":"ready","ci_gate":"full_green","review_gate":"clean"}'`
+# otherwise skipped every check in this file at once.
+META_GUARDED = frozenset(
+    {"id", "state", "ci_gate", "review_gate", "created", "updated", "progress_at"}
+)
+
 # Counters that measure whether a batch is converging rather than how much has
 # happened to it. `cap_breached` deliberately ignores these: a runaway ceiling
 # and a wrong diagnosis are different verdicts read off different numbers. Each
@@ -96,6 +109,12 @@ class GateNotClear(LedgerError):
 
 class UnknownBatch(LedgerError):
     pass
+
+
+class ConfigError(LedgerError):
+    """The config is there and cannot be used. Never silently `{}`: a config
+    that fails to parse is the loop with its brakes removed, and every CLI
+    turns this into one line on stderr and exit 1 rather than a traceback."""
 
 
 @dataclass
@@ -257,17 +276,43 @@ def load_config(path: Path | str | None = None) -> dict:
             file=sys.stderr,
         )
         return {}
-    return json.loads(resolved.read_text(encoding="utf-8"))
+    try:
+        loaded = json.loads(resolved.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            f"config at {resolved} is not valid JSON ({exc.msg} at line {exc.lineno}, "
+            f"column {exc.colno}); nothing runs until it parses, because running "
+            "without it means running without caps"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise ConfigError(
+            f"config at {resolved} must be a JSON object, not {type(loaded).__name__}"
+        )
+    return loaded
 
 
 # --- storage ------------------------------------------------------------------
 
 
+def init_dir(root: Path | str | None) -> Path:
+    """Create the ledger directory `root` names — the same directory every
+    other call resolves that argument to.
+
+    The CLI's `--root` is documented as the ledger directory, and `append`,
+    `transition`, `gate` and `state` all read it that way. `init` alone read it
+    as the *repository* and appended `.foreman` to it, so `--root X init` made
+    `X/.foreman/events.jsonl` while `--root X append` wrote `X/events.jsonl`:
+    one flag, two directories. This is the entry point that means what the
+    flag says; `init` keeps its Python signature for callers that pass a repo.
+    """
+    resolved = resolve_root(root)
+    resolved.mkdir(parents=True, exist_ok=True)
+    (resolved / EVENTS).touch()
+    return resolved
+
+
 def init(repo_root_dir: Path | str) -> Path:
-    root = resolve_root(Path(repo_root_dir) / LEDGER_DIR)
-    root.mkdir(parents=True, exist_ok=True)
-    (root / EVENTS).touch()
-    return root
+    return init_dir(Path(repo_root_dir) / LEDGER_DIR)
 
 
 def _now() -> str:
@@ -275,8 +320,19 @@ def _now() -> str:
 
 
 def append(root: Path, event_type: str, **fields) -> dict:
+    """Write one event. Creates the ledger directory if nothing has yet.
+
+    Two writers skipped `init`: `findings.py file` and `batch.py apply`. The
+    first created a GitHub issue — which the wrapper cannot undo — and then
+    died on the missing directory before recording that it had, so the issue
+    existed with no trace of the review that raised it. An append is the act
+    of recording something that has already happened, and refusing to record
+    it does not make it unhappen.
+    """
     event = {"ts": _now(), "type": event_type, **fields}
-    with (resolve_root(root) / EVENTS).open("a", encoding="utf-8") as fh:
+    path = resolve_root(root) / EVENTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event, sort_keys=False) + "\n")
     return event
 
@@ -382,9 +438,14 @@ def _apply(state: State, event: dict) -> None:
         # and a pass that could not be recorded must not have moved the clock.
         seen = list(event.get("open_issues") or [])
         when = observed_at(event)
+        # Built in full before either write. An entry that cannot be a key — a
+        # mapping where a number belongs — raises here, not halfway through
+        # the loop below with the clock already moved and two sightings
+        # already recorded, which is the half-applied event the fold's
+        # contract says cannot happen.
+        stamps = dict.fromkeys(seen, when)
         state.last_triage_at = when
-        for number in seen:
-            state.open_seen_at[number] = when
+        state.open_seen_at.update(stamps)
 
     elif kind == "issue.triaged":
         state.issues[event["issue"]] = {k: v for k, v in event.items() if k != "type"}
@@ -437,7 +498,8 @@ def _apply(state: State, event: dict) -> None:
         batch["attempts"]["reruns"] += 1
 
     elif kind == "batch.meta" and batch:
-        batch.update({k: v for k, v in event.items() if k not in {"type", "ts", "batch"}})
+        skip = {"type", "ts", "batch"} | META_GUARDED
+        batch.update({k: v for k, v in event.items() if k not in skip})
 
     elif kind == "escalation":
         state.escalations.append(event)
@@ -646,7 +708,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.cmd == "init":
-            print(init(Path(args.root) if args.root else repo_root()))
+            print(init_dir(args.root))
             return 0
         root = _resolve(args.root)
         if args.cmd == "append":

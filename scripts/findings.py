@@ -192,8 +192,8 @@ def _gh_json(args: list[str]):
     try:
         out = subprocess.run(["gh", *args], capture_output=True, text=True, check=True).stdout
         return json.loads(out) if out.strip() else None
-    except (subprocess.CalledProcessError, json.JSONDecodeError):
-        return None
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+        return None  # no gh on PATH is one more way to have no answer
 
 
 def fetch_open_issues(repo: str, limit: int = 100) -> list[dict]:
@@ -274,6 +274,16 @@ def main(argv: list[str] | None = None) -> int:
 
     payload = json.loads(Path(args.plan).read_text())
     context = payload.get("context", {})
+    # An issue, once created, is not something the wrapper can undo, so the
+    # plan's own repository has to agree with --repo before the first one.
+    planned_for = context.get("repo")
+    if planned_for and str(planned_for).lower() != args.repo.lower():
+        print(
+            f"error: this plan was built for {planned_for}, not {args.repo}; "
+            f"rebuild it with --repo {args.repo} rather than filing it here",
+            file=sys.stderr,
+        )
+        return 1
     root = Path(args.ledger)
     filed, failed = [], []
     for issue in payload.get("file", []):

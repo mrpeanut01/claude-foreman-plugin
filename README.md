@@ -58,8 +58,10 @@ reviewing an agent's work tends to approve it, so "clean" is made expensive to s
   it still passes, the test guards nothing. A fact, not a judgement.
 - **Evidence-typed verdict** — a `clean` verdict must name the covering tests and
   carry `revert_check: failed_as_expected`, or the schema parser rejects it.
-- **No fix ability** — the reviewer has no `Edit`/`Write`. It must articulate the
-  defect rather than quietly patch and approve.
+- **No edit tools** — the reviewer has no `Edit`/`Write`. It keeps `Bash`,
+  which the revert check needs, and runs that check in a scratch worktree;
+  the instruction not to change the branch is a rule it is given, not one the
+  harness enforces, and the README says so rather than pretending otherwise.
 - **Two lenses on risky diffs** — correctness and blast-radius reviewers must both
   come back clean.
 - **Post-merge measurement** — the ledger tracks clean reviews that were later
@@ -84,6 +86,7 @@ claude plugin install foreman@claude-foreman-plugin
 | `/foreman:batch` | Group actionable issues into batches sized by CI cost |
 | `/foreman:build` | Implement one batch in a worktree, test-first, behind a local gate |
 | `/foreman:land` | Open the PR, run review and CI concurrently, merge on green |
+| `/foreman:file-findings` | Turn a review's findings into issues, deduplicated against the tracker |
 | `/foreman:status` | What is in flight, what is stuck, what needs you |
 | `/foreman:ci-profile` | Measure the repo's real CI costs into `.foreman/ci-profile.json` |
 
@@ -101,6 +104,12 @@ claude plugin install foreman@claude-foreman-plugin
 Plus one agent: `reviewer` — the independent pre-merge review, with no `Edit` or
 `Write`.
 
+Plus one hook: a `PreToolUse` guard on `Bash` that holds any bare `gh` to the
+same rules as `gh_safe.sh`, in any checkout with a `.foreman/` directory.
+Without it the wrapper was advice — every command runs with an unscoped
+`Bash`, and nothing stopped `gh api -X DELETE` typed directly. The hook is
+inert in repositories foreman is not in use on.
+
 ## Scripts
 
 All stdlib Python plus PyYAML; no service, no database.
@@ -117,6 +126,7 @@ All stdlib Python plus PyYAML; no service, no database.
 | `scripts/findings.py` | Turn review findings into issues, deduplicated against the tracker |
 | `scripts/loop.py` | The scheduler: one next action, WIP limits, the daily CI budget |
 | `scripts/gh_safe.sh` | Allowlisted `gh` wrapper — no deletes, no `--admin`, no protection edits, everything audited |
+| `scripts/gh_guard.py` | The `PreToolUse` hook: a bare `gh` in a Bash command is denied if the wrapper would refuse it |
 
 ## Two rules worth stating plainly
 
@@ -134,6 +144,33 @@ overrides it.
 ```bash
 python3 -m pytest tests/ -q
 ```
+
+## Releasing
+
+A release is the plugin tree at a tag, packaged so it installs without cloning.
+
+```bash
+claude plugin validate --strict .
+claude plugin tag --dry-run     # foreman--v<version>; checks plugin.json and marketplace.json agree
+claude plugin tag --push
+python3 scripts/package.py --ref foreman--v<version> --expect-version <version>
+gh release create foreman--v<version> dist/foreman-<version>.tar.gz dist/foreman-<version>.zip dist/SHA256SUMS
+```
+
+The version lives in `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`,
+and a test keeps the two equal; bump both on the change that ships the release.
+`package.py` builds with `git archive`, so only tracked files ship — no tests, no
+CI config, no `.foreman/` — and then verifies each archive the way an installer
+reads it: every path the manifest declares is present, the hook's script is there
+and executable, and the version is the one expected.
+
+Installing a release:
+
+| How | Command |
+|-----|---------|
+| From the tag, through the marketplace | `claude plugin marketplace add https://github.com/mrpeanut01/claude-foreman-plugin.git#foreman--v<version>` then `claude plugin install foreman@claude-foreman-plugin` |
+| From the archive, for one session | `claude --plugin-dir ./foreman-<version>.zip` |
+| From the archive, in a marketplace of your own | a plugin entry whose source is `{"source": "archive", "url": "<release asset URL>", "sha256": "<from SHA256SUMS>"}` |
 
 ## Roadmap
 

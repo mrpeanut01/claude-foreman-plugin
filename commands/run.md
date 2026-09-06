@@ -21,9 +21,10 @@ session merged something).
 | `do` | Then |
 |------|------|
 | `triage` | `/foreman:triage` |
-| `batch` | `/foreman:batch` |
+| `batch` | `/foreman:batch` — it plans from the ledger, so the `issues` listed need no triage file |
 | `build` | `/foreman:build <batch>` |
-| `open_pr` / `watch` / `advance` / `merge` | `/foreman:land <batch>` |
+| `open_pr` / `watch` / `merge` | `/foreman:land <batch>` |
+| `advance` | `/foreman:land <batch>` step 5: both gates are clear, so move the batch to `ready` and merge |
 | `unblock` | Fix the red gate, push; gates reset |
 | `escalate` | Record it, comment on the PR, label `needs-human`, **move on** |
 | `idle` | Report and stop |
@@ -34,6 +35,13 @@ Finish before starting. An in-flight batch holds a PR open and re-runs CI on
 every trunk move, so draining one is worth more than beginning another. Caps are
 checked before anything else — a batch past its cap must not be picked up again
 by a loop that has forgotten why it failed.
+
+## Flags
+
+| Flag | Means |
+|------|-------|
+| `--max-actions N` | Take at most N actions, then report and stop. |
+| `--dry-run` | Ask `loop.py next` and print the action and the command it maps to, without taking it. Repeats the question once, since nothing moved. Use it to see what an unattended run would do first. |
 
 ## Stopping
 

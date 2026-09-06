@@ -1,6 +1,7 @@
 """Triage: classify, size, risk-score and dedupe issues into the ledger."""
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1071,3 +1072,48 @@ def test_a_plan_from_before_the_field_existed_is_stamped_at_apply_time(tmp_path,
     events = ledger_mod.read_events(tmp_path / ".foreman")
     assert not any("observed_at" in e for e in events)
     assert ledger_mod.load(tmp_path / ".foreman").open_seen_at[5] == events[-1]["ts"]
+
+
+# --- a plan built for one repository is not applied to another ----------------
+
+
+def test_a_plan_for_another_repository_is_refused_before_anything_is_written(
+    tmp_path, monkeypatch, capsys
+):
+    """The recipe writes every plan to /tmp/foreman-triage.json, so a plan for
+    one repo and an --repo for another is one stale file away. Issue #42 in
+    the wrong repository was relabelled with no warning."""
+    import ledger as ledger_mod
+
+    def never(*args, **kwargs):
+        raise AssertionError("gh must not be called for a plan built for another repo")
+
+    monkeypatch.setattr(triage.subprocess, "run", never)
+    plan = _plan_file(tmp_path, _record(42))  # built for me/mine
+    code = triage.main(
+        ["apply", "--repo", "someone/else", "--plan", str(plan), "--ledger", str(tmp_path / ".f")]
+    )
+    assert code == 1
+    assert "me/mine" in capsys.readouterr().err
+    assert ledger_mod.read_events(tmp_path / ".f") == []
+
+
+def test_repository_names_compare_case_insensitively(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        triage.subprocess,
+        "run",
+        lambda args, **kw: subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+    plan = _plan_file(tmp_path, _record(1))
+    code = triage.main(
+        ["apply", "--repo", "Me/Mine", "--plan", str(plan), "--ledger", str(tmp_path / ".f")]
+    )
+    assert code == 0
+
+
+def test_the_docstring_documents_the_flags_plan_and_apply_accept():
+    """`[--json]` was advertised and refused by argparse; `--config` and
+    `--ledger` were accepted and unadvertised."""
+    documented = set(re.findall(r"--[a-z-]+", triage.__doc__))
+    assert "--json" not in documented
+    assert {"--config", "--ledger", "--limit", "--repo", "--plan"} <= documented

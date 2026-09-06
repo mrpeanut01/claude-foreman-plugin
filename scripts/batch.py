@@ -7,14 +7,19 @@ slow CI. The cost of grouping is that a failure is harder to attribute — which
 why every issue gets its own commit and `split()` exists.
 
 CLI:
-    batch.py plan --triage triage.json [--ledger .foreman] [--config .foreman/config.json]
+    batch.py plan [--triage triage.json] [--ledger .foreman] [--config .foreman/config.json]
         [--profile .foreman/ci-profile.json]
     batch.py apply --plan batches.json [--ledger .foreman]
     batch.py paths --batch b-001 --base main [--head HEAD] [--ledger .foreman]
         [--repo-dir .] [--apply]
+    batch.py split --batch b-001 --failing 42 [--ledger .foreman]
 
 `plan` reads the ledger too, to allocate ids that continue past the ones already
 issued, so its --ledger must name the same directory `apply` will write to.
+Without --triage it plans from the ledger alone: every issue triage recorded as
+actionable that no batch yet holds. That is the set `loop.py next` names when it
+answers `batch`, and the only source that survives a new session — the triage
+file lives in /tmp.
 """
 
 from __future__ import annotations
@@ -44,8 +49,28 @@ def _rank(risk: str) -> int:
     return RISK_ORDER.index(risk) if risk in RISK_ORDER else len(RISK_ORDER)
 
 
+def ceiling_problem(config: dict) -> str | None:
+    """Why the configured risk ceiling cannot be applied, or None when it can.
+
+    Fails closed. `_rank` puts an unknown value above `high`, which is right
+    for an issue's risk (unknown rounds up) and exactly wrong for the ceiling:
+    a misspelling — `"Medium"`, `"strict"`, a trailing space — ranked above
+    every real risk, so nothing ever exceeded it and two high-risk issues
+    shared a PR without a word said.
+    """
+    ceiling = config.get("risk_ceiling", "medium")
+    if ceiling in RISK_ORDER:
+        return None
+    return (
+        f"risk_ceiling {ceiling!r} is not one of {RISK_ORDER}; nothing shares a batch until it is"
+    )
+
+
 def can_group(a: dict, b: dict, config: dict) -> tuple[bool, str]:
     """Whether two issues may share a PR, and if not, why not."""
+    problem = ceiling_problem(config)
+    if problem:
+        return False, problem
     ceiling = config.get("risk_ceiling", "medium")
     for record in (a, b):
         if _rank(record.get("risk", "high")) > _rank(ceiling):
@@ -84,18 +109,34 @@ def group_issues(records: list[dict], config: dict, taken: set[str] | None = Non
     )
 
     packed: list[list[dict]] = []
+    # Why each batch had to start: the first reason its first issue could not
+    # join the batch before it. `can_group` always said why and this loop
+    # threw it away, so the strings the docs promise — `unknown paths`, `both
+    # touch src/x.py`, `exceeds the batching ceiling` — appeared in no output.
+    started_because: dict[int, str | None] = {}
     for record in queue:
         weight = WEIGHT.get(record.get("size"), 2)
+        refused: str | None = None
         for group in packed:
             if len(group) >= max_issues:
+                refused = (
+                    refused or f"{group[0]['issue']}'s batch holds max_batch_issues ({max_issues})"
+                )
                 continue
             if sum(WEIGHT.get(g.get("size"), 2) for g in group) + weight > max_weight:
+                refused = refused or (
+                    f"joining #{group[0]['issue']}'s batch would exceed max_batch_weight "
+                    f"({max_weight})"
+                )
                 continue
-            if all(can_group(existing, record, config)[0] for existing in group):
+            verdicts = [can_group(existing, record, config) for existing in group]
+            if all(ok for ok, _ in verdicts):
                 group.append(record)
                 break
+            refused = refused or next(why for ok, why in verdicts if not ok)
         else:
             packed.append([record])  # incompatible with every open batch, so it starts one
+            started_because[record["issue"]] = refused
 
     # Ids must continue past everything the ledger already holds. Numbering from
     # 1 each run reuses the id of an earlier batch, and the fold keys batches by
@@ -126,9 +167,34 @@ def group_issues(records: list[dict], config: dict, taken: set[str] | None = Non
                 "risk": max((r.get("risk", "medium") for r in group), key=_rank),
                 "weight": sum(WEIGHT.get(r.get("size"), 2) for r in group),
                 "titles": {r["issue"]: r.get("title") for r in group},
+                # None for the first batch: there was nothing to join yet.
+                "started_because": started_because.get(group[0]["issue"]),
             }
         )
     return batches
+
+
+def grouped_issues(state) -> set[int]:
+    """Issues some batch already holds, in any state. Same rule as `loop._grouped_issues`."""
+    return {issue for batch in state.batches.values() for issue in batch.get("issues") or []}
+
+
+def ungrouped_records(state, records: list[dict] | None = None) -> list[dict]:
+    """The actionable issues still waiting for a batch.
+
+    From `records` (a triage plan) when given, else from the ledger's own
+    issue records. Either way an issue a batch already holds is left out:
+    triage re-records an issue whenever its `updatedAt` moves, and a second
+    batch for work already in flight or on trunk is the outcome
+    `loop._grouped_issues` exists to prevent.
+    """
+    taken = grouped_issues(state)
+    source = records if records is not None else list(state.issues.values())
+    return [
+        r
+        for r in sorted(source, key=lambda r: r.get("issue") or 0)
+        if r.get("verdict") == "actionable" and r.get("issue") not in taken
+    ]
 
 
 def estimate_savings(batches: list[dict], profile: dict) -> dict:
@@ -278,7 +344,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("plan")
-    p.add_argument("--triage", required=True, help="output of `triage.py plan`")
+    p.add_argument(
+        "--triage",
+        help="output of `triage.py plan`; without it, the ledger's actionable issues "
+        "not yet in a batch",
+    )
     p.add_argument("--ledger", default=".foreman")
     p.add_argument(
         "--config", help="foreman config (default .foreman/config.json in the repository root)"
@@ -296,14 +366,60 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ledger", default=".foreman")
     p.add_argument("--repo-dir", default=".", help="the working tree holding the branch")
     p.add_argument("--apply", action="store_true", help="record the recomputed paths in the ledger")
+    p = sub.add_parser("split", help="peel a failing issue off a batch into one of its own")
+    p.add_argument("--batch", required=True)
+    p.add_argument("--failing", type=int, required=True, help="the issue whose commit is red")
+    p.add_argument("--ledger", default=".foreman")
     return parser
+
+
+def record_split(root: Path, batch_id: str, failing_issue: int, ledger_mod) -> dict:
+    """Split on the record: the batch keeps the rest, the failing issue gets its own.
+
+    The whole economic case for batching rests on this being cheap, and it
+    was not reachable at all — `split()` had unit tests and no caller, so an
+    agent following the recipes had no way to invoke it. The batch keeps its
+    id, branch and PR: dropping one commit from a branch is a rebase and a
+    push, not a new PR. The failing issue becomes `<id>a`, planned, and the
+    loop builds it on its own.
+    """
+    state = ledger_mod.load(root)
+    record = state.batches.get(batch_id)
+    if record is None:
+        raise CannotSplit(f"no batch {batch_id!r} in {root}")
+    failing, rest = split(record, failing_issue)
+    if failing["id"] in state.batches:
+        raise CannotSplit(f"{failing['id']} already exists; this batch was split before")
+    ledger_mod.append(
+        root, "batch.meta", batch=batch_id, issues=rest["issues"], split_off=[failing_issue]
+    )
+    ledger_mod.append(
+        root,
+        "batch.created",
+        batch=failing["id"],
+        issues=failing["issues"],
+        paths=failing["paths"],
+        risk=failing["risk"],
+        split_from=batch_id,
+    )
+    return {
+        "batch": batch_id,
+        "keeps": rest["issues"],
+        "failing": {"id": failing["id"], "issues": failing["issues"], "state": "planned"},
+        "then": [
+            f"in the worktree, drop #{failing_issue}'s commit from the branch "
+            "(git rebase --onto, or git revert) and push with --force-with-lease; "
+            "the PR then carries the rest, and the push resets both gates",
+            f"the loop builds {failing['id']} on its own when a slot is free",
+        ],
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.cmd == "plan":
-        triage_out = json.loads(Path(args.triage).read_text())
+        triage_out = json.loads(Path(args.triage).read_text()) if args.triage else None
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import ledger as ledger_mod
 
@@ -311,7 +427,11 @@ def main(argv: list[str] | None = None) -> int:
         # against the caller, a plan cut from a build worktree saw no config —
         # no limits, no risk ceiling — and no profile, so it could not say what
         # its batching saved.
-        config = ledger_mod.load_config(args.config)
+        try:
+            config = ledger_mod.load_config(args.config)
+        except ledger_mod.LedgerError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         profile = ledger_mod.load_profile(args.profile)
 
         ledger_root = Path(args.ledger)
@@ -326,8 +446,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"warning: no ledger at {ledger_root}; batch ids will restart at b-001",
                 file=sys.stderr,
             )
-        taken = set(ledger_mod.load(ledger_root).batches)
-        batches = group_issues(triage_out.get("triaged", []), config, taken=taken)
+        problem = ceiling_problem(config)
+        if problem:
+            # Every issue comes out solo below, which is safe and useless;
+            # without this line it is also silent.
+            print(f"warning: {problem}", file=sys.stderr)
+        state = ledger_mod.load(ledger_root)
+        records = ungrouped_records(
+            state, triage_out.get("triaged", []) if triage_out is not None else None
+        )
+        batches = group_issues(records, config, taken=set(state.batches))
         print(
             json.dumps(
                 {"batches": batches, "savings": estimate_savings(batches, profile)}, indent=2
@@ -339,6 +467,15 @@ def main(argv: list[str] | None = None) -> int:
     import ledger as ledger_mod
 
     root = Path(args.ledger)
+
+    if args.cmd == "split":
+        try:
+            outcome = record_split(root, args.batch, args.failing, ledger_mod)
+        except CannotSplit as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps(outcome, indent=2))
+        return 0
 
     if args.cmd == "paths":
         record = ledger_mod.load(root).batches.get(args.batch)

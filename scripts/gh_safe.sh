@@ -135,12 +135,16 @@ if [ "$SUB" = "delete" ]; then
   refuse "$@"
 fi
 
+# Every flag check below matches the `--flag=value` spelling as well as the
+# spaced one. `gh` is built on pflag, which reads `--admin=true`, `-XDELETE`
+# and `-Ftitle=x` exactly as it reads the two-token forms, so a check that
+# knew only the spaced spelling let every one of these through under another.
 for arg in "$@"; do
   case "$arg" in
-    --admin)
+    --admin|--admin=*)
       REASON="--admin merges past the very gates the loop exists to enforce"
       refuse "$@" ;;
-    --force|--force-with-lease)
+    --force|--force=*|--force-with-lease|--force-with-lease=*)
       REASON="force operations are not available to the loop"
       refuse "$@" ;;
   esac
@@ -148,22 +152,65 @@ done
 
 # `gh api` is read-only here. Anything that mutates has a named subcommand
 # above, which is easier to audit than an arbitrary endpoint plus a verb.
+#
+# The flags are an allowlist rather than a denylist. A denylist has to know
+# every spelling of every flag that can carry a body or a method, and `-F`
+# (typed field) was missing from it while `-f` (raw field) was present: one
+# letter of case, and the loop could POST. A flag this list has never heard of
+# is refused for the same reason -- it might be the one that carries a body.
+api_value_flag() {
+  # Flags that take the next argument as their value. That value is never
+  # inspected as a flag, so a jq expression or a header beginning with `-`
+  # cannot be mistaken for one.
+  case "$1" in
+    -H|--header|-q|--jq|-t|--template|--cache|--hostname|-p|--preview) return 0 ;;
+  esac
+  return 1
+}
+
 if [ "$VERB" = "api" ]; then
   prev=""
   for arg in "$@"; do
-    case "$prev" in
+    if [ "$prev" = "-X" ] || [ "$prev" = "--method" ]; then
+      if [ "$arg" != "GET" ]; then
+        REASON="gh api is read-only for the loop; refusing method $arg"
+        refuse "$@"
+      fi
+      prev=""
+      continue
+    fi
+    if api_value_flag "$prev"; then
+      prev=""
+      continue
+    fi
+    case "$arg" in
       -X|--method)
-        if [ "$arg" != "GET" ]; then
-          REASON="gh api is read-only for the loop; refusing method $arg"
+        prev="$arg"
+        continue ;;
+      -X=*|--method=*)
+        if [ "${arg#*=}" != "GET" ]; then
+          REASON="gh api is read-only for the loop; refusing method ${arg#*=}"
           refuse "$@"
         fi ;;
-    esac
-    case "$arg" in
-      --input|-f|--field|--raw-field)
+      -X*)
+        if [ "${arg#-X}" != "GET" ]; then
+          REASON="gh api is read-only for the loop; refusing method ${arg#-X}"
+          refuse "$@"
+        fi ;;
+      --input|--input=*|-f|-f*|--raw-field|--raw-field=*|-F|-F*|--field|--field=*)
         REASON="gh api request bodies are not available to the loop"
         refuse "$@" ;;
+      -H|--header|-q|--jq|-t|--template|--cache|--hostname|-p|--preview)
+        prev="$arg"
+        continue ;;
+      -H=*|--header=*|-q=*|--jq=*|-t=*|--template=*|--cache=*|--hostname=*|-p=*|--preview=*) ;;
+      -H?*|-q?*|-t?*|-p?*) ;;
+      --paginate|--slurp|-i|--include|--silent|--verbose) ;;
+      -*)
+        REASON="gh api flag $arg is not on the loop's read-only allowlist"
+        refuse "$@" ;;
     esac
-    prev="$arg"
+    prev=""
   done
 else
   case " $(echo $ALLOWED) " in

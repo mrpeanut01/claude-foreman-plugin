@@ -637,3 +637,142 @@ def test_a_config_in_a_directory_outside_any_repository_still_resolves(tmp_path,
     (outside / ledger.LEDGER_DIR / ledger.CONFIG_FILE).write_text(json.dumps({"auto_merge": True}))
     monkeypatch.chdir(outside)
     assert ledger.load_config(None) == {"auto_merge": True}
+
+
+# --- an append never fails for want of a directory ----------------------------
+
+
+def test_an_append_creates_the_ledger_directory_it_needs(tmp_path):
+    """`findings.py file` created a GitHub issue and then died here, before it
+    could record that it had. Recording does not make a thing happen, so
+    refusing to record it does not make it unhappen."""
+    fresh = tmp_path / "never-inited" / ledger.LEDGER_DIR
+    ledger.append(fresh, "finding.filed", url="https://x/1")
+    assert [e["type"] for e in ledger.read_events(fresh)] == ["finding.filed"]
+
+
+# --- `--root` names one directory, whatever the subcommand --------------------
+
+
+def test_init_and_append_read_root_as_the_same_directory(tmp_path):
+    """`--root X init` made X/.foreman/events.jsonl while `--root X append`
+    wrote X/events.jsonl: one flag, two ledgers, and the first was the one
+    nothing ever read."""
+    root = tmp_path / "ledger"
+    assert ledger.main(["--root", str(root), "init"]) == 0
+    ledger.main(
+        ["--root", str(root), "append", "--type", "batch.created", "--json", '{"batch":"b-1"}']
+    )
+    assert [e["type"] for e in ledger.read_events(root)] == ["batch.created"]
+    assert not (root / ledger.LEDGER_DIR).exists(), "init must not nest a second .foreman"
+
+
+def test_init_without_root_still_lands_in_the_repositorys_own_foreman(
+    worktree, monkeypatch, capsys
+):
+    checkout, linked = worktree
+    monkeypatch.chdir(linked)
+    assert ledger.main(["init"]) == 0
+    printed = Path(capsys.readouterr().out.strip())
+    assert printed == checkout / ledger.LEDGER_DIR
+    assert (checkout / ledger.LEDGER_DIR / ledger.EVENTS).exists()
+
+
+def test_the_python_init_still_takes_a_repository(tmp_path):
+    """Every test fixture in the suite calls it that way; the signature stands."""
+    assert ledger.init(tmp_path) == tmp_path / ledger.LEDGER_DIR
+
+
+# --- batch.meta corrects what the loop learned late, never what it must earn --
+
+
+def test_a_meta_event_cannot_move_the_state_or_clear_a_gate(root):
+    """One documented append skipped every check in the file at once: the
+    batch read as ready with both gates clear, and blocking_gates was empty."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.append(
+        root,
+        "batch.meta",
+        batch="b-001",
+        state="ready",
+        ci_gate="full_green",
+        review_gate="clean",
+        progress_at="2099-01-01T00:00:00Z",
+        pr=7,
+    )
+    batch = ledger.load(root).batches["b-001"]
+    assert batch["state"] == "planned"
+    assert batch["ci_gate"] == "pending" and batch["review_gate"] == "pending"
+    assert ledger.blocking_gates(batch) == ["ci", "review"]
+    assert batch["progress_at"] != "2099-01-01T00:00:00Z"
+    assert batch["pr"] == 7, "the fields a correction is for still apply"
+
+
+def test_a_meta_event_still_forgives_a_cap_on_the_record(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    for sha in "abc":
+        ledger.append(root, "batch.pushed", batch="b-001", sha=sha)
+    ledger.append(root, "batch.meta", batch="b-001", attempts={"pushes": 0})
+    assert ledger.load(root).batches["b-001"]["attempts"]["pushes"] == 0
+
+
+def test_a_triage_pass_with_one_unreadable_sighting_leaves_nothing_half_applied():
+    """`open_issues: 5` was caught before anything was written; `[7, {}, 9]`
+    was not — the clock moved and #7 was stamped before the mapping raised."""
+    events = [
+        {"ts": "2026-01-01T00:00:00Z", "type": "triage.completed", "open_issues": [7, {}, 9]},
+    ]
+    state = ledger.fold(events)
+    assert state.skipped_lines == 1
+    assert state.last_triage_at is None
+    assert state.open_seen_at == {}
+
+
+# --- a config that is there and will not parse stops everything, in one line --
+
+
+def test_a_malformed_config_is_a_named_error_not_a_traceback(tmp_path):
+    bad = tmp_path / "config.json"
+    bad.write_text('{"caps": {\n')
+    with pytest.raises(ledger.ConfigError) as caught:
+        ledger.load_config(bad)
+    message = str(caught.value)
+    assert str(bad) in message and "line 2" in message and "caps" in message
+
+
+def test_a_config_that_is_not_an_object_is_refused(tmp_path):
+    bad = tmp_path / "config.json"
+    bad.write_text("[1, 2, 3]")
+    with pytest.raises(ledger.ConfigError):
+        ledger.load_config(bad)
+
+
+def _cli(name):
+    import importlib
+
+    return importlib.import_module(name)
+
+
+@pytest.mark.parametrize(
+    "module,argv",
+    [
+        ("loop", ["next", "--ledger", "{root}", "--config", "{bad}"]),
+        ("status", ["--ledger", "{root}", "--config", "{bad}"]),
+        ("land", ["blockers", "--batch", "b-001", "--ledger", "{root}", "--config", "{bad}"]),
+        ("batch", ["plan", "--ledger", "{root}", "--config", "{bad}"]),
+        ("triage", ["plan", "--repo", "o/r", "--ledger", "{root}", "--config", "{bad}"]),
+    ],
+)
+def test_every_cli_that_reads_the_config_exits_one_with_the_reason(
+    module, argv, root, tmp_path, capsys, monkeypatch
+):
+    """Every one of these let json.JSONDecodeError escape as a traceback, and
+    an unattended loop that dies with a traceback is a loop nobody reads."""
+    monkeypatch.chdir(tmp_path)
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"caps": {')
+    filled = [a.format(root=root, bad=bad) for a in argv]
+    assert _cli(module).main(filled) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error:") and "not valid JSON" in err

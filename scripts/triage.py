@@ -12,8 +12,9 @@ they are what keeps automated triage trustworthy:
     applying needs-repro is evidence of absence, not absence of evidence.
 
 CLI:
-    triage.py plan --repo OWNER/NAME [--limit 50] [--json]
-    triage.py apply --repo OWNER/NAME --plan plan.json
+    triage.py plan --repo OWNER/NAME [--limit 50] [--config .foreman/config.json]
+        [--ledger .foreman]
+    triage.py apply --repo OWNER/NAME --plan plan.json [--ledger .foreman]
 """
 
 from __future__ import annotations
@@ -537,8 +538,8 @@ def _gh_json(args: list[str]):
     try:
         out = subprocess.run(["gh", *args], capture_output=True, text=True, check=True).stdout
         return json.loads(out) if out.strip() else None
-    except (subprocess.CalledProcessError, json.JSONDecodeError):
-        return None
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+        return None  # no gh on PATH is one more way to have no answer
 
 
 def fetch_issues(repo: str, limit: int = 50) -> list[dict]:
@@ -617,7 +618,11 @@ def main(argv: list[str] | None = None) -> int:
         # Anchored to the repository, and loud when there is nothing to read:
         # an empty config means no protected paths, which silently scores every
         # auth and workflow change as medium and lets it into a batch.
-        config = ledger_mod.load_config(args.config)
+        try:
+            config = ledger_mod.load_config(args.config)
+        except ledger_mod.LedgerError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
         # No `.exists()` guard in front of this. `ledger.load` anchors a relative
         # path to the repository and reads a missing file as no events, so the
@@ -653,11 +658,24 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     plan = json.loads(Path(args.plan).read_text())
+    # The plan names the repository it was built for. The recipe writes every
+    # plan to the same /tmp path, so a plan for one repo and an --repo for
+    # another is one stale file away — and it relabelled issue numbers in the
+    # wrong repository without a word. Nothing is written past this line
+    # until the two agree; GitHub compares repo names case-insensitively.
+    planned_for = plan.get("repo")
+    if planned_for and str(planned_for).lower() != args.repo.lower():
+        print(
+            f"error: this plan was built for {planned_for}, not {args.repo}; "
+            f"rebuild it with --repo {args.repo} rather than applying it here",
+            file=sys.stderr,
+        )
+        return 1
     sys.path.insert(0, str(here))
     import ledger as ledger_mod
 
     root = Path(args.ledger)
-    ledger_mod.init(root.parent if root.name == ledger_mod.LEDGER_DIR else root)
+    ledger_mod.init_dir(root)
     # Every sighting this apply writes is dated by when the plan looked at the
     # tracker, not by when apply ran. `loop.merged_leaving_open` compares the
     # sighting against a merged batch's `progress_at`, and a plan built before

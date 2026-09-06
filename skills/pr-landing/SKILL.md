@@ -69,8 +69,17 @@ never the whole run, and never past the cap.
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" paths --batch <id> --base <trunk> \
   --repo-dir ../foreman-<id> --apply
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> --repo OWNER/NAME
-"${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --squash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> ready
+"${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --<merge_method>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ledger.py" transition <batch> merging
 ```
+
+`<merge_method>` is what `blockers` prints under that key — `squash`, `merge`
+or `rebase`, from `merge_method` in config, squash by default.
+
+`ready` before the merge is requested, never after: `merging` is reachable
+only from `ready`, and a move refused after `pr merge --auto` has gone out
+leaves GitHub merging a batch the ledger still calls `open`.
 
 `paths --apply` first: the protected-path check reads the batch's `paths`, and
 until this runs those are the files its issues' prose mentioned, not the files

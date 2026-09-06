@@ -1036,3 +1036,202 @@ def test_the_profile_is_read_from_the_repository_when_the_gate_runs_in_a_worktre
     assert code == 0
     assert not any("no CI profile" in note for note in report["notes"]), report["notes"]
     assert report["jobs"] == ["lint"]
+
+
+# --- what a job inherits, and what stops it -----------------------------------
+# Four ways the gate disagreed with CI about the shape of a job. Each one either
+# ran a command CI would not have reached, or reported a red or green CI would
+# not have produced.
+
+
+def test_a_job_level_condition_blocks_the_whole_job(repo, toolbox):
+    """Actions evaluates `jobs.<id>.if` before any step runs. The gate read only
+    step-level conditions, so a job gated to `push` ran on a laptop."""
+    install_marker_tool(toolbox)
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        jobs:
+          publish:
+            if: github.event_name == 'push'
+            steps:
+              - run: touch published.txt
+        """,
+    )
+    report = run(repo, profile=profile(publish={}))
+    assert report["status"] == "blocked"
+    assert ids(report["unrunnable"]) == ["publish#?"]
+    assert "conditional" in report["unrunnable"][0]["reason"]
+    assert not (repo / "published.txt").exists(), "the gate ran a job CI would not have"
+
+
+def test_a_reusable_workflow_job_is_named_rather_than_dropped(repo):
+    """A `uses:` job has no steps, so it contributed nothing to the plan and a
+    green was reported having verified nothing about it."""
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        jobs:
+          lint:
+            steps: [{run: true}]
+          suite:
+            uses: ./.github/workflows/reusable.yml
+        """,
+    )
+    report = run(repo, profile=profile(lint={}, suite={}))
+    assert report["status"] == "blocked"
+    assert ids(report["unrunnable"]) == ["suite#?"]
+    assert "reusable" in report["unrunnable"][0]["reason"]
+
+
+UNRUNNABLE_THEN_MARKER = """
+    name: CI
+    on: [pull_request]
+    jobs:
+      lint:
+        steps:
+          - run: no-such-linter check .
+          - run: touch ran-anyway.txt
+"""
+
+
+def test_a_step_after_one_this_machine_cannot_run_is_not_run(repo, toolbox):
+    """CI halts the job on a missing tool exactly as it does on a failure."""
+    install_marker_tool(toolbox)
+    workflow(repo, UNRUNNABLE_THEN_MARKER)
+    report = run(repo, profile=profile(lint={}))
+    assert report["status"] == "blocked"
+    statuses = [s["status"] for s in report["steps"] if s["job"] == "lint"]
+    assert statuses == ["unrunnable", "not_run"]
+    assert not (repo / "ran-anyway.txt").exists()
+
+
+def test_allowing_unrunnable_steps_runs_the_rest_of_the_job(repo, toolbox):
+    """The waiver says "let CI run that one first"; everything else still runs here."""
+    install_marker_tool(toolbox)
+    workflow(repo, UNRUNNABLE_THEN_MARKER)
+    report = run(repo, profile=profile(lint={}), allow_unrunnable=True)
+    assert report["status"] == "waived"
+    assert (repo / "ran-anyway.txt").exists()
+
+
+def test_an_unrunnable_step_in_one_job_does_not_halt_another(repo, toolbox):
+    install_marker_tool(toolbox)
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        jobs:
+          lint:
+            steps: [{run: no-such-linter .}]
+          fmt:
+            steps: [{run: touch fmt-ran.txt}]
+        """,
+    )
+    run(repo, profile=profile(lint={}, fmt={}))
+    assert (repo / "fmt-ran.txt").exists()
+
+
+def test_a_step_sees_the_env_its_job_and_workflow_declare(repo):
+    """Only the step's own `env:` was read, so a step relying on a job-level
+    variable failed here with a red CI would never produce."""
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        env: {FROM_WORKFLOW: one, FLAG: true}
+        jobs:
+          lint:
+            env: {FROM_JOB: two}
+            steps:
+              - env: {OWN: three}
+                run: >-
+                  test "$FROM_WORKFLOW" = one && test "$FROM_JOB" = two
+                  && test "$OWN" = three && test "$FLAG" = true
+        """,
+    )
+    assert run(repo, profile=profile(lint={}))["status"] == "green"
+
+
+def test_the_nearer_env_declaration_wins(repo):
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        env: {WHO: workflow}
+        jobs:
+          lint:
+            env: {WHO: job}
+            steps:
+              - run: 'test "$WHO" = job'
+              - env: {WHO: step}
+                run: 'test "$WHO" = step'
+        """,
+    )
+    assert run(repo, profile=profile(lint={}))["status"] == "green"
+
+
+def test_an_inherited_expression_is_dropped_unless_the_step_reads_it(repo):
+    """`${{ secrets.X }}` at workflow level is common and mostly irrelevant to a
+    lint step. Blocking every step for it would train people to waive; passing
+    it through unset would be a silent wrong answer to the step that reads it."""
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        env: {TOKEN: '${{ secrets.TOKEN }}'}
+        jobs:
+          lint:
+            steps:
+              - run: true
+              - run: 'test -n "$TOKEN"'
+        """,
+    )
+    report = run(repo, profile=profile(lint={}))
+    statuses = {s["id"]: s["status"] for s in report["steps"]}
+    assert statuses["lint#1"] == "passed"
+    assert statuses["lint#2"] == "unrunnable"
+    assert "TOKEN" in report["unrunnable"][0]["reason"]
+    assert report["steps"][1]["env_dropped"] == ["TOKEN"]
+
+
+def test_a_job_default_working_directory_applies_to_its_steps(repo):
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        jobs:
+          lint:
+            defaults: {run: {working-directory: src}}
+            steps:
+              - run: 'test "${PWD##*/}" = src'
+        """,
+    )
+    assert run(repo, profile=profile(lint={}))["status"] == "green"
+
+
+def test_a_job_marked_continue_on_error_does_not_fail_the_gate(repo):
+    workflow(
+        repo,
+        """
+        name: CI
+        on: [pull_request]
+        jobs:
+          lint:
+            continue-on-error: true
+            steps: [{run: exit 1}]
+          fmt:
+            steps: [{run: true}]
+        """,
+    )
+    report = run(repo, profile=profile(lint={}, fmt={}))
+    assert report["status"] == "green"

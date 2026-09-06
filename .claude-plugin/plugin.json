@@ -1,7 +1,11 @@
 {
   "name": "foreman",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Runs the dev loop end to end: triage issues, batch them by CI cost, build, review independently, and auto-merge on green",
+  "author": {
+    "name": "mrpeanut01",
+    "url": "https://github.com/mrpeanut01"
+  },
   "commands": [
     "./commands/run.md",
     "./commands/triage.md",
@@ -23,7 +27,7 @@
   "agents": [
     "./agents/reviewer.md"
   ],
-  "hooks": [],
+  "hooks": "./hooks/hooks.json",
   "keywords": [
     "github",
     "issues",

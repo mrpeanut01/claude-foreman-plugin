@@ -322,3 +322,43 @@ def test_a_finding_raised_outside_a_pull_request_names_no_pr(context):
 def test_a_finding_raised_on_a_pull_request_still_names_it():
     first = findings.to_issue(f(), CONTEXT, LABELS)["body"].splitlines()[0]
     assert "PR #7" in first
+
+
+# --- a plan built for one repository is not filed against another -------------
+
+
+def test_a_plan_for_another_repository_files_nothing(tmp_path, monkeypatch, capsys):
+    """`findings.py file` creates issues, which the wrapper cannot undo, so the
+    check has to come before the first one."""
+
+    def never(repo, issue, wrapper):
+        raise AssertionError("no issue may be created for a plan built for another repo")
+
+    monkeypatch.setattr(findings, "create_issue", never)
+    result = findings.plan([f()], CONTEXT, LABELS, [])
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps({**result, "context": CONTEXT}))  # context.repo is o/r
+    rc = findings.main(
+        ["file", "--plan", str(plan_file), "--repo", "someone/else", "--ledger", str(tmp_path)]
+    )
+    assert rc == 1
+    assert "o/r" in capsys.readouterr().err
+
+
+def test_filing_into_a_ledger_that_does_not_exist_yet_still_records_the_issue(
+    tmp_path, monkeypatch, capsys
+):
+    """The issue was created, then the append raised FileNotFoundError: a real
+    issue on the tracker with no ledger trace of the review that raised it."""
+    import ledger as ledger_mod
+
+    monkeypatch.setattr(findings, "create_issue", lambda repo, issue, wrapper: "https://x/7")
+    result = findings.plan([f()], CONTEXT, LABELS, [])
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps({**result, "context": CONTEXT}))
+    fresh = tmp_path / "never-inited" / ".foreman"
+    rc = findings.main(["file", "--plan", str(plan_file), "--repo", "o/r", "--ledger", str(fresh)])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["filed"] == ["https://x/7"]
+    (event,) = ledger_mod.read_events(fresh)
+    assert event["type"] == "finding.filed" and event["url"] == "https://x/7"

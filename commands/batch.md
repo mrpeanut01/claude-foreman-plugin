@@ -9,8 +9,15 @@ allowed-tools: Bash(python3:*), Read, Write
 Turns actionable issues into batches, each destined for one PR and one suite run.
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" plan --triage /tmp/foreman-triage.json
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" plan > /tmp/foreman-batches.json
 ```
+
+Plans from the ledger: every issue triage recorded as `actionable` that no batch
+yet holds — the same set `loop.py next` names when it answers `batch`. That is
+the only source that survives a new session. `--triage /tmp/foreman-triage.json`
+plans from a triage file instead, for reading a plan straight after `/foreman:triage`;
+issues a batch already holds are left out either way, because a second batch
+for work already in flight is the runaway the loop guards against.
 
 Prints the batches plus the savings they buy. Read `Skill(foreman:work-batching)`
 for the grouping rules and the arithmetic behind them.
@@ -21,7 +28,9 @@ for the grouping rules and the arithmetic behind them.
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" apply --plan /tmp/foreman-batches.json
 ```
 
-Appends one `batch.created` event per batch. Nothing is built yet.
+Appends one `batch.created` event per batch. Nothing is built yet. The plan
+file is the one the first command wrote — it used to print to the terminal and
+this step then read a file nothing had written.
 
 ## Reading the savings block
 
@@ -35,7 +44,11 @@ but unquantified, and the tool says so rather than inventing a number.
 
 ## Why a batch may be smaller than you expect
 
-| Reason | Fix |
+Every batch in the plan carries `started_because`: the first reason its first
+issue could not join the batch before it, or `null` for the first batch. Read
+that field rather than guessing.
+
+| `started_because` | Fix |
 |--------|-----|
 | `unknown paths: independence cannot be established` | The issues name no files. Add path hints to the issue, or accept solo batches. |
 | `both touch src/x.py` | Correct behaviour — conflicts inside a batch are self-inflicted. |
