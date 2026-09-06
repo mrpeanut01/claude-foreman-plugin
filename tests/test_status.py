@@ -1,5 +1,7 @@
 """Status digest: what is in flight, what is stuck, and what needs a human."""
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -129,3 +131,77 @@ def test_the_older_root_spelling_still_works(root, capsys):
     ledger.append(root, "batch.created", batch="b-001", issues=[42])
     assert status.main(["--root", str(root)]) == 0
     assert "b-001" in capsys.readouterr().out
+
+
+# --- issue #70: the config must not follow the caller around here either -----
+
+
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", "-c", "user.email=f@example.com", "-c", "user.name=foreman", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """A repo plus the build worktree `commands/build.md` prescribes."""
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    _git(checkout, "init", "-q", "-b", "main")
+    _git(checkout, "commit", "-q", "--allow-empty", "-m", "root")
+    linked = tmp_path / "foreman-b-001"
+    _git(checkout, "worktree", "add", "-q", str(linked), "-b", "foreman/b-001")
+    return checkout, linked
+
+
+def _batch_at_three_pushes(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    for step in ("building", "built", "open"):
+        ledger.transition(root, "b-001", step)
+    for sha in "abc":
+        ledger.append(root, "batch.pushed", batch="b-001", sha=sha)
+
+
+def test_the_caps_are_read_from_the_repository_when_status_runs_from_a_worktree(
+    worktree, monkeypatch, capsys
+):
+    """`root / "config.json"` resolved against the caller, so from a build
+    worktree the digest rendered with `caps={}` — every counter without its
+    ceiling, and no batch ever shown at cap."""
+    checkout, linked = worktree
+    root = ledger.init(checkout)
+    (root / ledger.CONFIG_FILE).write_text(json.dumps({"caps": {"pushes": 3}}))
+    _batch_at_three_pushes(root)
+    monkeypatch.chdir(linked)
+
+    assert status.main([]) == 0
+    out = capsys.readouterr().out
+    assert "at cap" in out and "pushes = 3/3" in out
+
+
+def test_a_missing_config_is_said_out_loud_rather_than_rendered_as_no_caps(
+    worktree, monkeypatch, capsys
+):
+    """Silence was the defect: the digest looked complete with its brakes off."""
+    checkout, linked = worktree
+    _batch_at_three_pushes(ledger.init(checkout))
+    monkeypatch.chdir(linked)
+
+    assert status.main([]) == 0
+    captured = capsys.readouterr()
+    assert "Nothing blocked." in captured.out, "no config really does mean no caps"
+    assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in captured.err
+
+
+def test_an_explicit_config_path_is_still_obeyed(worktree, monkeypatch, tmp_path, capsys):
+    checkout, linked = worktree
+    elsewhere = tmp_path / "strict.json"
+    elsewhere.write_text(json.dumps({"caps": {"pushes": 1}}))
+    _batch_at_three_pushes(ledger.init(checkout))
+    monkeypatch.chdir(linked)
+
+    assert status.main(["--config", str(elsewhere)]) == 0
+    assert "pushes = 3/1" in capsys.readouterr().out
