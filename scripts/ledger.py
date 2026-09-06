@@ -263,11 +263,25 @@ def load_config(path: Path | str | None = None) -> dict:
 # --- storage ------------------------------------------------------------------
 
 
+def init_dir(root: Path | str | None) -> Path:
+    """Create the ledger directory `root` names — the same directory every
+    other call resolves that argument to.
+
+    The CLI's `--root` is documented as the ledger directory, and `append`,
+    `transition`, `gate` and `state` all read it that way. `init` alone read it
+    as the *repository* and appended `.foreman` to it, so `--root X init` made
+    `X/.foreman/events.jsonl` while `--root X append` wrote `X/events.jsonl`:
+    one flag, two directories. This is the entry point that means what the
+    flag says; `init` keeps its Python signature for callers that pass a repo.
+    """
+    resolved = resolve_root(root)
+    resolved.mkdir(parents=True, exist_ok=True)
+    (resolved / EVENTS).touch()
+    return resolved
+
+
 def init(repo_root_dir: Path | str) -> Path:
-    root = resolve_root(Path(repo_root_dir) / LEDGER_DIR)
-    root.mkdir(parents=True, exist_ok=True)
-    (root / EVENTS).touch()
-    return root
+    return init_dir(Path(repo_root_dir) / LEDGER_DIR)
 
 
 def _now() -> str:
@@ -657,7 +671,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.cmd == "init":
-            print(init(Path(args.root) if args.root else repo_root()))
+            print(init_dir(args.root))
             return 0
         root = _resolve(args.root)
         if args.cmd == "append":

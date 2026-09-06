@@ -670,7 +670,7 @@ def main(argv: list[str] | None = None) -> int:
     import ledger as ledger_mod
 
     root = Path(args.ledger)
-    ledger_mod.init(root.parent if root.name == ledger_mod.LEDGER_DIR else root)
+    ledger_mod.init_dir(root)
     # Every sighting this apply writes is dated by when the plan looked at the
     # tracker, not by when apply ran. `loop.merged_leaving_open` compares the
     # sighting against a merged batch's `progress_at`, and a plan built before

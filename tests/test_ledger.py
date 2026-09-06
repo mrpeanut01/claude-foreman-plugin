@@ -649,3 +649,35 @@ def test_an_append_creates_the_ledger_directory_it_needs(tmp_path):
     fresh = tmp_path / "never-inited" / ledger.LEDGER_DIR
     ledger.append(fresh, "finding.filed", url="https://x/1")
     assert [e["type"] for e in ledger.read_events(fresh)] == ["finding.filed"]
+
+
+# --- `--root` names one directory, whatever the subcommand --------------------
+
+
+def test_init_and_append_read_root_as_the_same_directory(tmp_path):
+    """`--root X init` made X/.foreman/events.jsonl while `--root X append`
+    wrote X/events.jsonl: one flag, two ledgers, and the first was the one
+    nothing ever read."""
+    root = tmp_path / "ledger"
+    assert ledger.main(["--root", str(root), "init"]) == 0
+    ledger.main(
+        ["--root", str(root), "append", "--type", "batch.created", "--json", '{"batch":"b-1"}']
+    )
+    assert [e["type"] for e in ledger.read_events(root)] == ["batch.created"]
+    assert not (root / ledger.LEDGER_DIR).exists(), "init must not nest a second .foreman"
+
+
+def test_init_without_root_still_lands_in_the_repositorys_own_foreman(
+    worktree, monkeypatch, capsys
+):
+    checkout, linked = worktree
+    monkeypatch.chdir(linked)
+    assert ledger.main(["init"]) == 0
+    printed = Path(capsys.readouterr().out.strip())
+    assert printed == checkout / ledger.LEDGER_DIR
+    assert (checkout / ledger.LEDGER_DIR / ledger.EVENTS).exists()
+
+
+def test_the_python_init_still_takes_a_repository(tmp_path):
+    """Every test fixture in the suite calls it that way; the signature stands."""
+    assert ledger.init(tmp_path) == tmp_path / ledger.LEDGER_DIR
