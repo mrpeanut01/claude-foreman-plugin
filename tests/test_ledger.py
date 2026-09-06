@@ -714,3 +714,15 @@ def test_a_meta_event_still_forgives_a_cap_on_the_record(root):
         ledger.append(root, "batch.pushed", batch="b-001", sha=sha)
     ledger.append(root, "batch.meta", batch="b-001", attempts={"pushes": 0})
     assert ledger.load(root).batches["b-001"]["attempts"]["pushes"] == 0
+
+
+def test_a_triage_pass_with_one_unreadable_sighting_leaves_nothing_half_applied():
+    """`open_issues: 5` was caught before anything was written; `[7, {}, 9]`
+    was not — the clock moved and #7 was stamped before the mapping raised."""
+    events = [
+        {"ts": "2026-01-01T00:00:00Z", "type": "triage.completed", "open_issues": [7, {}, 9]},
+    ]
+    state = ledger.fold(events)
+    assert state.skipped_lines == 1
+    assert state.last_triage_at is None
+    assert state.open_seen_at == {}

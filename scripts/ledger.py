@@ -420,9 +420,14 @@ def _apply(state: State, event: dict) -> None:
         # and a pass that could not be recorded must not have moved the clock.
         seen = list(event.get("open_issues") or [])
         when = observed_at(event)
+        # Built in full before either write. An entry that cannot be a key — a
+        # mapping where a number belongs — raises here, not halfway through
+        # the loop below with the clock already moved and two sightings
+        # already recorded, which is the half-applied event the fold's
+        # contract says cannot happen.
+        stamps = dict.fromkeys(seen, when)
         state.last_triage_at = when
-        for number in seen:
-            state.open_seen_at[number] = when
+        state.open_seen_at.update(stamps)
 
     elif kind == "issue.triaged":
         state.issues[event["issue"]] = {k: v for k, v in event.items() if k != "type"}
