@@ -348,14 +348,19 @@ def ci_gate(
 
     required = list(profile.get("required_checks") or [])
     if not required:
+        # Both branches below need the same two sets: what this repo declares,
+        # and which of those declarations have reported on this commit. Whether
+        # protection could be read changes what is *required*; it changes
+        # nothing about what counts as CI having spoken.
+        declared = profile.get("jobs") or {}
+        shapes = _shapes(profile)
+        reported = {attribute(c.get("name", ""), shapes) for c in (checks or [])}
+
         if not profile.get("protection_known", False):
             # Nothing is known to be optional, so decide from what the workflows
             # declare plus what has actually reported.
-            declared = profile.get("jobs") or {}
-            shapes = _shapes(profile)
             requirable = {n: s for n, s in declared.items() if can_report_on_pr(s, base_branch)}
             covered = {attribute(name, shapes) for name in summary["passed"]}
-            reported = {attribute(c.get("name", ""), shapes) for c in (checks or [])}
 
             if requirable:
                 if not all(n in covered for n in requirable):
@@ -370,16 +375,23 @@ def ci_gate(
             return "full_green" if not summary["actionable_pending"] else "pending"
 
         # Protection says nothing is required, so nothing can block a merge.
-        # "Nothing blocks" is not "CI has already spoken", though. When the gate
-        # is scoped to a commit and nothing in the list describes it — every
-        # result belonged to another commit, or none has arrived in the window
-        # after a push — a repo that runs CI at all has simply not reported yet.
-        # Reading that as green is how a batch merges past a suite that never
-        # ran, and it is strictly worse than the `failed` the dropped stale red
-        # used to produce. Nothing declared and nothing dropped is the one case
-        # with nothing to wait for: a repo with no CI, which protection agrees
-        # requires nothing.
-        if expected_sha and not checks and (dropped or profile.get("jobs")):
+        # "Nothing blocks" is not "CI has already spoken", though. Until this
+        # commit's own results arrive — every result so far belonged to another
+        # commit, or none has arrived in the window after a push — a repo that
+        # runs CI at all has simply not reported yet. Reading that as green is
+        # how a batch merges past a suite that never ran, and it is strictly
+        # worse than the `failed` the dropped stale red used to produce.
+        #
+        # What ends the wait is a result from a job this repo declares, the same
+        # test the branch above applies. Counting any check at all is what a
+        # DCO status or a preview deploy satisfies within a second of the push,
+        # while every declared job is still missing. With nothing declared there
+        # is no such list to check against, so any result for this commit is the
+        # only evidence there can be. Nothing declared and nothing dropped is
+        # the one case with nothing to wait for: a repo with no CI, which
+        # protection agrees requires nothing.
+        spoken = bool(reported & set(declared)) if declared else bool(checks)
+        if (declared or dropped) and not spoken:
             return "pending"
         return "full_green" if not summary["actionable_pending"] else "pending"
 
