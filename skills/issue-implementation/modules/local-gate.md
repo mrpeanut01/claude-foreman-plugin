@@ -64,9 +64,24 @@ person, once, instead of by silence every time.
 | Run the expensive tier | That is what CI's parallelism is for. The report names what it deferred. |
 | Evaluate `if:` conditions or `${{ }}` expressions | Only Actions has that context. Guessing produces a local pass that predicts nothing. |
 | Report green when no test ran over changed code | An opinion is not a gate result. A documentation-only diff is the one exception, and the impact map decides that, not you. |
+| Treat a diff it could not read as an empty one | The two are opposite claims and they used to be the same value. An empty diff maps to no test, no test is then required, and the gate exits 0 having run nothing — which is `blocked` in disguise. |
 
 Every one of these is named in the report. Silence is the single result this gate
 may never produce.
+
+## When the trunk is not `main`
+
+`--base` defaults to `main`, so on a `master` or `develop` repo — or in a shallow
+clone that does not have the base ref — the first `gate.py run` exits 2 with
+`blocked` and says the diff could not be read. That is the gate working. Pass the
+real trunk:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gate.py" run --base master
+```
+
+`--changed <file>...` is the other way out, and the only one that skips git
+entirely: use it when git cannot answer at all and you can name the files.
 
 ## Reading the impact map
 

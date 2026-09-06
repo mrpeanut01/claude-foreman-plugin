@@ -212,9 +212,26 @@ def observed_paths(
     `paths` is the answer — the value that should replace the declared list. The
     other two keys are the drift, and both are worth seeing: `undeclared` is the
     protected file no issue mentioned, `untouched` is the file the prose invented.
+
+    An empty diff is not an answer, so it raises rather than returning one. git
+    exiting 0 with no output means "this branch changes nothing", and a batch
+    that changes nothing has produced no observation to replace intent with. The
+    two ways to arrive here are indistinguishable from inside: the batch has
+    committed nothing yet, and `repo` names a checkout that does not hold the
+    branch — the documented invocation run from the main worktree while the work
+    sits in a linked one. Both used to answer `paths: []`, which `--apply` wrote
+    over the declared list, and land.merge_blockers reads that list: the
+    protected-path gate went quiet for exactly the batch nobody had looked at.
     """
     declared = sorted(set(batch.get("paths") or []))
     observed = diff_paths(base, head, repo)
+    if not observed:
+        raise PathsUnavailable(
+            f"git diff {base}...{head} names no changed file, so there is nothing to "
+            f"replace {batch.get('id')}'s declared paths with. Either the batch has "
+            f"committed nothing yet, or --repo-dir names a checkout without its branch. "
+            f"Its declared paths are left alone, and the merge gate keeps reading them."
+        )
     return {
         "batch": batch.get("id"),
         "declared": declared,

@@ -19,8 +19,11 @@ Ahead of them the gate runs the tests covering the diff (ci_profile.py impact),
 because the fastest way to learn a change is broken should not sit behind a
 linter.
 
-Three rules keep a green from lying:
+Four rules keep a green from lying:
 
+  * A diff the gate could not read is not a diff with nothing in it. An unknown
+    base ref exits 2 (`blocked`), because a change nobody could see requires no
+    test, and a gate that required no test runs none and still exits 0.
   * A step that could not run is not a step that passed. A missing tool exits 2
     (`blocked`), never 0 — that silence is precisely what this exists to stop.
     `--allow-unrunnable` overrides it for a machine that genuinely lacks the
@@ -62,6 +65,13 @@ import yaml
 # scripts/ is not an installed package: put it on the path, then load by name.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 ci_profile = importlib.import_module("ci_profile")
+batch = importlib.import_module("batch")
+
+# batch.py already had to answer "what did this branch change?" and already had
+# to refuse to answer it with silence. Reusing its exception rather than growing
+# a second one keeps that refusal a single idea: wherever it is raised, it means
+# the diff could not be determined, which is never the same claim as an empty one.
+PathsUnavailable = batch.PathsUnavailable
 
 # Events that put a job on a pull request. A job wired only to push, schedule or
 # release may publish, tag or deploy; running one on a laptop is not a gate, it
@@ -640,12 +650,24 @@ def run_gate(
 
 
 def _git(root: Path, args: list[str]) -> str:
+    """One git command's output, or the reason there is none.
+
+    This used to swallow every error and return "", which made "git could not
+    compute the diff" and "the diff is empty" the same value. They are opposite
+    claims, and the empty one is the dangerous half: no changed file maps to no
+    required test, so the gate reported green having run nothing at all.
+    """
     try:
         done = subprocess.run(
             ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
         )
-    except (OSError, subprocess.CalledProcessError):
-        return ""
+    except OSError as exc:
+        raise PathsUnavailable(f"`git {' '.join(args)}` could not be run: {exc}") from exc
+    except subprocess.CalledProcessError as exc:
+        said = (exc.stderr or "").strip().splitlines()
+        raise PathsUnavailable(
+            f"`git {' '.join(args)}` exited {exc.returncode}: {said[0] if said else 'no output'}"
+        ) from exc
     return done.stdout
 
 
@@ -654,6 +676,11 @@ def changed_files(root: Path, base: str) -> list[str]:
 
     A gate reading only commits misses the edit made while reading its output,
     which is the edit most likely to be wrong.
+
+    Raises PathsUnavailable when git cannot answer one of its three questions —
+    an unknown base ref (the default `main` on a `master` trunk), a shallow clone
+    without the base, no git on PATH. Returning [] there would be the gate
+    deciding a change it could not see needs no test.
     """
     found: set[str] = set()
     for args in (
@@ -663,6 +690,35 @@ def changed_files(root: Path, base: str) -> list[str]:
     ):
         found.update(line.strip() for line in _git(root, args).splitlines() if line.strip())
     return sorted(found)
+
+
+def undeterminable_diff(base: str, exc: PathsUnavailable) -> dict:
+    """The report for a gate that never learned what it was grading.
+
+    `blocked`, the same status and exit 2 a check this machine cannot run gets,
+    and for the same reason: an unknown is not a pass. Naming the way out matters
+    as much as the refusal — the default base is `main`, so a repo whose trunk is
+    `master` or `develop` hits this on the very first run, and a gate whose only
+    output is "no" gets worked around rather than fixed.
+    """
+    return {
+        "status": "blocked",
+        "exit_code": 2,
+        "changed": None,
+        "tests_ran": False,
+        "steps": [],
+        "failed": [],
+        "unrunnable": [],
+        "skipped": [],
+        "notes": [
+            f"the diff against `{base}` could not be read, so the gate does not know what "
+            f"this change touches: {exc}",
+            "it will not fall back to an empty diff. Nothing changed and nothing could be "
+            "determined look identical from here, and the second one requires no test, "
+            "which is how a gate that ran nothing reports green. Pass --base with this "
+            "repo's trunk, or --changed to name the files yourself.",
+        ],
+    }
 
 
 # --- CLI ----------------------------------------------------------------------
@@ -712,7 +768,11 @@ def main(argv: list[str] | None = None) -> int:
 
     profile_path = under_root(args.profile)
     profile = json.loads(profile_path.read_text()) if profile_path.is_file() else None
-    changed = args.changed if args.changed is not None else changed_files(root, args.base)
+    try:
+        changed = args.changed if args.changed is not None else changed_files(root, args.base)
+    except PathsUnavailable as exc:
+        print(json.dumps(undeterminable_diff(args.base, exc), indent=2))
+        return 2
 
     if args.cmd == "plan":
         steps, context = build_plan(

@@ -814,6 +814,80 @@ def test_a_language_with_no_known_runner_says_so_instead_of_guessing(repo):
     assert "--test-command" in steps[0]["reason"]
 
 
+# --- the diff the gate is grading ---------------------------------------------
+# Everything above takes the changed set as given. Working it out is the step
+# before, and it has the same failure mode one level up: a diff git could not
+# compute came back as a diff with nothing in it, nothing maps to a test, so no
+# test was required and the whole gate reported green having run none.
+
+QUIET_GIT = "exit 0\n"
+NAMING_GIT = "echo src/upload.py\n"
+BROKEN_GIT = "echo 'fatal: bad revision' >&2\nexit 128\n"
+
+
+def test_a_branch_that_changed_nothing_is_an_answer(repo, toolbox):
+    """The half that must keep working: git said nothing changed, and meant it."""
+    install_tool(toolbox, "git", QUIET_GIT)
+    assert gate.changed_files(repo, "main") == []
+
+
+def test_what_git_names_is_what_the_gate_grades(repo, toolbox):
+    install_tool(toolbox, "git", NAMING_GIT)
+    assert gate.changed_files(repo, "main") == ["src/upload.py"]
+
+
+def test_a_diff_git_could_not_compute_is_not_a_diff_with_nothing_in_it(repo, toolbox):
+    """`--base` defaults to main, so every master/develop trunk lands here."""
+    install_tool(toolbox, "git", BROKEN_GIT)
+    with pytest.raises(gate.PathsUnavailable):
+        gate.changed_files(repo, "nosuchbase")
+
+
+def test_git_missing_altogether_is_not_a_diff_with_nothing_in_it_either(repo):
+    with pytest.raises(gate.PathsUnavailable):
+        gate.changed_files(repo, "main")
+
+
+def test_a_diff_the_gate_could_not_read_blocks_it_rather_than_passing_it(repo, toolbox, capsys):
+    install_tool(toolbox, "git", BROKEN_GIT)
+    workflow(repo, CHECK_ONLY)
+    code = gate.main(["run", "--root", str(repo), "--profile", "none.json"])
+    report = out(capsys)
+    assert code == 2
+    assert report["status"] == "blocked"
+    assert report["tests_ran"] is False
+    assert any("--base" in note for note in report["notes"])
+
+
+def test_plan_will_not_plan_against_a_diff_it_could_not_read(repo, toolbox, capsys):
+    install_tool(toolbox, "git", BROKEN_GIT)
+    workflow(repo, CHECK_ONLY)
+    code = gate.main(["plan", "--root", str(repo), "--profile", "none.json"])
+    assert code == 2
+    assert out(capsys)["status"] == "blocked"
+
+
+def test_naming_the_changed_files_never_asks_git_at_all(repo, toolbox, capsys):
+    """The way out: git being unreachable must not make the gate unusable."""
+    install_tool(toolbox, "git", BROKEN_GIT)
+    workflow(repo, CHECK_ONLY)
+    code = gate.main(
+        [
+            "run",
+            "--root",
+            str(repo),
+            "--changed",
+            "README.md",
+            "--profile",
+            "none.json",
+            "--test-command",
+            "true",
+        ]
+    )
+    assert code == 0
+    assert out(capsys)["status"] == "green"
+
+
 # --- the command line ---------------------------------------------------------
 
 

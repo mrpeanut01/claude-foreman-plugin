@@ -239,6 +239,7 @@ def test_a_path_the_prose_invented_is_reported_as_untouched(repo):
 
 
 def test_a_branch_that_changes_nothing_yields_no_paths(repo):
+    """git's own answer, reported faithfully. Refusing to act on it is observed_paths' job."""
     _git(repo, "checkout", "-q", "main")
     assert batch.diff_paths("main", repo=repo) == []
 
@@ -247,6 +248,37 @@ def test_an_unreadable_diff_is_raised_not_reported_as_no_paths(repo):
     """An empty path list clears the protected-path gate. git failing must not."""
     with pytest.raises(batch.PathsUnavailable):
         batch.diff_paths("no-such-base", repo=repo)
+
+
+def test_an_empty_diff_is_no_observation_of_what_a_batch_touches(repo):
+    """git succeeded and still said nothing, so there is nothing to replace intent with."""
+    _git(repo, "checkout", "-q", "main")
+    with pytest.raises(batch.PathsUnavailable):
+        batch.observed_paths({"id": "b-001", "paths": ["src/auth/session.py"]}, "main", repo=repo)
+
+
+def test_an_empty_diff_never_clears_the_paths_the_merge_gate_reads(repo, tmp_path, capsys):
+    """The reported hole: --apply run from a checkout without the work wrote []."""
+    _git(repo, "checkout", "-q", "main")  # the branch is in a linked worktree; this one is clean
+    root = ledger.init(tmp_path / "ledger-home")
+    ledger.append(root, "batch.created", batch="b-001", issues=[1], paths=["src/auth/session.py"])
+    rc = batch.main(
+        [
+            "paths",
+            "--batch",
+            "b-001",
+            "--base",
+            "main",
+            "--ledger",
+            str(root),
+            "--repo-dir",
+            str(repo),
+            "--apply",
+        ]
+    )
+    assert rc == 1
+    assert ledger.load(root).batches["b-001"]["paths"] == ["src/auth/session.py"]
+    assert "b-001" in capsys.readouterr().err
 
 
 def test_recomputed_paths_replace_the_prose_ones_in_the_ledger(repo, tmp_path):
