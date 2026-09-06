@@ -1,6 +1,6 @@
 ---
 name: issue-implementation
-description: Implement a batch of issues in an isolated worktree, test-first, one commit per issue, behind a local gate that runs the impacted tests before any CI is spent. Use when building a foreman batch or deciding what to verify locally before pushing.
+description: Implement a batch of issues in an isolated worktree, test-first, one commit per issue, behind a single local gate command that runs the impacted tests and the whole cheap CI tier before any CI is spent. Use when building a foreman batch or deciding what to verify locally before pushing.
 ---
 
 # Issue Implementation
@@ -37,21 +37,31 @@ assumes that split is cheap.
 ## The local gate
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ci_profile.py" impact \
-  --changed $(git diff --name-only main...HEAD)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/gate.py" run
 ```
 
-| Result | Do |
-|--------|----|
-| `"complete": true` | Run the listed tests |
-| `"complete": false` | **Run the full suite locally** |
+One command. It maps the diff to its tests and runs those, then runs every
+cheap-tier CI step — lint, format, types — using CI's own commands.
 
-Then lint and typecheck. Push only when every part is green. See
-[modules/local-gate.md](modules/local-gate.md).
+| Exit | Means |
+|------|-------|
+| 0 | every check ran here and passed; push |
+| 1 | a check failed, and the report names it |
+| 2 | the gate could not finish, and the report names what it could not run |
 
-Never override a `"complete": false`. An unmapped file is exactly where an
-unguarded regression hides, and narrowing on a partial map is how a green local
-gate ships a break.
+This used to be a table of steps to work through by hand, and the later steps got
+skipped: running a checklist is an act of remembering, and remembering fails
+silently. Do not reconstruct the checklist — run the command and read the exit
+code. See [modules/local-gate.md](modules/local-gate.md).
+
+Never work around exit 2 by re-running the parts that pass. An unrunnable check
+is an unknown, and a green assembled out of unknowns is the exact result this
+gate exists to prevent.
+
+Exit 2 on the very first run is usually the diff, not a check: `--base` defaults
+to `main` and this repo's trunk may be `master`. Pass `--base <trunk>`. The gate
+refuses to fall back to an empty diff, because an empty diff requires no test and
+would let it exit 0 having run none.
 
 ## Finishing
 
@@ -71,4 +81,5 @@ finished and is not — the most expensive outcome available here.
 ## Exit criteria
 
 Every issue in the batch has a failing-then-passing test and its own commit. The
-local gate ran and was green. The batch is in `built`. Nothing was pushed.
+local gate exited zero — green, not waived. The batch is in `built`. Nothing
+was pushed.

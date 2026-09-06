@@ -18,6 +18,15 @@ on every push; expensive jobs wait behind the cheap tier *and* the review gate.
 Waiting on an advisory check is pure wall clock; the loop ignores them for
 gating and reads them only for information.
 
+> Protection lists the names GitHub *reports*, not the job keys the workflow
+> declares: a matrix job `test` gates the merge as `test (3.11)` and
+> `test (3.12)`, and a job with a `name:` gates under that display name. So each
+> context is attributed back to the job that declared it, and a job whose cells
+> are required reads `required: true` even though its key appears in no context.
+> Partial coverage rounds **up** — one required cell is enough to block a merge.
+> Which cells those were is still in `required_checks`, which lists the contexts
+> verbatim.
+
 **`protection_known`** — whether branch protection could actually be read.
 
 > This one is load-bearing. When protection is absent or unreadable, every job
@@ -40,6 +49,18 @@ expensive job.
 **`flake_rate`** — fraction of commits where the job both failed and passed.
 Above ~0.1 the job's failures are barely evidence; fix or quarantine it before
 trusting anything it says.
+
+**`events`** — the filters each trigger declared, one entry per event. This is
+what decides whether a job can produce a check on a pull request at all.
+
+> One job name declared in several workflows is one check name, so those
+> declarations collapse into a single config per event. A check appears if *any*
+> of them fires — but one filter dict cannot say "`branches: [main]` **or**
+> `paths: [src/**]`", and merging key by key says "no filters at all", which
+> marks a job requirable that GitHub may never run. So the union is taken only
+> where it is exact, and otherwise the declaration that can still report while
+> the PR is open is the one kept. Under-requiring costs a wait; over-requiring
+> hangs the gate until the staleness timer escalates it.
 
 ## Cancelled and skipped runs are excluded
 

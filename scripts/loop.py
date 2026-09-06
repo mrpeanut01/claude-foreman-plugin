@@ -28,11 +28,15 @@ import ledger  # noqa: E402
 DEFAULT_TRIAGE_EVERY_S = 3600
 
 DORMANT = {"merged", "abandoned", "escalated"}
-IN_FLIGHT = {"built", "open", "blocked", "ready", "merging"}
+# `building` belongs here: it holds a worktree and a branch, and a session is
+# meant to be inside it. Leaving it out let the loop start work past the WIP
+# limit while a build was already running, and hid the interrupted build from
+# every branch of next_action at once.
+IN_FLIGHT = {"building", "built", "open", "blocked", "ready", "merging"}
 
 
 def in_flight_count(state: ledger.State) -> int:
-    """Batches holding a branch or a PR open. Each one costs CI on every trunk move."""
+    """Batches holding a worktree, a branch or a PR. Each costs CI on every trunk move."""
     return sum(1 for b in state.batches.values() if b.get("state") in IN_FLIGHT)
 
 
@@ -51,16 +55,22 @@ def budget_remaining(state: ledger.State, config: dict) -> float | None:
     return minutes * 60 - spent_today(state)
 
 
-def seconds_since(stamp: str | None, now: datetime | None = None) -> float | None:
-    """Seconds since an ISO timestamp, or None when it is missing or unreadable."""
+def when(stamp: str | None) -> datetime | None:
+    """An ISO timestamp as an aware datetime, or None when unreadable."""
     if not stamp:
         return None
     try:
         seen = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
     except ValueError:
         return None
-    if seen.tzinfo is None:
-        seen = seen.replace(tzinfo=UTC)
+    return seen if seen.tzinfo else seen.replace(tzinfo=UTC)
+
+
+def seconds_since(stamp: str | None, now: datetime | None = None) -> float | None:
+    """Seconds since an ISO timestamp, or None when it is missing or unreadable."""
+    seen = when(stamp)
+    if seen is None:
+        return None
     return ((now or datetime.now(UTC)) - seen).total_seconds()
 
 
@@ -83,13 +93,112 @@ def triage_due(state: ledger.State, limits: dict) -> bool:
     return since is None or since > every
 
 
+def _stale_reason(batch: dict, limits: dict, waiting_on: str) -> str | None:
+    """Why this batch has waited too long, or None while the window has room.
+
+    Nothing outside the loop may pin a batch indefinitely. Waiting is invisible:
+    it increments no counter, so no cap ever fires and nothing reaches a human.
+    One definition, used by every state that waits — a second copy is how
+    `merging` came to have a wait with no window on it at all.
+    """
+    stale_after = limits.get("stale_after_s")
+    age = age_seconds(batch)
+    if stale_after and age is not None and age > stale_after:
+        return f"stale: waiting on {waiting_on} for {age / 3600:.1f}h with no change"
+    return None
+
+
 def review_rounds(state: ledger.State, batch_id: str) -> list[list[dict]]:
     """Findings from each review round for one batch, oldest first."""
     return [r.get("findings", []) for r in state.reviews if r.get("batch") == batch_id]
 
 
+def _seen_open_since(state: ledger.State, issue: int, batch: dict) -> bool:
+    """Whether triage has seen this issue open since its batch stopped moving.
+
+    `triage.py` asks GitHub for open issues only, so any triage sighting after
+    the batch landed is direct evidence that the landing did not close the
+    issue. An older sighting says nothing either way, and silence is not
+    evidence: without one the issue stays with the batch.
+
+    The sighting is what counts, not a fresh verdict. Reading only the
+    `issue.triaged` record's own `ts` made this rule unreachable in the ordering
+    it was written for: `triage.should_skip` refuses to re-triage an issue whose
+    `updatedAt` has not changed, and a PR that merges without a closing keyword
+    changes nothing about the issue. So the last record stayed older than the
+    merge forever and nothing ever noticed (issue #58). `state.open_seen_at`
+    carries the skipped sightings the records cannot.
+    """
+    stamps = [
+        s
+        for s in (
+            when(ledger.observed_at(state.issues.get(issue) or {})),
+            when(state.open_seen_at.get(issue)),
+        )
+        if s is not None
+    ]
+    landed = when(batch.get("progress_at") or batch.get("updated"))
+    return bool(stamps) and landed is not None and max(stamps) > landed
+
+
 def _grouped_issues(state: ledger.State) -> set[int]:
-    return {i for b in state.batches.values() for i in (b.get("issues") or [])}
+    """Issues some batch is already accountable for. Membership alone, in any state.
+
+    A merged batch briefly stopped holding an issue triage had since seen open,
+    so the issue would be offered for batching again. Nothing could take the
+    offer: `batch.py plan` groups `triage_out["triaged"]`, and the issues that
+    rule finds are exactly the ones triage *skips* — `should_skip` refuses to
+    re-triage an issue whose `updatedAt` has not moved, and a PR that merges
+    without a closing keyword does not move it. `next_action` answered `batch`
+    on every tick forever; no counter moved, no cap applied, and because that
+    branch sits above `triage_due` the loop stopped looking for new issues at
+    all. The mirror case was worse: had the `updatedAt` moved, triage would
+    re-record the issue, a second batch would be cut for work already on trunk,
+    and merging it would release the issue again, without bound.
+
+    So every batch keeps its issues and `merged_leaving_open` tells a person
+    instead. `escalated` and `abandoned` batches were always held this way, for
+    the same reason: somebody is deciding what happens to those.
+    """
+    return {issue for batch in state.batches.values() for issue in batch.get("issues") or []}
+
+
+def merged_leaving_open(state: ledger.State) -> list[dict]:
+    """Merged batches whose issues triage has since seen still open (issue #58).
+
+    Two things produce this, and the ledger cannot tell them apart: the PR
+    merged without a closing keyword and the fix is on trunk, or the fix did not
+    fix it. They want opposite actions — close the issue, or do the work again —
+    so this is reported rather than retried. It is also a symptom of something
+    upstream (`commands/land.md` step 6) not closing issues, which no amount of
+    re-batching repairs.
+
+    Bounded twice over. An issue any batch other than a merged one holds is left
+    alone: something live will close it, and a live batch that stalls has its own
+    governors. And an issue a recorded `escalation` already names is dropped, so
+    the loop says this once per issue and then stops — the same shape of bound
+    the other escalations get from moving their batch to `escalated`, which a
+    terminal `merged` batch has no way to do.
+    """
+    spoken = {n for e in state.escalations for n in e.get("issues") or ()}
+    held_live = {
+        issue
+        for batch in state.batches.values()
+        if batch.get("state") != "merged"
+        for issue in batch.get("issues") or []
+    }
+    stranded = []
+    for _, batch in sorted(state.batches.items()):
+        if batch.get("state") != "merged":
+            continue
+        still_open = [
+            n
+            for n in batch.get("issues") or []
+            if n not in spoken and n not in held_live and _seen_open_since(state, n, batch)
+        ]
+        if still_open:
+            stranded.append({"batch": batch["id"], "issues": still_open})
+    return stranded
 
 
 def next_action(state: ledger.State, config: dict) -> dict:
@@ -116,6 +225,21 @@ def next_action(state: ledger.State, config: dict) -> dict:
                 "the loop will not retry",
             }
 
+    # Push deadlock is about a failure that keeps coming back, not pushes
+    # elapsed. The caps above are runaway ceilings; this reads progress.
+    for batch in live:
+        stuck = ledger.futile_push_run(batch, caps)
+        if stuck:
+            return {"do": "escalate", "batch": batch["id"], "reason": stuck}
+
+    # A build that keeps being picked up is the same shape of problem, and the
+    # only one of the three the clock cannot catch: `building -> building`
+    # records no progress, so `stale_after_s` reads the same age forever.
+    for batch in live:
+        stalled = ledger.stalled_build(batch, caps)
+        if stalled:
+            return {"do": "escalate", "batch": batch["id"], "reason": stalled}
+
     # Review deadlock is about repeating findings, not rounds elapsed.
     for batch in live:
         if batch.get("review_gate") != "changes_requested":
@@ -127,18 +251,66 @@ def next_action(state: ledger.State, config: dict) -> dict:
         if stalled:
             return {"do": "escalate", "batch": batch["id"], "reason": stalled}
 
+    # The one problem here the loop cannot act on at all. It is deliberately not
+    # keyed on a batch: the batch is `merged`, which is terminal — there is no
+    # transition to make and nothing to retry — and `status._needs_human` reads
+    # an escalation's batch's *current* state to decide whether it still matters,
+    # so filing this under the batch would put it in the one bucket the morning
+    # digest is right to consider finished. What needs a person is the issue.
+    stranded = merged_leaving_open(state)
+    if stranded:
+        listed = ", ".join(f"#{n}" for n in stranded[0]["issues"])
+        return {
+            "do": "escalate",
+            "issues": stranded[0]["issues"],
+            "merged_batch": stranded[0]["batch"],
+            "reason": (
+                f"{stranded[0]['batch']} merged, but triage has since seen {listed} still "
+                "open — so either the PR merged without a closing keyword and the fix is "
+                "already on trunk, or the fix did not fix it. Close the issue, or reopen "
+                "the work: the loop cannot tell which and will not batch it again"
+            ),
+        }
+
+    # Nearest the merge of all: the merge is already requested. `merging` is in
+    # `IN_FLIGHT` and so holds a slot against `max_open_prs`, but it had no
+    # branch here at all — no action, no staleness check, no governor. `gh pr
+    # merge --auto` is fire-and-forget, and a merge queue that refuses it or
+    # never fires leaves the batch parked here with nothing to bring it back.
+    for batch in live:
+        if batch["state"] != "merging":
+            continue
+        stale = _stale_reason(batch, limits, "the merge queue")
+        if stale:
+            return {"do": "escalate", "batch": batch["id"], "reason": stale}
+        return {
+            "do": "watch",
+            "batch": batch["id"],
+            "reason": "merge requested; waiting for GitHub to confirm it landed",
+        }
+
     for batch in live:
         if batch["state"] != "ready":
             continue
-        blockers = land.merge_blockers(batch, {"labels": []}, config)
+        # The paths are confirmed against the diff by the merge recipe itself
+        # (`commands/land.md` step 5 runs `batch.py paths --apply` before it asks
+        # `blockers`), so a list not yet confirmed is work the `merge` action
+        # does, not a reason to hand the batch to a person.
+        blockers = land.merge_blockers(batch, {"labels": []}, config, observed_paths_required=False)
         if blockers:
             return {"do": "escalate", "batch": batch["id"], "reason": "; ".join(blockers)}
+        # `ready` is a wait too, on the recipe getting the merge requested. A
+        # batch the recipe keeps failing to move — `blockers` refusing it at
+        # step 5 every time, say — would otherwise draw `merge` on every tick
+        # with nothing counting.
+        stale = _stale_reason(batch, limits, "the merge being requested")
+        if stale:
+            return {"do": "escalate", "batch": batch["id"], "reason": stale}
         if can_spend:
-            return {
-                "do": "merge",
-                "batch": batch["id"],
-                "reason": "both gates clear and nothing blocks the merge",
-            }
+            reason = "both gates clear and nothing blocks the merge"
+            if land.paths_unconfirmed(batch):
+                reason = "both gates clear; confirm the batch's paths against its diff, then merge"
+            return {"do": "merge", "batch": batch["id"], "reason": reason}
         budget_blocked = True
 
     for batch in live:
@@ -155,18 +327,9 @@ def next_action(state: ledger.State, config: dict) -> dict:
         ]
         if answered:
             return {"do": "unblock", "batch": batch["id"], "reason": "; ".join(answered)}
-        # No gate may pin a batch indefinitely. Watching forever is invisible:
-        # no counter increments, so no cap ever fires and nothing reaches a human.
-        stale_after = limits.get("stale_after_s")
-        age = age_seconds(batch)
-        if stale_after and age is not None and age > stale_after:
-            return {
-                "do": "escalate",
-                "batch": batch["id"],
-                "reason": (
-                    f"stale: waiting on {', '.join(pending)} for {age / 3600:.1f}h with no change"
-                ),
-            }
+        stale = _stale_reason(batch, limits, ", ".join(pending))
+        if stale:
+            return {"do": "escalate", "batch": batch["id"], "reason": stale}
         return {
             "do": "watch",
             "batch": batch["id"],
@@ -174,9 +337,21 @@ def next_action(state: ledger.State, config: dict) -> dict:
             "may_run_expensive_tier": ledger.may_run_expensive_tier(batch),
         }
 
+    # Nearest the merge first: a batch two steps from landing drains cheaper
+    # than one that has not compiled yet. `building` sits at the end of this
+    # group because it is the least finished of the three — but still ahead of
+    # `planned`, because resuming a worktree that already exists beats cutting
+    # a new one. Resuming is not free (the local gate re-runs and the batch is
+    # heading for a push), so it is budget-gated like its neighbours.
     for state_name, action, reason in (
         ("blocked", "unblock", "a gate came back red; fix and push again"),
         ("built", "open_pr", "committed locally; open the PR to start the gates"),
+        (
+            "building",
+            "build",
+            "a build was interrupted mid-flight; resume it in the existing worktree — "
+            "the batch is already in `building`, so re-entering it is a no-op",
+        ),
     ):
         for batch in live:
             if batch["state"] == state_name:
@@ -231,10 +406,16 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("next")
     p.add_argument("--ledger", default=".foreman")
-    p.add_argument("--config", default=".foreman/config.json")
+    p.add_argument(
+        "--config",
+        help=f"foreman config (default {ledger.LEDGER_DIR}/{ledger.CONFIG_FILE} "
+        "in the repository root)",
+    )
 
     args = parser.parse_args(argv)
-    config = json.loads(Path(args.config).read_text()) if Path(args.config).exists() else {}
+    # Anchored, and loud when it is not there: an unfound config leaves this
+    # function with no caps, no budget and no staleness window at all.
+    config = ledger.load_config(args.config)
     state = ledger.load(Path(args.ledger))
     action = next_action(state, config)
     remaining = budget_remaining(state, config)

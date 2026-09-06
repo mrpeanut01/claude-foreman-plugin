@@ -1,5 +1,7 @@
 """Status digest: what is in flight, what is stuck, and what needs a human."""
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,6 +52,23 @@ def test_batch_at_its_cap_is_flagged_as_needing_a_human(root):
     out = status.render(ledger.fold(ledger.read_events(root)), config={"caps": {"pushes": 3}})
     assert "pushes" in out
     assert "needs you" in out.lower()
+
+
+def test_the_digest_says_when_the_ledger_could_not_be_fully_read(root):
+    """A skipped line is the right outcome for one bad append and the wrong
+    outcome to keep quiet about: from here on the state may not match the
+    repository, and the person reading this is the only one who can tell."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.append(root, "triage.completed", open_issues=5)
+    out = status.render(ledger.load(root), config={})
+    assert "LEDGER" in out
+    assert "1 line(s)" in out and "skipped" in out
+
+
+def test_a_fully_readable_ledger_gets_no_such_warning(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    out = status.render(ledger.load(root), config={})
+    assert "LEDGER" not in out
 
 
 def test_merged_batches_are_counted_not_listed(root):
@@ -111,3 +130,95 @@ def test_an_escalation_for_a_batch_still_escalated_is_still_shown(root):
     ledger.transition(root, "b-002", "escalated")
     ledger.append(root, "escalation", batch="b-002", reason="needs a human")
     assert "needs a human" in status.render(ledger.load(root), config={})
+
+
+# --- issue #59: one name for the ledger directory across every script --------
+
+
+def test_the_ledger_is_named_ledger_here_as_it_is_in_every_other_script(root, capsys):
+    """triage.py, batch.py and loop.py all spell it --ledger, so a shared command
+    line has to work here too."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[42])
+    assert status.main(["--ledger", str(root)]) == 0
+    assert "b-001" in capsys.readouterr().out
+
+
+def test_the_older_root_spelling_still_works(root, capsys):
+    """Existing commands and docs pass --root; renaming must not break them."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[42])
+    assert status.main(["--root", str(root)]) == 0
+    assert "b-001" in capsys.readouterr().out
+
+
+# --- issue #70: the config must not follow the caller around here either -----
+
+
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", "-c", "user.email=f@example.com", "-c", "user.name=foreman", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """A repo plus the build worktree `commands/build.md` prescribes."""
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    _git(checkout, "init", "-q", "-b", "main")
+    _git(checkout, "commit", "-q", "--allow-empty", "-m", "root")
+    linked = tmp_path / "foreman-b-001"
+    _git(checkout, "worktree", "add", "-q", str(linked), "-b", "foreman/b-001")
+    return checkout, linked
+
+
+def _batch_at_three_pushes(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    for step in ("building", "built", "open"):
+        ledger.transition(root, "b-001", step)
+    for sha in "abc":
+        ledger.append(root, "batch.pushed", batch="b-001", sha=sha)
+
+
+def test_the_caps_are_read_from_the_repository_when_status_runs_from_a_worktree(
+    worktree, monkeypatch, capsys
+):
+    """`root / "config.json"` resolved against the caller, so from a build
+    worktree the digest rendered with `caps={}` — every counter without its
+    ceiling, and no batch ever shown at cap."""
+    checkout, linked = worktree
+    root = ledger.init(checkout)
+    (root / ledger.CONFIG_FILE).write_text(json.dumps({"caps": {"pushes": 3}}))
+    _batch_at_three_pushes(root)
+    monkeypatch.chdir(linked)
+
+    assert status.main([]) == 0
+    out = capsys.readouterr().out
+    assert "at cap" in out and "pushes = 3/3" in out
+
+
+def test_a_missing_config_is_said_out_loud_rather_than_rendered_as_no_caps(
+    worktree, monkeypatch, capsys
+):
+    """Silence was the defect: the digest looked complete with its brakes off."""
+    checkout, linked = worktree
+    _batch_at_three_pushes(ledger.init(checkout))
+    monkeypatch.chdir(linked)
+
+    assert status.main([]) == 0
+    captured = capsys.readouterr()
+    assert "Nothing blocked." in captured.out, "no config really does mean no caps"
+    assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in captured.err
+
+
+def test_an_explicit_config_path_is_still_obeyed(worktree, monkeypatch, tmp_path, capsys):
+    checkout, linked = worktree
+    elsewhere = tmp_path / "strict.json"
+    elsewhere.write_text(json.dumps({"caps": {"pushes": 1}}))
+    _batch_at_three_pushes(ledger.init(checkout))
+    monkeypatch.chdir(linked)
+
+    assert status.main(["--config", str(elsewhere)]) == 0
+    assert "pushes = 3/1" in capsys.readouterr().out

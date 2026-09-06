@@ -2,7 +2,10 @@
 """Render the ledger as a digest: what is moving, what is stuck, what needs you.
 
 CLI:
-    status.py [--root .foreman] [--config .foreman/config.json]
+    status.py [--ledger .foreman] [--config .foreman/config.json] [--json]
+
+`--root` is accepted as an alias for `--ledger`, for command lines written before
+the two names were reconciled.
 """
 
 from __future__ import annotations
@@ -74,6 +77,19 @@ def render(state: ledger.State, config: dict | None = None) -> str:
     out.extend(attention or ["  Nothing blocked."])
     out.append("")
 
+    # A line the fold could not use was dropped rather than crashing every
+    # script, which is the right trade — but a state quietly missing an event
+    # is a state that has stopped matching the repository. Say it here, once,
+    # where a person reads.
+    if state.skipped_lines:
+        out.append("LEDGER")
+        out.append(
+            f"  ⚠ {state.skipped_lines} line(s) in events.jsonl could not be read and were "
+            "skipped; the state above may be missing what they recorded. Reconcile "
+            "against GitHub and append a batch.meta correction."
+        )
+        out.append("")
+
     if state.flakes:
         out.append("FLAKES (most seen first)")
         for key, count in sorted(state.flakes.items(), key=lambda kv: (-kv[1], kv[0]))[:5]:
@@ -102,16 +118,28 @@ def render(state: ledger.State, config: dict | None = None) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--root", default=f"./{ledger.LEDGER_DIR}")
-    parser.add_argument("--config", default=None)
+    # --ledger is the name triage.py, batch.py and loop.py use for the same
+    # directory. --root is kept as an alias rather than removed: it is what the
+    # /foreman:status command and every command line written before this fix
+    # pass, and breaking those to tidy a flag name is not a trade worth making.
+    parser.add_argument("--ledger", "--root", default=f"./{ledger.LEDGER_DIR}")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=f"foreman config (default {ledger.LEDGER_DIR}/{ledger.CONFIG_FILE} "
+        "in the repository root)",
+    )
     parser.add_argument("--json", action="store_true", help="emit raw state instead of the digest")
     args = parser.parse_args(argv)
 
-    root = Path(args.root)
-    config = {}
-    cfg_path = Path(args.config) if args.config else root / "config.json"
-    if cfg_path.exists():
-        config = json.loads(cfg_path.read_text(encoding="utf-8"))
+    root = Path(args.ledger)
+    # Anchored to the repository, and loud when it is not there — the same
+    # mechanism loop.py, land.py and triage.py use (issue #70). This script
+    # resolves its events file correctly from a build worktree but used to
+    # resolve the config against the caller, so the digest rendered with
+    # `caps={}`: every counter shown without its ceiling, NEEDS YOU empty
+    # however far past its cap a batch was, and not a word about why.
+    config = ledger.load_config(args.config)
 
     state = ledger.load(root)
     if args.json:

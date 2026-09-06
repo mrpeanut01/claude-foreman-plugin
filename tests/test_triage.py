@@ -1,5 +1,7 @@
 """Triage: classify, size, risk-score and dedupe issues into the ledger."""
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -483,3 +485,589 @@ def test_a_relative_dot_prefixed_path_keeps_the_directory_dot():
 def test_a_separator_prefixed_protected_path_still_scores_high_risk():
     text = "the deploy script ./infra/deploy.py needs a retry"
     assert triage.risk_level({"title": text, "body": ""}, ["**/infra/**"]) == "high"
+
+
+# --- issue #3: short titles must not collide at score 1.0 ---------------------
+
+
+def test_a_single_distinguishing_digit_survives_tokenising():
+    """Dropping one-character tokens made "Bug 1" and "Bug 2" the same title."""
+    assert triage._tokens("Bug 1") == {"bug", "1"}
+    assert triage._tokens("Bug 2") == {"bug", "2"}
+
+
+def test_titles_that_differ_only_by_a_digit_are_not_duplicates():
+    new = issue(number=10, title="Bug 2")
+    others = [issue(number=3, title="Bug 1")]
+    assert triage.dedupe(new, others) == []
+
+
+def test_one_shared_word_is_never_enough_to_call_a_duplicate():
+    """A ratio alone cannot see that the overlap is a single word: two
+    one-word titles reach 1.0 on it, which is the worst false positive there
+    is because a wrongly closed duplicate needs a human to notice."""
+    new = issue(number=10, title="Crash")
+    others = [issue(number=3, title="Crash")]
+    assert triage.dedupe(new, others) == []
+
+
+def test_a_real_pair_still_overlaps_on_more_than_one_word():
+    new = issue(number=10, title="Upload fails with 503 on large files")
+    others = [issue(number=3, title="Upload fails with 503 for large files")]
+    assert triage.dedupe(new, others)[0]["number"] == 3
+
+
+# --- issue #4: needs-info was documented but unreachable ---------------------
+
+
+def test_a_bug_that_blames_an_environment_it_never_names_needs_info():
+    """The gap needs-info is for: a failure that has been shown, but only
+    makes sense with a version or a machine the reporter did not give."""
+    verdict = triage.actionability(
+        issue(
+            title="Upload fails",
+            body="Works fine locally but fails in production with a 500.",
+            labels=["bug"],
+        )
+    )
+    assert verdict["lifecycle"] == "needs-info"
+    assert verdict["actionable"] is False
+
+
+def test_a_bug_that_names_the_version_it_broke_on_is_actionable():
+    verdict = triage.actionability(
+        issue(
+            title="Upload fails",
+            body="Worked on 1.4.2. Since upgrading to 1.5.0 every upload returns a 500.",
+            labels=["bug"],
+        )
+    )
+    assert verdict["lifecycle"] is None
+    assert verdict["actionable"] is True
+
+
+def test_a_bug_that_never_blames_an_environment_is_not_asked_for_one():
+    """Asking every reporter for a version is a round trip that reads as
+    dismissal, so the trigger is the reporter's own claim, not its absence."""
+    verdict = triage.actionability(
+        issue(
+            title="Parser drops trailing commas",
+            body="It fails in src/parser/lexer.py when the input ends with a comma.",
+            labels=["bug"],
+        )
+    )
+    assert verdict["lifecycle"] is None
+
+
+def test_needs_info_is_a_verdict_a_record_can_actually_carry():
+    """`grep -c needs-info scripts/triage.py` returned 0: the verdict was in
+    both verdict tables and reachable from neither."""
+    record = triage.triage_issue(
+        issue(
+            number=12,
+            title="Build fails",
+            body="Works on my machine. On CI the third case fails with ECONNREFUSED.",
+            labels=["bug"],
+        ),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["verdict"] == "needs-info"
+    assert "needs-info" in record["labels"]
+    assert triage.queueable([record]) == []
+
+
+# --- issue #5 (reopened): the body is where the collisions live ----------------
+# The substring half was fixed first. The half that remained was a keyword
+# collision: risk read title and body as one text, so an issue that merely
+# discussed a dangerous word scored high, and one that mentioned a test scored
+# low. On this repo's own queue eleven of twelve `high` scores were one such
+# word in the body, every one a collision, and fifteen issues were `low` for
+# mentioning a test. The title stays authoritative both ways; the body needs
+# either an unambiguous word or two different collision-prone ones; and the
+# low-risk words are not read from the body at all. Every score still says
+# what it saw, including the mention that did not score.
+
+
+def test_one_security_word_in_the_body_is_a_mention_and_says_so():
+    """The reopened case: #3 discussed `_tokens` and scored high for it."""
+    record = triage.triage_issue(
+        issue(
+            number=3,
+            title="Short issue titles produce false duplicates",
+            body="_tokens drops short tokens, so any distinguishing digit is discarded.",
+            labels=["bug"],
+        ),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["risk"] == "medium"
+    assert "token" in record["risk_reason"]
+    assert "body" in record["risk_reason"], "a reviewer needs to know it was seen and not scored"
+
+
+def test_two_different_security_words_in_the_body_are_a_subject():
+    """A tokeniser issue says `tokens`; it does not also say `session`."""
+    got = triage._scored(
+        issue(
+            title="Login page 500s", body="the session cookie is not renewed when the token rotates"
+        ),
+        [],
+    )
+    assert got == ("high", '"token" and "session" in the body')
+
+
+def test_the_same_security_word_twice_in_the_body_is_still_one_mention():
+    got = triage.risk_level(issue(title="Lexer is slow", body="tokens, tokens, more tokens"), [])
+    assert got == "medium"
+
+
+@pytest.mark.parametrize("body", ["reset password mail is never sent", "needs a migration", "csrf"])
+def test_an_unambiguous_security_word_in_the_body_scores_high_on_its_own(body):
+    assert triage.risk_level(issue(title="Form does nothing", body=body), []) == "high"
+
+
+def test_a_security_word_in_the_title_scores_high_whatever_the_body_says():
+    assert triage.risk_level(issue(title="Token refresh fails", body="Details."), []) == "high"
+
+
+def test_mentioning_a_test_in_the_body_does_not_make_a_change_safe():
+    """Fifteen of this repo's issues were `low` for a body that said "test"."""
+    got = triage._scored(
+        issue(title="Required flag is read off the wrong key", body="No test asserts it."), []
+    )
+    assert got[0] == "medium"
+
+
+def test_a_low_risk_word_in_the_title_still_scores_low():
+    assert triage.risk_level(issue(title="Fix typo in the docs", body="s/teh/the/"), []) == "low"
+
+
+def test_a_risk_score_from_the_title_says_so():
+    record = triage.triage_issue(
+        issue(number=4, title="Session token never expires", body="Details.", labels=["bug"]),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["risk"] == "high"
+    assert "title" in record["risk_reason"]
+
+
+def test_a_protected_path_names_the_path_that_forced_the_score():
+    record = triage.triage_issue(
+        issue(number=5, title="Tweak helper", body="in src/auth/session.py", labels=["bug"]),
+        others=[],
+        protected=PROTECTED,
+        available_labels=AVAILABLE,
+    )
+    assert record["risk"] == "high"
+    assert "src/auth/session.py" in record["risk_reason"]
+
+
+def test_a_high_risk_label_is_named_as_the_reason():
+    record = triage.triage_issue(
+        issue(number=6, title="Tidy up logging", body="Details.", labels=["security"]),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["risk_reason"] == "the security label"
+
+
+def test_every_record_carries_a_risk_reason_even_when_nothing_scored():
+    record = triage.triage_issue(
+        issue(number=7, title="Handle empty upload payload", body="Returns 500 on empty body."),
+        others=[],
+        protected=[],
+        available_labels=AVAILABLE,
+    )
+    assert record["risk"] == "medium"
+    assert record["risk_reason"]
+
+
+# --- issue #56: a label write that failed must not become a ledger event ------
+
+
+def _plan_file(tmp_path, *records):
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps({"repo": "me/mine", "triaged": list(records)}))
+    return path
+
+
+def _record(number=1, labels=("bug",)):
+    return {"issue": number, "title": "Upload fails", "verdict": "actionable", "labels": [*labels]}
+
+
+def test_apply_labels_returns_the_reason_a_write_failed(monkeypatch):
+    """`gh` explains itself on stderr; returning a bare bool threw it away."""
+
+    def fake(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout="",
+            stderr="GraphQL: does not have the correct permissions to execute "
+            "AddLabelsToLabelable\n",
+        )
+
+    monkeypatch.setattr(triage.subprocess, "run", fake)
+    ok, reason = triage.apply_labels("me/mine", 1, ["bug"], Path("gh_safe.sh"))
+    assert ok is False
+    assert "AddLabelsToLabelable" in reason
+
+
+def _refusing_gh(monkeypatch, message="GraphQL: does not have the correct permissions"):
+    """Every `gh issue edit` fails, the way they did on this repo."""
+
+    def fake(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr=message + "\n")
+
+    monkeypatch.setattr(triage.subprocess, "run", fake)
+
+
+def _apply(tmp_path, plan):
+    return triage.main(
+        ["apply", "--repo", "me/mine", "--plan", str(plan), "--ledger", str(tmp_path / ".foreman")]
+    )
+
+
+def test_a_failed_label_write_never_becomes_a_ledger_event(tmp_path, monkeypatch, capsys):
+    """The ledger claimed 15 triaged issues while no issue carried a label, and
+    because triage skips issues that have not been edited since their last
+    record, the divergence never self-corrected."""
+    import ledger as ledger_mod
+
+    _refusing_gh(monkeypatch)
+    code = _apply(tmp_path, _plan_file(tmp_path, _record(1), _record(2)))
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert [e["type"] for e in events] == ["triage.completed"]
+    assert code == 1
+
+
+def test_the_reason_a_label_write_failed_reaches_the_operator(tmp_path, monkeypatch, capsys):
+    """`{"applied": 0, "failed": [3]}` gives nobody anything to act on."""
+    _refusing_gh(monkeypatch, "GraphQL: does not have the correct permissions")
+    _apply(tmp_path, _plan_file(tmp_path, _record(3)))
+    out = json.loads(capsys.readouterr().out)
+    assert out["applied"] == 0
+    assert "does not have the correct permissions" in json.dumps(out["failed"])
+
+
+def test_a_successful_label_write_is_still_recorded(tmp_path, monkeypatch, capsys):
+    import ledger as ledger_mod
+
+    monkeypatch.setattr(
+        triage.subprocess,
+        "run",
+        lambda args, **kw: subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+    assert _apply(tmp_path, _plan_file(tmp_path, _record(1))) == 0
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert [e["type"] for e in events] == ["issue.triaged", "triage.completed"]
+    assert json.loads(capsys.readouterr().out)["applied"] == 1
+
+
+def test_a_record_with_no_labels_to_write_is_recorded_without_calling_gh(tmp_path, monkeypatch):
+    """A repo that defines none of the taxonomy still gets its verdicts."""
+    import ledger as ledger_mod
+
+    _refusing_gh(monkeypatch)  # any call at all would fail the write
+    assert _apply(tmp_path, _plan_file(tmp_path, _record(1, labels=()))) == 0
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert [e["type"] for e in events] == ["issue.triaged", "triage.completed"]
+
+
+def test_a_pass_that_labelled_nothing_still_records_that_it_ran(tmp_path, monkeypatch):
+    """`loop.triage_due` reads `triage.completed`; without it the loop asks for
+    triage on every tick."""
+    import ledger as ledger_mod
+
+    _refusing_gh(monkeypatch)
+    _apply(tmp_path, _plan_file(tmp_path, _record(1)))
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert events[-1]["type"] == "triage.completed"
+    assert events[-1]["triaged"] == 0 and events[-1]["failed"] == 1
+
+
+# --- issue #60: sizing has to be graduated, not a coin that lands on medium ---
+
+ONE_FILE = (
+    "`PR_OPEN_TYPES` in scripts/land.py includes ready_for_review and edited, so a PR "
+    "that is only retitled counts as newly opened and the gate that was already cleared "
+    "is asked for a second time. One tuple, one line."
+)
+NO_FILE = (
+    "The push cap counts every push, including the ones that resolve a review comment, "
+    "so a batch that is being actively reviewed hits the cap and escalates while it is "
+    "still making progress. The cap should count pushes that did not move a gate."
+)
+MANY_FILES = (
+    "The landing procedure spreads one decision over three places. scripts/land.py "
+    "decides whether the gates are clear, scripts/loop.py decides whether the batch is "
+    "still in flight, and commands/land.md tells the operator a third thing again. "
+    "Each of the three has its own idea of what 'ready' means, so a batch can be ready "
+    "in one and blocked in another, and the operator is left holding the difference. "
+    "Landing one of them without the other two would leave the contradiction in place, "
+    "so all three move together, along with the tests that pin each of them. The gate "
+    "spec is the one that should win, because it is the one the operator is shown, but "
+    "whichever wins has to be written down in one place and read from there."
+)
+
+
+def test_a_short_report_naming_one_file_is_small():
+    """An issue that names exactly one file and says little about it is a
+    one-file change. Sizing had no signal for that below 120 characters, and
+    real reports are five times that."""
+    got = triage.classify_size(issue(title="Draft PRs reopen a cleared gate", body=ONE_FILE))
+    assert got == "small"
+
+
+def test_a_report_that_spans_several_files_is_large():
+    got = triage.classify_size(issue(title="Landing is decided in three places", body=MANY_FILES))
+    assert got == "large"
+
+
+def test_a_realistic_queue_does_not_all_come_out_the_same_size():
+    """The defect: every open issue on this repo scored medium, so WEIGHT
+    contributed 2 apiece and max_batch_weight degenerated into an issue count."""
+    sizes = {
+        triage.classify_size(issue(title=t, body=b))
+        for t, b in (
+            ("Draft PRs reopen a cleared gate", ONE_FILE),
+            ("The push cap counts pushes that made progress", NO_FILE),
+            ("Landing is decided in three places", MANY_FILES),
+        )
+    }
+    assert sizes == {"small", "medium", "large"}
+
+
+def test_a_quoted_traceback_is_evidence_not_surface():
+    """Paths are counted as places to change, so they come from prose only. A
+    traceback names five files without one of them changing."""
+    body = (
+        "The upload retry gives up on the first 503 instead of backing off, which is "
+        "what scripts/upload.py was changed to do last month. The trace is below and it "
+        "is the same one every time, on every size of file, from every client:\n"
+        "```\n"
+        'File "src/a.py", line 3\n'
+        'File "src/b.py", line 9\n'
+        'File "src/c.py", line 21\n'
+        "```\n"
+        "Retrying by hand straight afterwards works, so it is the backoff, not the link."
+    )
+    assert triage.classify_size(issue(title="Upload gives up too early", body=body)) != "large"
+
+
+# --- issue #70: protected paths must not vanish when triage runs elsewhere ----
+
+
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", "-c", "user.email=f@example.com", "-c", "user.name=foreman", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """The layout `commands/build.md` prescribes: the config lives one repo up."""
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    _git(checkout, "init", "-q", "-b", "main")
+    _git(checkout, "commit", "-q", "--allow-empty", "-m", "root")
+    linked = tmp_path / "foreman-b-001"
+    _git(checkout, "worktree", "add", "-q", str(linked), "-b", "foreman/b-001")
+
+    import ledger
+
+    root = ledger.init(checkout)
+    (root / ledger.CONFIG_FILE).write_text(
+        json.dumps({"protected_paths": [".github/workflows/**"]})
+    )
+    return checkout, linked
+
+
+def _workflow_issue():
+    """Deliberately free of every high-risk hint word, so the only thing that can
+    raise it above medium is the protected-path list in the config."""
+    return issue(
+        number=7,
+        title="The build matrix drops one job",
+        body="`.github/workflows/ci.yml` runs three jobs when it should run four.",
+        labels=["bug"],
+    )
+
+
+def _plan_from(monkeypatch, capsys, *args):
+    """Run `triage.py plan` over one issue; return the plan and anything it warned."""
+    monkeypatch.setattr(triage, "fetch_issues", lambda repo, limit=50: [_workflow_issue()])
+    monkeypatch.setattr(triage, "fetch_labels", lambda repo: [])
+    assert triage.main(["plan", "--repo", "me/mine", *args]) == 0
+    captured = capsys.readouterr()
+    return json.loads(captured.out), captured.err
+
+
+def test_triage_reads_its_protected_paths_from_the_repository_when_run_from_a_worktree(
+    worktree, monkeypatch, capsys
+):
+    """With no config `protected_paths` is empty, so an issue touching a workflow
+    path scores medium and slips under the default risk ceiling into a batch."""
+    _checkout, linked = worktree
+    monkeypatch.chdir(linked)
+
+    plan, warnings = _plan_from(monkeypatch, capsys)
+    record = plan["triaged"][0]
+    assert record["risk"] == "high"
+    assert ".github/workflows/ci.yml" in record["risk_reason"]
+    assert warnings == ""
+
+
+def test_triage_says_so_when_it_is_scoring_risk_with_no_protected_paths(
+    worktree, monkeypatch, capsys
+):
+    """Scoring every path as unprotected is a decision; it must be a visible one."""
+    checkout, linked = worktree
+    import ledger
+
+    (checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE).unlink()
+    monkeypatch.chdir(linked)
+
+    plan, warnings = _plan_from(monkeypatch, capsys)
+    assert plan["triaged"][0]["risk"] == "medium", "no config means no protected paths"
+    assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in warnings
+
+
+def test_a_prior_verdict_is_still_found_when_triage_runs_from_a_worktree(
+    worktree, monkeypatch, capsys
+):
+    """Issue #73. `ledger.load` anchors the path, but an `.exists()` test in front
+    of it still asked about the cwd-relative one, which from a linked worktree is
+    not there. So `prior` read empty, `should_skip` never skipped, and every open
+    issue was re-triaged and relabelled on every pass — the exact GitHub writes
+    the skip rule exists to avoid."""
+    checkout, linked = worktree
+    import ledger
+
+    ledger.append(
+        checkout / ledger.LEDGER_DIR,
+        "issue.triaged",
+        issue=7,
+        verdict="actionable",
+        issue_updated_at=_workflow_issue()["updatedAt"],
+    )
+    monkeypatch.chdir(linked)
+
+    plan, _ = _plan_from(monkeypatch, capsys)
+    assert plan["skipped"] == [7]
+    assert plan["triaged"] == []
+
+
+def test_an_explicit_config_path_is_still_obeyed(worktree, monkeypatch, tmp_path, capsys):
+    checkout, linked = worktree
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps({"protected_paths": []}))
+    monkeypatch.chdir(linked)
+
+    plan, _ = _plan_from(monkeypatch, capsys, "--config", str(elsewhere))
+    assert plan["triaged"][0]["risk"] == "medium"
+
+
+# --- issue #58: a skipped issue is still an issue triage saw open -------------
+
+
+def _plan_with_skips(tmp_path, triaged=(), skipped=()):
+    path = tmp_path / "plan.json"
+    path.write_text(
+        json.dumps({"repo": "me/mine", "triaged": list(triaged), "skipped": list(skipped)})
+    )
+    return path
+
+
+def _completed(tmp_path):
+    import ledger as ledger_mod
+
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    return next(e for e in events if e["type"] == "triage.completed")
+
+
+def test_an_issue_skipped_because_nothing_changed_is_still_recorded_as_open(tmp_path):
+    """`fetch_issues` asks GitHub for open issues only, so appearing in the plan
+    at all — skipped or not — is evidence the issue was open when triage ran.
+
+    Without it the only evidence available was a *new* `issue.triaged` record,
+    and `should_skip` guarantees one is never written for an issue whose
+    `updatedAt` has not moved. The rule that releases an issue from a merged
+    batch had no producer.
+    """
+    _apply(tmp_path, _plan_with_skips(tmp_path, skipped=[5]))
+    assert _completed(tmp_path)["open_issues"] == [5]
+
+
+def test_triaged_and_skipped_issues_are_recorded_together(tmp_path, monkeypatch):
+    monkeypatch.setattr(triage, "apply_labels", lambda *a, **k: (True, ""))
+    _apply(tmp_path, _plan_with_skips(tmp_path, triaged=[_record(1)], skipped=[5, 7]))
+    assert _completed(tmp_path)["open_issues"] == [1, 5, 7]
+
+
+def test_an_issue_whose_label_write_failed_was_still_seen_open(tmp_path, monkeypatch):
+    """Whether a label stuck says nothing about whether the issue is open."""
+    _refusing_gh(monkeypatch)
+    _apply(tmp_path, _plan_with_skips(tmp_path, triaged=[_record(3)]))
+    assert _completed(tmp_path)["open_issues"] == [3]
+
+
+def test_an_issue_listed_twice_is_recorded_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(triage, "apply_labels", lambda *a, **k: (True, ""))
+    _apply(tmp_path, _plan_with_skips(tmp_path, triaged=[_record(4)], skipped=[4]))
+    assert _completed(tmp_path)["open_issues"] == [4]
+
+
+# --- issue #80: a sighting is dated by when the plan looked, not when it was applied
+
+
+def test_a_plan_records_the_moment_it_looked_at_the_tracker(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    plan, _ = _plan_from(monkeypatch, capsys)
+    assert plan["observed_at"].endswith("Z")
+
+
+def test_apply_dates_every_sighting_by_when_the_plan_looked(tmp_path, monkeypatch):
+    """The plan is a file a person reads before applying, and nothing bounds how
+    long that takes. `loop.merged_leaving_open` compares a sighting against a
+    merged batch's `progress_at`, so a plan built before a merge and applied
+    after it used to assert, after the merge, that the issue it closed was
+    still open — and released it for duplicate work."""
+    monkeypatch.setattr(triage, "apply_labels", lambda *a, **k: (True, ""))
+    path = tmp_path / "plan.json"
+    path.write_text(
+        json.dumps(
+            {
+                "repo": "me/mine",
+                "observed_at": "2026-01-01T00:00:00Z",
+                "triaged": [_record(1)],
+                "skipped": [5],
+            }
+        )
+    )
+    _apply(tmp_path, path)
+    import ledger as ledger_mod
+
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert [e["type"] for e in events] == ["issue.triaged", "triage.completed"]
+    assert all(e["observed_at"] == "2026-01-01T00:00:00Z" for e in events)
+    assert all(e["ts"] != "2026-01-01T00:00:00Z" for e in events), "ts is still when apply ran"
+
+
+def test_a_plan_from_before_the_field_existed_is_stamped_at_apply_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(triage, "apply_labels", lambda *a, **k: (True, ""))
+    _apply(tmp_path, _plan_with_skips(tmp_path, triaged=[_record(1)], skipped=[5]))
+    import ledger as ledger_mod
+
+    events = ledger_mod.read_events(tmp_path / ".foreman")
+    assert not any("observed_at" in e for e in events)
+    assert ledger_mod.load(tmp_path / ".foreman").open_seen_at[5] == events[-1]["ts"]

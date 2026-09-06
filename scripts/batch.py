@@ -7,8 +7,14 @@ slow CI. The cost of grouping is that a failure is harder to attribute — which
 why every issue gets its own commit and `split()` exists.
 
 CLI:
-    batch.py plan --triage triage.json [--config .foreman/config.json]
+    batch.py plan --triage triage.json [--ledger .foreman] [--config .foreman/config.json]
+        [--profile .foreman/ci-profile.json]
     batch.py apply --plan batches.json [--ledger .foreman]
+    batch.py paths --batch b-001 --base main [--head HEAD] [--ledger .foreman]
+        [--repo-dir .] [--apply]
+
+`plan` reads the ledger too, to allocate ids that continue past the ones already
+issued, so its --ledger must name the same directory `apply` will write to.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,6 +33,10 @@ DEFAULT_MAX_WEIGHT = 6
 
 
 class CannotSplit(Exception):
+    pass
+
+
+class PathsUnavailable(Exception):
     pass
 
 
@@ -163,28 +174,159 @@ def split(batch: dict, failing_issue: int) -> tuple[dict, dict]:
     return failing, rest
 
 
-def main(argv: list[str] | None = None) -> int:
+# --- what a batch actually changed --------------------------------------------
+# A batch's paths start as the union of the file paths its issues' prose happens
+# to name. That is a statement of intent, and prose is a poor source: it invents
+# files that do not exist and stays silent about files the fix had to touch. The
+# protected-path merge gate reads those paths, so guarding intent instead of the
+# change is a hole in it. These read the branch's real diff instead.
+
+
+def diff_paths(base: str, head: str = "HEAD", repo: Path | str | None = None) -> list[str]:
+    """The files a branch changes, from git.
+
+    Three dots, not two: `base...head` diffs head against the merge base, so
+    everything that landed on trunk after the branch started is excluded. With
+    two dots a busy trunk makes every batch look like it touched half the repo.
+
+    Every way the diff can fail to arrive raises `PathsUnavailable`, including
+    git not being runnable at all — the same refusal `gate._git` makes, for the
+    same reason. Converting only a non-zero exit left `FileNotFoundError` to
+    reach the caller as a traceback instead of the one-line reason `main` is
+    written to print.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "diff", "--name-only", f"{base}...{head}"],
+            cwd=str(repo) if repo else None,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise PathsUnavailable(f"git diff {base}...{head} could not be run: {exc}") from exc
+    if done.returncode != 0:
+        # Never return [] here. An empty path list clears the protected-path
+        # gate, so a failed git call would read as "this batch is safe".
+        raise PathsUnavailable(
+            f"git diff {base}...{head} failed: {done.stderr.strip() or 'no output'}"
+        )
+    return sorted({line.strip() for line in done.stdout.splitlines() if line.strip()})
+
+
+def head_commit(head: str = "HEAD", repo: Path | str | None = None) -> str:
+    """The full SHA `head` names, so an observation can say which commit it is of.
+
+    A path list is a statement about one commit, exactly as a gate verdict is.
+    `land.merge_blockers` compares this against the commit actually being
+    merged, so a list confirmed before a later push cannot clear the gate for
+    code it never saw (issue #76).
+    """
+    try:
+        done = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{head}^{{commit}}"],
+            cwd=str(repo) if repo else None,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise PathsUnavailable(f"git rev-parse {head} could not be run: {exc}") from exc
+    if done.returncode != 0 or not done.stdout.strip():
+        raise PathsUnavailable(f"git rev-parse {head} failed: {done.stderr.strip() or 'no output'}")
+    return done.stdout.strip()
+
+
+def observed_paths(
+    batch: dict, base: str, head: str = "HEAD", repo: Path | str | None = None
+) -> dict:
+    """A batch's declared paths against the ones it really changed.
+
+    `paths` is the answer — the value that should replace the declared list. The
+    other two keys are the drift, and both are worth seeing: `undeclared` is the
+    protected file no issue mentioned, `untouched` is the file the prose invented.
+    `head_sha` is the commit the answer is about.
+
+    An empty diff is not an answer, so it raises rather than returning one. git
+    exiting 0 with no output means "this branch changes nothing", and a batch
+    that changes nothing has produced no observation to replace intent with. The
+    two ways to arrive here are indistinguishable from inside: the batch has
+    committed nothing yet, and `repo` names a checkout that does not hold the
+    branch — the documented invocation run from the main worktree while the work
+    sits in a linked one. Both used to answer `paths: []`, which `--apply` wrote
+    over the declared list, and land.merge_blockers reads that list: the
+    protected-path gate went quiet for exactly the batch nobody had looked at.
+    """
+    declared = sorted(set(batch.get("paths") or []))
+    observed = diff_paths(base, head, repo)
+    if not observed:
+        raise PathsUnavailable(
+            f"git diff {base}...{head} names no changed file, so there is nothing to "
+            f"replace {batch.get('id')}'s declared paths with. Either the batch has "
+            f"committed nothing yet, or --repo-dir names a checkout without its branch. "
+            f"Its declared paths are left alone, and the merge gate keeps reading them."
+        )
+    return {
+        "batch": batch.get("id"),
+        "declared": declared,
+        "paths": observed,
+        "head_sha": head_commit(head, repo),
+        "undeclared": [p for p in observed if p not in set(declared)],
+        "untouched": [p for p in declared if p not in set(observed)],
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("plan")
     p.add_argument("--triage", required=True, help="output of `triage.py plan`")
     p.add_argument("--ledger", default=".foreman")
-    p.add_argument("--config", default=".foreman/config.json")
-    p.add_argument("--profile", default=".foreman/ci-profile.json")
+    p.add_argument(
+        "--config", help="foreman config (default .foreman/config.json in the repository root)"
+    )
+    p.add_argument(
+        "--profile", help="CI profile (default .foreman/ci-profile.json in the repository root)"
+    )
     p = sub.add_parser("apply")
     p.add_argument("--plan", required=True)
     p.add_argument("--ledger", default=".foreman")
+    p = sub.add_parser("paths", help="recompute a batch's paths from its real diff")
+    p.add_argument("--batch", required=True)
+    p.add_argument("--base", required=True, help="the branch the PR would merge into")
+    p.add_argument("--head", default="HEAD")
+    p.add_argument("--ledger", default=".foreman")
+    p.add_argument("--repo-dir", default=".", help="the working tree holding the branch")
+    p.add_argument("--apply", action="store_true", help="record the recomputed paths in the ledger")
+    return parser
 
-    args = parser.parse_args(argv)
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if args.cmd == "plan":
         triage_out = json.loads(Path(args.triage).read_text())
-        config = json.loads(Path(args.config).read_text()) if Path(args.config).exists() else {}
-        profile = json.loads(Path(args.profile).read_text()) if Path(args.profile).exists() else {}
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import ledger as ledger_mod
 
-        taken = set(ledger_mod.load(Path(args.ledger)).batches)
+        # Both anchored to the repository, like the ledger (issue #74). Read
+        # against the caller, a plan cut from a build worktree saw no config —
+        # no limits, no risk ceiling — and no profile, so it could not say what
+        # its batching saved.
+        config = ledger_mod.load_config(args.config)
+        profile = ledger_mod.load_profile(args.profile)
+
+        ledger_root = Path(args.ledger)
+        if not ledger_mod.resolve_root(ledger_root).exists():
+            # Without the ledger the taken set is empty and ids restart at b-001,
+            # colliding with batches the ledger already holds — and the fold keeps
+            # the first record of an id, so apply's collision is silently dropped
+            # while still being printed under created. Running from a directory
+            # other than the repo root is the usual cause, and it is invisible
+            # unless it is said out loud.
+            print(
+                f"warning: no ledger at {ledger_root}; batch ids will restart at b-001",
+                file=sys.stderr,
+            )
+        taken = set(ledger_mod.load(ledger_root).batches)
         batches = group_issues(triage_out.get("triaged", []), config, taken=taken)
         print(
             json.dumps(
@@ -197,6 +339,34 @@ def main(argv: list[str] | None = None) -> int:
     import ledger as ledger_mod
 
     root = Path(args.ledger)
+
+    if args.cmd == "paths":
+        record = ledger_mod.load(root).batches.get(args.batch)
+        if record is None:
+            # The fold drops a batch.meta event for a batch it has never seen, so
+            # --apply would report success and change nothing.
+            print(f"no batch {args.batch!r} in {root}", file=sys.stderr)
+            return 1
+        try:
+            seen = observed_paths(record, args.base, args.head, args.repo_dir)
+        except PathsUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if args.apply:
+            # batch.meta is the fold's channel for correcting a batch record, so
+            # the recomputed paths become what land.merge_blockers reads — and
+            # `paths_head` is how it knows they are about the commit it is
+            # merging rather than an earlier one.
+            ledger_mod.append(
+                root,
+                "batch.meta",
+                batch=args.batch,
+                paths=seen["paths"],
+                paths_head=seen["head_sha"],
+            )
+        print(json.dumps(seen, indent=2))
+        return 0
+
     plan = json.loads(Path(args.plan).read_text())
     for item in plan.get("batches", []):
         ledger_mod.append(

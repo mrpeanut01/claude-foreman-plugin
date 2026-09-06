@@ -9,7 +9,7 @@ plausible-sounding judgement call would quietly cost you something:
   * whether a failure is a flake or a bug (rerunning a bug hides it).
 
 CLI:
-    land.py checks   --pr N --repo OWNER/NAME [--profile .foreman/ci-profile.json]
+    land.py checks   --pr N --repo OWNER/NAME [--sha SHA] [--profile .foreman/ci-profile.json]
     land.py verdict  --file verdict.json
     land.py blockers --batch b-001 [--ledger .foreman] [--config .foreman/config.json]
 """
@@ -17,6 +17,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import subprocess
@@ -25,8 +26,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import ledger as ledger_mod  # noqa: E402
 from ci_profile import attribute  # noqa: E402
 from globs import compile_glob, matches_any  # noqa: E402
+from ledger import PROGRESS_COUNTERS  # noqa: E402
 
 PASSED = {"SUCCESS", "PASS", "NEUTRAL", "SKIPPED"}
 # A cancelled check is not a pass. Leaving it in neither set parks it in
@@ -71,7 +74,34 @@ PR_EVENTS = {"pull_request", "pull_request_target", "push"}
 # things each round is progress. Only the first is worth escalating on.
 REVIEW_MATCH_THRESHOLD = 0.5
 DEFAULT_REVIEW_CEILING = 5
+# Consecutive rounds carrying a blocking finding in the same file before that
+# counts as deadlock on its own. Two is ordinary iteration — a reviewer reading
+# one file twice. Three says the fixes are not converging on a correct model of
+# that code, and it has to fire below the hard ceiling to say something more
+# useful than "you ran out of rounds".
+LOCUS_REPEAT_ROUNDS = 3
 _WORD = re.compile(r"[a-z0-9]+")
+# Words a reviewer exchanges for one another without meaning anything new by
+# it. This is the whole list, and it is kept to pairs that are synonyms in
+# every sentence a finding is written in. What is NOT here matters more than
+# what is: "null" and "type", "read" and "write", "before" and "after" name
+# different defects when swapped in place, and the substitution rule below
+# depends on them staying different (issues #29, #79).
+_SYNONYMS = {
+    "unlimited": "unbounded",
+    "uncapped": "unbounded",
+    "unbound": "unbounded",
+    "infinite": "unbounded",
+    "endless": "unbounded",
+    "absent": "missing",
+    "omitted": "missing",
+    "lacking": "missing",
+    "lack": "missing",
+    "unhandled": "uncaught",
+    "incorrect": "wrong",
+    "quietly": "silently",
+    "quiet": "silent",
+}
 _NOISE = {
     "the",
     "a",
@@ -104,9 +134,19 @@ _NOISE = {
 
 PR_TRIGGERS = ("pull_request", "pull_request_target")
 FILTER_KEYS = ("paths", "paths_ignore", "branches", "tags")
-# Activity types that fire while a pull request is open. A trigger restricted to
-# `closed` or `labeled` never reports on an open PR.
-PR_OPEN_TYPES = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
+# Activity types that fire on EVERY pull request, which is what requirable means.
+# GitHub's default when `types:` is omitted is [opened, synchronize, reopened],
+# and `opened` is the member of it that every pull request necessarily raises.
+#
+# The near misses matter more than the obvious ones. `closed` and `labeled` never
+# fire on an open PR at all, but `ready_for_review` and `edited` do — just not on
+# every PR. `on: pull_request: types: [ready_for_review]` is the standard way to
+# hold an expensive E2E suite until a PR leaves draft; foreman opens non-draft
+# PRs and edits nothing, so no check is ever created and requiring one hangs the
+# gate until `stale_after_s` escalates it. `synchronize` has the same shape: it
+# fires on the pushes after creation, which a PR that is right first time never
+# gets.
+PR_UNCONDITIONAL_TYPES = {"opened"}
 
 
 def _branch_allows(branch: str, patterns: list[str]) -> bool:
@@ -145,8 +185,10 @@ def _unconditional(
             return False
 
     types = cfg.get("types")
-    if types and not (set(types) & PR_OPEN_TYPES):
-        return False  # e.g. types: [closed] — never fires while the PR is open
+    if types and not (set(types) & PR_UNCONDITIONAL_TYPES):
+        # e.g. types: [closed], which never fires while the PR is open, or
+        # types: [ready_for_review], which fires for some PRs but not this one.
+        return False
     return True
 
 
@@ -192,7 +234,59 @@ def can_report_on_pr(spec: dict, base_branch: str | None = None) -> bool:
 _can_report = can_report_on_pr
 
 
-def _is_advisory(name: str, profile: dict) -> bool:
+# A check result names the commit it ran against. Anything shorter than this is
+# not enough of a SHA to identify one.
+MIN_SHA_PREFIX = 7
+
+
+def describes_commit(entry: dict, expected_sha: str) -> bool:
+    """Whether this check result provably ran against `expected_sha`.
+
+    A result that names no commit is not evidence about this one. `gh pr checks`
+    reports whatever the pull request last had, so between a push and the new
+    workflow run registering it returns the PREVIOUS commit's results — which is
+    the whole hazard this predicate exists to close.
+    """
+    reported = str(entry.get("head_sha") or entry.get("headSha") or "")
+    if len(reported) < MIN_SHA_PREFIX or len(expected_sha or "") < MIN_SHA_PREFIX:
+        return False
+    # Either side may be abbreviated: `git rev-parse --short HEAD` on one side,
+    # a full API SHA on the other.
+    return reported.startswith(expected_sha) or expected_sha.startswith(reported)
+
+
+def checks_for_sha(checks: list[dict], expected_sha: str | None) -> list[dict]:
+    """The checks that describe `expected_sha`; all of them when no SHA is given."""
+    if not expected_sha:
+        return list(checks or [])
+    return [c for c in (checks or []) if describes_commit(c, expected_sha)]
+
+
+def _shapes(profile: dict) -> list[dict]:
+    """The job list `ci_profile.attribute` wants: job key plus declared display name."""
+    return [
+        {"name": name, "display": (spec or {}).get("display")}
+        for name, spec in (profile.get("jobs") or {}).items()
+    ]
+
+
+def _job_for(name: str, profile: dict, shapes: list[dict] | None = None) -> dict:
+    """The profile entry for a reported check name, or {} when nothing matches.
+
+    GitHub reports matrix cells (`test (3.11)`) and reusable-workflow legs
+    (`caller / called`), while the profile is keyed by the workflow's job key
+    (`test`). Indexing `jobs` with the reported name therefore misses on exactly
+    the repos this system is for. `ci_profile.attribute` already reverses those
+    display forms, and returns None rather than guessing.
+    """
+    jobs = profile.get("jobs") or {}
+    if name in jobs:
+        return jobs[name] or {}
+    key = attribute(name, _shapes(profile) if shapes is None else shapes)
+    return (jobs.get(key) or {}) if key else {}
+
+
+def _is_advisory(name: str, profile: dict, shapes: list[dict] | None = None) -> bool:
     """Unknown checks count as required: an unknown gate may block the queue.
 
     When branch protection could not be read, nothing is known to be advisory.
@@ -202,11 +296,19 @@ def _is_advisory(name: str, profile: dict) -> bool:
     """
     if not profile.get("protection_known", False):
         return False
-    job = (profile.get("jobs") or {}).get(name)
+    if name in set(profile.get("required_checks") or []):
+        # Protection names this exact context. The job's own `required` flag is
+        # computed by matching the job KEY against those contexts, so a matrix
+        # job whose cells are required still reads required=False. Believing the
+        # flag over the context list would file a failing required cell as
+        # advisory, and a red gate would read green.
+        return False
+    job = _job_for(name, profile, shapes)
     return bool(job) and job.get("required") is False
 
 
-def classify_checks(checks: list[dict], profile: dict) -> dict:
+def classify_checks(checks: list[dict], profile: dict, expected_sha: str | None = None) -> dict:
+    shapes = _shapes(profile)
     summary = {
         "passed": [],
         "failed": [],
@@ -215,11 +317,17 @@ def classify_checks(checks: list[dict], profile: dict) -> dict:
         "advisory_pending": [],
         "human_gate_pending": [],
         "pending": [],
+        "stale": [],
     }
     for entry in checks or []:
         name = entry.get("name", "")
+        if expected_sha and not describes_commit(entry, expected_sha):
+            # Belongs to another commit, or names none at all. Counting it in
+            # either direction lets CI that never saw this code decide its gate.
+            summary["stale"].append(name)
+            continue
         state = (entry.get("state") or entry.get("bucket") or "").upper()
-        advisory = _is_advisory(name, profile)
+        advisory = _is_advisory(name, profile, shapes)
 
         if state in PASSED:
             summary["passed"].append(name)
@@ -237,24 +345,45 @@ def classify_checks(checks: list[dict], profile: dict) -> dict:
     return summary
 
 
-def ci_gate(checks: list[dict], profile: dict, base_branch: str | None = None) -> str:
-    """Translate a check list into the ledger's ci_gate value."""
+def ci_gate(
+    checks: list[dict],
+    profile: dict,
+    base_branch: str | None = None,
+    expected_sha: str | None = None,
+) -> str:
+    """Translate a check list into the ledger's ci_gate value.
+
+    `expected_sha` is the commit this verdict is about. A gate verdict is a
+    statement about one commit — that is why the ledger resets both gates on
+    `batch.pushed` — so results that cannot be shown to describe that commit are
+    dropped before anything is judged. What is left may be nothing, and nothing
+    is `pending`: honest ignorance, never green.
+    """
+    scoped = checks_for_sha(checks, expected_sha)
+    # A result naming another commit is not evidence about this one — but that it
+    # exists at all is evidence that this pull request runs CI, and that this
+    # commit's own results are still to come.
+    dropped = len(scoped) != len(checks or [])
+    checks = scoped
     summary = classify_checks(checks, profile)
     if summary["failed"]:
         return "failed"
 
     required = list(profile.get("required_checks") or [])
     if not required:
+        # Both branches below need the same two sets: what this repo declares,
+        # and which of those declarations have reported on this commit. Whether
+        # protection could be read changes what is *required*; it changes
+        # nothing about what counts as CI having spoken.
+        declared = profile.get("jobs") or {}
+        shapes = _shapes(profile)
+        reported = {attribute(c.get("name", ""), shapes) for c in (checks or [])}
+
         if not profile.get("protection_known", False):
             # Nothing is known to be optional, so decide from what the workflows
             # declare plus what has actually reported.
-            declared = profile.get("jobs") or {}
-            shapes = [
-                {"name": name, "display": spec.get("display")} for name, spec in declared.items()
-            ]
             requirable = {n: s for n, s in declared.items() if can_report_on_pr(s, base_branch)}
             covered = {attribute(name, shapes) for name in summary["passed"]}
-            reported = {attribute(c.get("name", ""), shapes) for c in (checks or [])}
 
             if requirable:
                 if not all(n in covered for n in requirable):
@@ -268,12 +397,36 @@ def ci_gate(checks: list[dict], profile: dict, base_branch: str | None = None) -
             # Anything that did report counts, requirable or not.
             return "full_green" if not summary["actionable_pending"] else "pending"
 
-        # Protection says nothing is required, so nothing can block.
+        # Protection says nothing is required, so nothing can block a merge.
+        # "Nothing blocks" is not "CI has already spoken", though. Until this
+        # commit's own results arrive — every result so far belonged to another
+        # commit, or none has arrived in the window after a push — a repo that
+        # runs CI at all has simply not reported yet. Reading that as green is
+        # how a batch merges past a suite that never ran, and it is strictly
+        # worse than the `failed` the dropped stale red used to produce.
+        #
+        # What ends the wait is a result from a job this repo declares, the same
+        # test the branch above applies. Counting any check at all is what a
+        # DCO status or a preview deploy satisfies within a second of the push,
+        # while every declared job is still missing. With nothing declared there
+        # is no such list to check against, so any result for this commit is the
+        # only evidence there can be. Nothing declared and nothing dropped is
+        # the one case with nothing to wait for: a repo with no CI, which
+        # protection agrees requires nothing.
+        spoken = bool(reported & set(declared)) if declared else bool(checks)
+        if (declared or dropped) and not spoken:
+            return "pending"
         return "full_green" if not summary["actionable_pending"] else "pending"
 
-    jobs = profile.get("jobs") or {}
     done = set(summary["passed"])
-    expensive = [n for n in required if (jobs.get(n) or {}).get("tier") == "expensive"]
+    # Required checks are protection contexts — the names GitHub reports — so
+    # their tier lives under the job that declared them, not under the context.
+    # Reading the tier off the context directly finds nothing for every matrix
+    # cell, the expensive job then counts as cheap, and cheap_green collapses
+    # into full_green: the expensive tier gets launched on every push, which is
+    # the whole saving the ladder exists to make.
+    shapes = _shapes(profile)
+    expensive = [n for n in required if _job_for(n, profile, shapes).get("tier") == "expensive"]
     cheap = [n for n in required if n not in expensive]
 
     if all(n in done for n in required):
@@ -331,8 +484,67 @@ def validate_review(verdict: dict) -> tuple[bool, list[str]]:
 # --- review convergence -------------------------------------------------------
 
 
+def _stem(word: str) -> str:
+    """Plural to singular, and nothing subtler.
+
+    `loops` and `loop` are one word; so are `retries` and `retry`. A fuller
+    stemmer would fold `missing` into `miss` and `parsing` into `parse`, which
+    starts merging words that mean different things, and the substitution rule
+    needs different words to stay different.
+    """
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 4 and word.endswith(("sses", "shes", "ches", "xes", "zes")):
+        return word[:-2]
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _canon(word: str) -> str:
+    """One spelling per meaning, as far as a table and a plural rule can get.
+
+    The substitution rule reads an in-place swap as a new defect, which is
+    right for `null` -> `type` and wrong for `unbounded` -> `unlimited`: the
+    second preserves term count and swaps one word in place, so it is
+    structurally identical to a genuine swap, and only the words themselves
+    tell the two apart (issue #79). Normalising here lets that rule stay
+    exactly as strict as it is while no longer counting a synonym or a plural
+    as a swap.
+    """
+    stemmed = _stem(word)
+    return _SYNONYMS.get(stemmed, _SYNONYMS.get(word, stemmed))
+
+
+def _terms(text: str) -> list[str]:
+    """The content words of a summary, in order, first occurrence only."""
+    seen: dict[str, None] = {}
+    for word in _WORD.findall((text or "").lower()):
+        if word not in _NOISE and len(word) > 1:
+            seen.setdefault(_canon(word), None)
+    return list(seen)
+
+
 def _words(text: str) -> set[str]:
-    return {w for w in _WORD.findall((text or "").lower()) if w not in _NOISE and len(w) > 1}
+    return set(_terms(text))
+
+
+def _substitution(a: list[str], b: list[str]) -> bool:
+    """Whether one summary is the other with terms swapped in place.
+
+    A swap keeps the sentence and exchanges words inside it, so the sequences
+    align position for position with nothing inserted and nothing dropped. A
+    rewording does not keep the sentence: it elaborates, compresses, reorders,
+    swaps filler for filler, and its alignment always carries an insertion or a
+    deletion somewhere.
+    """
+    if len(a) != len(b):
+        return False
+    # SequenceMatcher does not promise the same opcodes both ways round, and a
+    # rule that depends on which round was passed first is not a rule.
+    left, right = sorted((a, b))
+    ops = difflib.SequenceMatcher(a=left, b=right, autojunk=False).get_opcodes()
+    return all(tag in ("equal", "replace") for tag, *_ in ops)
 
 
 def same_finding(a: dict, b: dict, threshold: float = REVIEW_MATCH_THRESHOLD) -> bool:
@@ -345,37 +557,94 @@ def same_finding(a: dict, b: dict, threshold: float = REVIEW_MATCH_THRESHOLD) ->
         str(b.get("severity", "")).lower() in SERIOUS
     ):
         return False
-    wa, wb = _words(a.get("summary")), _words(b.get("summary"))
+    ta, tb = _terms(a.get("summary")), _terms(b.get("summary"))
+    wa, wb = set(ta), set(tb)
     if not wa or not wb:
         return False
-    return len(wa & wb) / len(wa | wb) >= threshold
+    if len(wa & wb) / len(wa | wb) < threshold:
+        return False
+    if not (wa - wb) or not (wb - wa):
+        return True  # one summary's words contain the other's: an elaboration
+
+    # Overlap alone cannot finish the job, and no threshold can. Two summaries
+    # about one file share their locus and their verb for free, so "missing null
+    # check in parse_config" and "missing type check in parse_config" name
+    # unrelated defects while overlapping MORE (0.67) than a genuine rewording
+    # does (0.50). Ranking by similarity puts them in the wrong order.
+    #
+    # Shape separates them where size cannot. Those two are one sentence with a
+    # term swapped in place, and the swapped term is the entire content of the
+    # complaint. Requiring containment instead — the first cut at this — rejected
+    # the swap but took every reworded repeat with it, because a reviewer
+    # restating an objection both adds and drops words: "unbounded retry loop in
+    # the fetch helper" and "the retry loop in fetch has no ceiling" are one
+    # objection twice, and read as two rounds of progress.
+    #
+    # The bound worth knowing: a new defect named by swapping a term AND adding
+    # a locator ("...in parse_config on line 12") is structurally a rewording and
+    # reads as a repeat. That escalates a converging review to a human early,
+    # which is the affordable direction — the other one merges on a defect
+    # nobody looked at twice.
+    return not _substitution(ta, tb)
+
+
+def _blocking(round_findings: list[dict]) -> list[dict]:
+    """Only findings that stood between the batch and a merge."""
+    return [f for f in round_findings or [] if str(f.get("severity", "")).lower() in SERIOUS]
+
+
+def _repeated_locus(rounds: list[list[dict]], span: int) -> str | None:
+    """A file that carried a blocking finding in each of the last `span` rounds.
+
+    Repeated wording is one deadlock signal; repeated *locus* is a stronger one.
+    A builder and reviewer can name a genuinely different defect in the same
+    function every round, in alternating directions, and never once repeat
+    themselves textually — while the thing being described is a model of that
+    code that neither of them has right. A human watching that arc stops the
+    patching and asks for the spec; this is the rule that does the same.
+    """
+    if span < 1 or len(rounds) < span:
+        return None
+    recent = [{f.get("file") for f in _blocking(r) if f.get("file")} for r in rounds[-span:]]
+    if not all(recent):
+        return None  # a round with no blocking finding at all breaks the run
+    shared = set.intersection(*recent)
+    return sorted(shared)[0] if shared else None
 
 
 def review_stalled(
-    rounds: list[list[dict]], hard_ceiling: int = DEFAULT_REVIEW_CEILING
+    rounds: list[list[dict]],
+    hard_ceiling: int = DEFAULT_REVIEW_CEILING,
+    locus_span: int = LOCUS_REPEAT_ROUNDS,
 ) -> str | None:
     """Reason to stop reviewing, or None to allow another round.
 
     Rounds elapsed is the wrong measure. A builder and reviewer who surface a
     different real defect each round are converging, however many rounds it
-    takes; two who trade the same finding are not. Only blocking severities
-    count — a repeated `low` never stood between the batch and a merge.
+    takes; two who trade the same finding are not, and two who keep being wrong
+    about the same code are not either. Only blocking severities count — a
+    repeated `low` never stood between the batch and a merge.
     """
     if len(rounds) >= hard_ceiling:
         return f"review reached the hard ceiling of {hard_ceiling} rounds"
     if len(rounds) < 2:
         return None
 
-    def blocking(round_findings):
-        return [f for f in round_findings if str(f.get("severity", "")).lower() in SERIOUS]
-
-    previous, current = blocking(rounds[-2]), blocking(rounds[-1])
+    previous, current = _blocking(rounds[-2]), _blocking(rounds[-1])
     for now in current:
         if any(same_finding(before, now) for before in previous):
             return (
                 f"the same finding survived a round (repeat): "
                 f"{now.get('file')} - {str(now.get('summary', ''))[:80]}"
             )
+
+    locus = _repeated_locus(rounds, locus_span)
+    if locus:
+        return (
+            f"{locus_span} rounds running have found a blocking defect in the same "
+            f"place (locus): {locus}. The fixes are not converging on a correct "
+            "model of that code - stop patching and write the model down."
+        )
     return None
 
 
@@ -398,8 +667,62 @@ def flake_decision(classification: dict, batch: dict, config: dict) -> str:
 # --- the merge decision -------------------------------------------------------
 
 
-def merge_blockers(batch: dict, pr: dict, config: dict) -> list[str]:
-    """Everything standing between this batch and a merge, reported at once."""
+def _same_commit(a: str | None, b: str | None) -> bool:
+    """Two SHAs, either possibly abbreviated, naming one commit."""
+    a, b = str(a or ""), str(b or "")
+    if len(a) < MIN_SHA_PREFIX or len(b) < MIN_SHA_PREFIX:
+        return False
+    return a.startswith(b) or b.startswith(a)
+
+
+def paths_unconfirmed(batch: dict, pr: dict | None = None) -> str | None:
+    """Why the batch's path list cannot be trusted at the merge, or None when it can.
+
+    A batch's `paths` start as whatever file names its issues' prose happened
+    to mention. Prose invents files and stays silent about the ones the fix
+    had to touch, and an issue that names no file at all yields `[]` — which
+    `merge_blockers` used to iterate and find nothing protected in. Absence of
+    evidence read as evidence of safety, and a fix that edited
+    `.github/workflows/ci.yml` under a protected glob merged itself (issue #76).
+
+    `batch.py paths --apply` replaces the list with the branch's real diff and
+    records `paths_head`, the commit that diff was of. Without that marker the
+    list is intent, not observation, and the merge waits. With it, the commit
+    still has to be the one being merged: a list confirmed before a later push
+    describes code that no longer exists, the same way a gate verdict does. The
+    PR's own head is the authority when the caller has it; the ledger's last
+    recorded push is the fallback.
+    """
+    observed = batch.get("paths_head")
+    if not observed:
+        declared = ", ".join(batch.get("paths") or []) or "none"
+        return (
+            f"paths never confirmed against the branch's diff: the declared list "
+            f"({declared}) comes from issue prose, which invents files and omits the "
+            f"ones the fix had to touch. Run batch.py paths --batch {batch.get('id')} "
+            "--base <trunk> --repo-dir <worktree> --apply, then ask again"
+        )
+    expected = (pr or {}).get("headRefOid") or batch.get("head_sha")
+    if expected and not _same_commit(observed, expected):
+        return (
+            f"paths were confirmed against {str(observed)[:MIN_SHA_PREFIX]} but the commit "
+            f"being merged is {str(expected)[:MIN_SHA_PREFIX]}; re-run batch.py paths "
+            f"--batch {batch.get('id')} --apply for it"
+        )
+    return None
+
+
+def merge_blockers(
+    batch: dict, pr: dict, config: dict, *, observed_paths_required: bool = True
+) -> list[str]:
+    """Everything standing between this batch and a merge, reported at once.
+
+    `observed_paths_required=False` is for a caller whose next step is the
+    recipe that confirms the paths — `loop.next_action` answering `merge` —
+    so that an unconfirmed list is work to do rather than a reason to escalate.
+    The CLI never passes it: `land.py blockers` is the question asked *after*
+    that step, and there an unconfirmed list blocks.
+    """
     blockers: list[str] = []
 
     if not config.get("auto_merge"):
@@ -418,10 +741,30 @@ def merge_blockers(batch: dict, pr: dict, config: dict) -> list[str]:
         pattern = matches_any(path, config.get("protected_paths"))
         if pattern:
             blockers.append(f"{path} is protected by {pattern}; never auto-merged")
+    # An empty list, or a list nobody checked against the diff, must block rather
+    # than clear: the loop above finds nothing protected in `[]`, and `[]` is
+    # exactly what an issue naming no file produces.
+    if observed_paths_required:
+        unconfirmed = paths_unconfirmed(batch, pr)
+        if unconfirmed:
+            blockers.append(unconfirmed)
 
     caps = config.get("caps") or {}
     attempts = batch.get("attempts") or {}
     for counter, cap in caps.items():
+        # `caps` holds two kinds of number. The runaway ceilings count events
+        # elapsed and are a standing verdict on the batch. The progress counters
+        # measure whether it is converging, and each already has its own rule
+        # (`futile_push_run`, `stalled_build`) that decides when to escalate and
+        # when the question has stopped applying — which is why `cap_breached`
+        # skips them too. Reading them here asks a converging question at the
+        # one moment convergence has been settled: a batch that reached
+        # `full_green` and a clean review converged, whatever it cost to get
+        # there. Nothing resets `build_resumes` (the record of the interruptions
+        # is meant to stand), so counting it here blocked such a batch for the
+        # rest of its life, and requeueing could not clear it either.
+        if counter in PROGRESS_COUNTERS:
+            continue
         if attempts.get(counter, 0) >= cap:
             blockers.append(f"{counter} at cap ({attempts[counter]}/{cap})")
 
@@ -439,7 +782,51 @@ def _gh_json(args: list[str]):
         return None
 
 
-def fetch_checks(repo: str, pr: int) -> list[dict]:
+def _from_check_run(run: dict, sha: str) -> dict:
+    """One check run in the shape the classifier reads."""
+    return {
+        "name": run.get("name") or "",
+        # A run still in flight has no conclusion yet; its status is the state.
+        "state": str(run.get("conclusion") or run.get("status") or "").upper(),
+        "description": (run.get("output") or {}).get("title") or "",
+        "workflow": (run.get("check_suite") or {}).get("workflow_name") or "",
+        "link": run.get("html_url") or "",
+        "head_sha": run.get("head_sha") or sha,
+    }
+
+
+def _from_status(status: dict, sha: str) -> dict:
+    """One legacy commit status — external CI that never moved to check runs.
+
+    `gh pr checks` reports these alongside check runs, so reading only check runs
+    would drop a required context and hang the gate.
+    """
+    return {
+        "name": status.get("context") or "",
+        "state": str(status.get("state") or "").upper(),
+        "description": status.get("description") or "",
+        "workflow": "",
+        "link": status.get("target_url") or "",
+        "head_sha": sha,
+    }
+
+
+def fetch_checks(repo: str, pr: int, sha: str | None = None) -> list[dict]:
+    """Check results for this pull request, tagged with the commit they describe.
+
+    Given a `sha`, both reads are SHA-addressed, so anything that comes back
+    provably ran against that commit. `gh pr checks` cannot say that: its output
+    carries no head SHA, and in the window between a push and the new run
+    registering it returns the previous commit's results.
+    """
+    if sha:
+        runs = _gh_json(["api", f"repos/{repo}/commits/{sha}/check-runs?per_page=100"]) or {}
+        combined = _gh_json(["api", f"repos/{repo}/commits/{sha}/status?per_page=100"]) or {}
+        return [
+            *[_from_check_run(run, sha) for run in (runs.get("check_runs") or [])],
+            *[_from_status(st, sha) for st in (combined.get("statuses") or [])],
+        ]
+
     raw = _gh_json(
         [
             "pr",
@@ -464,7 +851,7 @@ def fetch_pr(repo: str, pr: int) -> dict:
                 "--repo",
                 repo,
                 "--json",
-                "number,labels,isDraft,mergeable,reviewDecision,url,baseRefName",
+                "number,labels,isDraft,mergeable,reviewDecision,url,baseRefName,headRefOid",
             ]
         )
         or {}
@@ -481,7 +868,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("checks")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--repo", required=True)
-    p.add_argument("--profile", default=".foreman/ci-profile.json")
+    p.add_argument(
+        "--profile",
+        help=f"CI profile (default {ledger_mod.LEDGER_DIR}/{ledger_mod.PROFILE_FILE} "
+        "in the repository root)",
+    )
+    p.add_argument(
+        "--sha",
+        help="the commit this gate is about; defaults to the PR's current head",
+    )
     p = sub.add_parser("verdict")
     p.add_argument("--file", required=True)
     p = sub.add_parser("blockers")
@@ -489,7 +884,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pr", type=int)
     p.add_argument("--repo")
     p.add_argument("--ledger", default=".foreman")
-    p.add_argument("--config", default=".foreman/config.json")
+    p.add_argument(
+        "--config",
+        help="foreman config (default .foreman/config.json in the repository root)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -497,13 +895,55 @@ def main(argv: list[str] | None = None) -> int:
         return json.loads(Path(path).read_text()) if Path(path).exists() else default
 
     if args.cmd == "checks":
-        profile = load_json(args.profile, {})
-        checks = fetch_checks(args.repo, args.pr)
-        base = (fetch_pr(args.repo, args.pr) or {}).get("baseRefName")
-        summary = classify_checks(checks, profile)
+        # Anchored to the repository, like the ledger and the config: read
+        # against the caller, the profile was simply not there from a build
+        # worktree, and the gate lost every tier and advisory flag (issue #74).
+        profile = ledger_mod.load_profile(args.profile)
+        pr = fetch_pr(args.repo, args.pr) or {}
+        # GitHub knows the new head the moment a push lands; its checks appear
+        # later. Scoping the read to that head is what stops the previous
+        # commit's green from being reported as this commit's.
+        sha = args.sha or pr.get("headRefOid")
+        base = pr.get("baseRefName")
+        if not sha:
+            # `gh pr view` returns {} on any non-zero exit — a transient 5xx, a
+            # rate limit, a `gh` too old to know `headRefOid` — and the check
+            # list answers anyway. In the minutes after a push it answers with
+            # the PREVIOUS commit's greens, which is the whole hazard the SHA
+            # scoping exists to close. Falling through to the unscoped read here
+            # would put that green under `gate`, and `gate` is what the caller
+            # acts on. Unprovable is pending.
+            reason = (
+                f"cannot say which commit this gate is about: no --sha, and "
+                f"reading headRefOid for {args.repo}#{args.pr} produced nothing. "
+                "An unscoped check read reports the previous commit's results as "
+                "this commit's, so there is nothing here to judge."
+            )
+            print(
+                json.dumps(
+                    {
+                        **classify_checks([], profile),
+                        "base_branch": base,
+                        "head_sha": None,
+                        "gate": "pending",
+                        "reason": reason,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+
+        checks = fetch_checks(args.repo, args.pr, sha)
+        summary = classify_checks(checks, profile, sha)
         print(
             json.dumps(
-                {**summary, "base_branch": base, "gate": ci_gate(checks, profile, base)},
+                {
+                    **summary,
+                    "base_branch": base,
+                    "head_sha": sha,
+                    "gate": ci_gate(checks, profile, base, sha),
+                    "reason": None,
+                },
                 indent=2,
             )
         )
@@ -525,15 +965,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if ok else 1
 
-    import ledger as ledger_mod
-
     state = ledger_mod.load(Path(args.ledger))
     batch = state.batches.get(args.batch)
     if batch is None:
         print(f"error: no batch {args.batch}", file=sys.stderr)
         return 1
     pr = fetch_pr(args.repo, args.pr) if (args.repo and args.pr) else {"labels": []}
-    blockers = merge_blockers(batch, pr, load_json(args.config, {}))
+    # Not `load_json`: a relative config has to be anchored to the repository the
+    # way the ledger already is, and a missing one has to say so rather than
+    # quietly dropping every cap and every protected path.
+    blockers = merge_blockers(batch, pr, ledger_mod.load_config(args.config))
     print(
         json.dumps({"batch": args.batch, "mergeable": not blockers, "blockers": blockers}, indent=2)
     )

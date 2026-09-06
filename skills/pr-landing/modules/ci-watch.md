@@ -13,6 +13,39 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" checks --pr <n> --repo OWNER/NAM
 | `advisory_pending` | No |
 | `advisory_failed` | No — informational |
 | `failed` | No — act now |
+| `stale` | Not this commit's results at all — see below |
+
+## Which commit are these results about?
+
+A gate verdict is a statement about **one commit**, which is why a push resets
+both gates. The read is therefore scoped to a SHA: `checks` resolves the PR's
+current head and asks the SHA-addressed endpoints for it, so a result that
+arrives provably ran against that commit. `--sha <commit>` overrides it — pass
+the batch's `head_sha` from the ledger when you want the gate judged against the
+commit you pushed rather than whatever the PR points at now.
+
+`gh pr checks` cannot do this: its output carries no head SHA, so in the window
+between a push and the new run registering it reports the *previous* commit's
+results. On a repo whose suite takes minutes, that window is minutes long, and a
+`full_green` read inside it merges code CI has never run.
+
+Anything landing in `stale` describes another commit and is ignored. What is left
+is `pending` — CI has not started on this commit yet — until a job the profile
+**declares** has reported on it; never green before that. That holds even where
+branch protection names no required context: protection saying nothing *blocks* a
+merge is not CI saying it has *run*. A DCO or CLA status, or a preview deploy,
+posts within a second of the push and declares nothing about the suite, so a list
+holding only those is still an empty picture of the commit. The one exception is a
+repo whose profile declares no jobs: there is no list to check against, so any
+result for this commit is all the evidence there can be — and a profile that
+declares nothing whose checks dropped nothing has no CI to wait for at all.
+
+If the commit cannot be resolved at all — no `--sha`, and reading `headRefOid`
+produced nothing because `gh pr view` hit a 5xx, a rate limit, or is too old to
+know the field — `checks` reports `head_sha: null`, `gate: pending`, and a
+`reason`. It does **not** read the check list unscoped to fill the gap: that read
+answers with the previous commit's greens, and a gate that cannot name its commit
+has nothing to be green about.
 
 Polling a human approval gate is an unattended loop waiting for someone who is
 asleep. Report `CHECKS_BLOCKED_BY_REVIEW_GATE`, move on, come back later.

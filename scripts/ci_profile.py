@@ -27,6 +27,10 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import ledger  # noqa: E402
+
 # A job whose p95 sits under this runs in the cheap tier: it is worth paying on
 # every push. Anything slower waits behind the cheap tier and the review gate.
 DEFAULT_TIER_THRESHOLD_S = 300
@@ -295,18 +299,94 @@ def impacted_tests(changed: list[str], repo_root: Path) -> tuple[list[str], bool
 # --- assembly -----------------------------------------------------------------
 
 
-def _filter_count(cfg: dict) -> int:
-    """How restricted a trigger is. Fewer filters means it fires more often."""
-    keys = (
-        "paths",
-        "paths_ignore",
-        "branches",
-        "branches_ignore",
-        "tags",
-        "tags_ignore",
-        "types",
-    )
-    return sum(1 for key in keys if cfg.get(key))
+# Allow-lists narrow a trigger to what they list; ignore-lists only ever remove
+# runs from it. The two directions compare oppositely, which is the whole reason
+# a filter *count* cannot stand in for how permissive a trigger is.
+_ALLOW_FILTERS = ("paths", "branches", "tags", "types")
+_IGNORE_FILTERS = ("paths_ignore", "branches_ignore", "tags_ignore")
+_FILTERS = _ALLOW_FILTERS + _IGNORE_FILTERS
+
+# Activity types that occur while a pull request is still open. A trigger
+# restricted to any other type — `types: [closed]` — cannot put a check on a live
+# PR at all. This is deliberately broader than land.PR_UNCONDITIONAL_TYPES, which
+# asks the stricter question of whether a job reports on *every* PR and so may be
+# required; conflating the two was issue #49. Containment between them is asserted
+# in tests/test_ci_profile.py.
+OPEN_PR_TYPES = frozenset({"opened", "synchronize", "reopened", "ready_for_review", "edited"})
+
+
+def _reports_while_open(cfg: dict) -> bool:
+    types = set(cfg.get("types") or [])
+    return not types or bool(types & OPEN_PR_TYPES)
+
+
+def _fires_wherever(a: dict, b: dict) -> bool:
+    """Whether everything that makes `b` fire also makes `a` fire.
+
+    Per axis, because the filters are a conjunction: an absent allow-list is no
+    restriction at all, a present one has to cover b's, and an ignore list is
+    weaker the shorter it is. `types` is the one approximation — an absent
+    `types` means the default activity types rather than every type — and it errs
+    towards keeping the declaration that reports on an open pull request, which
+    is the only situation the gate ever asks about.
+    """
+    for key in _ALLOW_FILTERS:
+        mine, theirs = set(a.get(key) or []), set(b.get(key) or [])
+        if mine and not (theirs and mine >= theirs):
+            return False
+    for key in _IGNORE_FILTERS:
+        mine, theirs = set(a.get(key) or []), set(b.get(key) or [])
+        if mine and not mine <= theirs:
+            return False
+    return True
+
+
+def _canonical(cfg: dict) -> str:
+    return json.dumps({key: sorted(set(cfg.get(key) or [])) for key in _FILTERS}, sort_keys=True)
+
+
+def _informativeness(cfg: dict) -> tuple:
+    """Ranks two declarations that neither cover each other nor combine, best first.
+
+    Every choice here is sound: one real declaration always fires on a subset of
+    what the job as a whole fires on, and under-requiring costs nothing — a job
+    that does report lands in `actionable_pending` while it runs. So this ranks
+    by how much of the job's behaviour survives the compression. A declaration
+    that cannot report while the PR is open says nothing whatsoever; after that,
+    a `branches` filter is still resolved against the PR's base at query time,
+    while a path or tag filter can never be. The serialised config breaks the
+    remaining ties so the answer never depends on which file sorted first.
+    """
+    unresolvable = any(cfg.get(key) for key in ("paths", "paths_ignore", "tags", "tags_ignore"))
+    return (not _reports_while_open(cfg), unresolvable, _canonical(cfg))
+
+
+def _merge_triggers(declarations: list[dict]) -> dict:
+    """Fold every declaration of one job name on one event into a single config.
+
+    A check appears if ANY declaration fires, so the merged config should stand
+    for the union of their firing sets. One filter dict cannot express a
+    disjunction that crosses two axes — `branches: [main]` OR `paths: [src/**]`
+    is emphatically not "no filters", and merging key by key would produce
+    exactly that, marking a job requirable that GitHub may never run. So the
+    union is taken only where it is exact, and otherwise one declaration is kept.
+    """
+    merged, *rest = sorted(declarations, key=_canonical)  # input order cannot decide
+    for cfg in rest:
+        if _fires_wherever(merged, cfg):
+            continue
+        if _fires_wherever(cfg, merged):
+            merged = cfg
+            continue
+        differing = [k for k in _FILTERS if set(merged.get(k) or []) != set(cfg.get(k) or [])]
+        if len(differing) == 1 and differing[0] in _ALLOW_FILTERS:
+            # Every other axis is identical, so the disjunction is precisely the
+            # union of the two lists on this one.
+            key = differing[0]
+            merged = {**merged, key: sorted(set(merged.get(key) or []) | set(cfg.get(key) or []))}
+            continue
+        merged = min((merged, cfg), key=_informativeness)
+    return merged
 
 
 def build_profile(
@@ -325,24 +405,42 @@ def build_profile(
     # A job name reused across workflows is one check name, so merge rather than
     # overwrite: a release-only `test` job must not erase the PR `test` job.
     by_name: dict[str, dict] = {}
+    declared: dict[str, dict[str, list[dict]]] = {}
     for job in jobs:
+        for event, cfg in (job.get("events") or {}).items():
+            declared.setdefault(job["name"], {}).setdefault(event, []).append(cfg)
         seen = by_name.get(job["name"])
         if seen is None:
             by_name[job["name"]] = dict(job)
             continue
         seen["triggers"] = sorted(set(seen["triggers"]) | set(job["triggers"]))
-        # One check name, several declarations: if ANY of them fires
-        # unconditionally a check will appear, so keep the most permissive config
-        # per event. Order-independent, unlike overwriting.
-        merged_events = dict(seen.get("events") or {})
-        for event, cfg in (job.get("events") or {}).items():
-            current = merged_events.get(event)
-            if current is None or _filter_count(cfg) < _filter_count(current):
-                merged_events[event] = cfg
-        seen["events"] = merged_events
         seen["path_filters"] = sorted(set(seen["path_filters"]) | set(job["path_filters"]))
         seen["pr_path_filters"] = sorted(set(seen["pr_path_filters"]) | set(job["pr_path_filters"]))
+    # Every declaration of an event is collected before any of them is merged, so
+    # the result depends on what the workflows say and not on the order the files
+    # happened to be read in.
+    for name, events in declared.items():
+        by_name[name]["events"] = {event: _merge_triggers(cfgs) for event, cfgs in events.items()}
     jobs = list(by_name.values())
+
+    # Branch protection stores required checks as the names GitHub *reports*, not
+    # as the keys the workflow declares. A matrix job `test` reports one context
+    # per cell — `test (3.11)`, `test (3.12)` — and a job with a `name:` reports
+    # under that display name, so matching the key against the context list said
+    # "not required" about the very jobs that gate the merge. `attribute` reverses
+    # a reported name back to the job that declared it, and returns None rather
+    # than guessing, so a third-party context like `codecov/patch` marks nothing.
+    #
+    # Partial coverage rounds up: one required cell means this job can block a
+    # merge, which is the only question the flag answers. The per-cell truth is
+    # not lost — `required_checks` still lists the exact contexts protection
+    # named. Rounding down would let a failing required cell read as advisory,
+    # turning a red gate green; rounding up at worst costs a wait.
+    required_jobs = set()
+    for context in required:
+        key = attribute(context, jobs)
+        if key is not None:
+            required_jobs.add(key)
 
     merged, unmeasured = {}, []
     for job in jobs:
@@ -368,7 +466,7 @@ def build_profile(
             "p95": stat["p95"] if stat else None,
             "samples": stat["n"] if stat else 0,
             "tier": tiers.get(name, "unmeasured"),
-            "required": name in required,
+            "required": name in required_jobs,
             "flake_rate": round(flakes.get(name, 0.0), 3),
         }
 
@@ -492,7 +590,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("probe")
     p.add_argument("--repo", required=True)
     p.add_argument("--runs", type=int, default=50)
-    p.add_argument("--out", default=".foreman/ci-profile.json")
+    p.add_argument(
+        "--out",
+        help=f"where to write the profile (default {ledger.LEDGER_DIR}/{ledger.PROFILE_FILE} "
+        "in the repository root)",
+    )
     p.add_argument(
         "--workflows",
         default=None,
@@ -517,7 +619,11 @@ def main(argv: list[str] | None = None) -> int:
         except ProfileError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        out = Path(args.out)
+        # Written where every reader looks: the repository's `.foreman`, not the
+        # caller's. Run from a build worktree, the default used to create a
+        # second `.foreman` there and the profile every reader anchors to
+        # stayed missing (issue #74).
+        out = ledger.resolve_profile(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(profile, indent=2), encoding="utf-8")
         print(

@@ -35,6 +35,9 @@ Act on `gate`, never on the raw list.
 | `human_gate_pending` | Waiting on a person. Never wait — report and move on. |
 | `advisory_pending` / `advisory_failed` | Not required. Informational only. |
 | `failed` | Required and red. Fix or adjudicate. |
+| `stale` | Reported against a different commit. Proves nothing about this one. |
+| `head_sha` | The commit the verdict is about. `null` means it could not be resolved, and the gate is then `pending` whatever CI says. |
+| `reason` | Why the gate reads as it does when no check could be judged. `null` in the ordinary case. |
 
 An unknown check counts as required. A check the profile has never seen may be a
 new required gate, and optimising it away is how a batch sits in the merge queue
@@ -63,13 +66,22 @@ never the whole run, and never past the cap.
 ## Merging
 
 ```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" paths --batch <id> --base <trunk> \
+  --repo-dir ../foreman-<id> --apply
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/land.py" blockers --batch <id> --pr <n> --repo OWNER/NAME
 "${CLAUDE_PLUGIN_ROOT}/scripts/gh_safe.sh" pr merge <n> --auto --squash
 ```
 
-`blockers` reports everything at once — gates, labels, protected paths, caps,
-`auto_merge` — so you fix or escalate in one pass rather than discovering
-obstacles one at a time.
+`paths --apply` first: the protected-path check reads the batch's `paths`, and
+until this runs those are the files its issues' prose mentioned, not the files
+the branch changed. `blockers` refuses a batch whose paths were never confirmed
+against the diff, or were confirmed for a commit other than the PR's head.
+
+`blockers` reports everything at once — gates, labels, protected paths, whether
+the paths were confirmed, the runaway caps, `auto_merge` — so you fix or
+escalate in one pass rather than discovering obstacles one at a time. The convergence counters (`futile_pushes`,
+`build_resumes`) are not among them: they belong to the escalation rules that
+own them, not to the merge gate.
 
 ## File the findings before acting on them
 
