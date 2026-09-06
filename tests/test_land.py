@@ -849,3 +849,82 @@ def test_land_says_so_when_it_is_judging_a_merge_with_no_config(worktree, monkey
     captured = capsys.readouterr()
     assert json.loads(captured.out)["blockers"] == ["auto_merge is disabled in config"]
     assert str(checkout / ledger.LEDGER_DIR / ledger.CONFIG_FILE) in captured.err
+
+
+# --- review: an unresolvable head SHA must not fall back to the unscoped read -
+
+
+def _profile_file(tmp_path):
+    path = tmp_path / "ci-profile.json"
+    path.write_text(json.dumps(PROFILE))
+    return str(path)
+
+
+def test_a_head_sha_that_cannot_be_resolved_reports_pending_not_a_stale_green(
+    monkeypatch, capsys, tmp_path
+):
+    """`gh pr view` can fail transiently, or be too old to know `headRefOid`.
+
+    The check list still answers, and in the minutes after a push it answers with
+    the PREVIOUS commit's greens. Falling back to it here is the exact hazard the
+    SHA scoping exists to close.
+    """
+    calls = []
+
+    def fake_gh(args):
+        calls.append(args)
+        if args[:2] == ["pr", "view"]:
+            return None
+        return [check(n, "SUCCESS") for n in ("lint", "unit", "integration")]
+
+    monkeypatch.setattr(land, "_gh_json", fake_gh)
+    code = land.main(["checks", "--pr", "7", "--repo", "o/r", "--profile", _profile_file(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert out["head_sha"] is None
+    assert out["gate"] == "pending", "an unprovable gate is pending, never green"
+    assert out["reason"], "the caller acts on `gate`, so the reason must travel with it"
+    assert not any(a[:2] == ["pr", "checks"] for a in calls), (
+        f"the unscoped read must never happen without a SHA: {calls}"
+    )
+
+
+def test_a_pr_read_that_answers_without_a_head_sha_is_also_pending(monkeypatch, capsys, tmp_path):
+    """An older `gh` drops the unknown field rather than failing the whole call."""
+    monkeypatch.setattr(
+        land,
+        "_gh_json",
+        lambda args: (
+            {"number": 7, "baseRefName": "main", "labels": []}
+            if args[:2] == ["pr", "view"]
+            else [check(n, "SUCCESS") for n in ("lint", "unit", "integration")]
+        ),
+    )
+    land.main(["checks", "--pr", "7", "--repo", "o/r", "--profile", _profile_file(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+    assert out["gate"] == "pending" and out["head_sha"] is None
+    assert out["base_branch"] == "main", "what the read did learn is still reported"
+
+
+def test_an_explicit_sha_still_gates_when_the_pr_read_fails(monkeypatch, capsys, tmp_path):
+    """`--sha` is the ledger's own record of what was pushed; it needs no PR read."""
+
+    def fake_gh(args):
+        if args[:2] == ["pr", "view"]:
+            return None
+        if "check-runs" in args[-1]:
+            return {
+                "check_runs": [
+                    {"name": n, "status": "completed", "conclusion": "success", "head_sha": NEW}
+                    for n in ("lint", "unit", "integration")
+                ]
+            }
+        return {"statuses": []}
+
+    monkeypatch.setattr(land, "_gh_json", fake_gh)
+    land.main(
+        ["checks", "--pr", "7", "--repo", "o/r", "--sha", NEW, "--profile", _profile_file(tmp_path)]
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["head_sha"] == NEW and out["gate"] == "full_green"

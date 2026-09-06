@@ -33,6 +33,13 @@ Anything landing in `stale` describes another commit and is ignored. An empty
 check list after that is `pending` — CI has not started on this commit yet —
 never green.
 
+If the commit cannot be resolved at all — no `--sha`, and reading `headRefOid`
+produced nothing because `gh pr view` hit a 5xx, a rate limit, or is too old to
+know the field — `checks` reports `head_sha: null`, `gate: pending`, and a
+`reason`. It does **not** read the check list unscoped to fill the gap: that read
+answers with the previous commit's greens, and a gate that cannot name its commit
+has nothing to be green about.
+
 Polling a human approval gate is an unattended loop waiting for someone who is
 asleep. Report `CHECKS_BLOCKED_BY_REVIEW_GATE`, move on, come back later.
 

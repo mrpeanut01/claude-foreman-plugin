@@ -695,8 +695,36 @@ def main(argv: list[str] | None = None) -> int:
         # later. Scoping the read to that head is what stops the previous
         # commit's green from being reported as this commit's.
         sha = args.sha or pr.get("headRefOid")
-        checks = fetch_checks(args.repo, args.pr, sha)
         base = pr.get("baseRefName")
+        if not sha:
+            # `gh pr view` returns {} on any non-zero exit — a transient 5xx, a
+            # rate limit, a `gh` too old to know `headRefOid` — and the check
+            # list answers anyway. In the minutes after a push it answers with
+            # the PREVIOUS commit's greens, which is the whole hazard the SHA
+            # scoping exists to close. Falling through to the unscoped read here
+            # would put that green under `gate`, and `gate` is what the caller
+            # acts on. Unprovable is pending.
+            reason = (
+                f"cannot say which commit this gate is about: no --sha, and "
+                f"reading headRefOid for {args.repo}#{args.pr} produced nothing. "
+                "An unscoped check read reports the previous commit's results as "
+                "this commit's, so there is nothing here to judge."
+            )
+            print(
+                json.dumps(
+                    {
+                        **classify_checks([], profile),
+                        "base_branch": base,
+                        "head_sha": None,
+                        "gate": "pending",
+                        "reason": reason,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+
+        checks = fetch_checks(args.repo, args.pr, sha)
         summary = classify_checks(checks, profile, sha)
         print(
             json.dumps(
@@ -705,6 +733,7 @@ def main(argv: list[str] | None = None) -> int:
                     "base_branch": base,
                     "head_sha": sha,
                     "gate": ci_gate(checks, profile, base, sha),
+                    "reason": None,
                 },
                 indent=2,
             )
