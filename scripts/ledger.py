@@ -64,6 +64,19 @@ CLEAR = {"ci": "full_green", "review": "clean"}
 
 COUNTER_ORDER = ("pushes", "review_rounds", "reruns")
 
+# Fields a `batch.meta` event may not set. Each has an event of its own whose
+# validation is what stands between the loop and a merge nobody reviewed:
+# `state` moves through `transition`, which checks the gates before `ready`;
+# the gates move through `gate`; the clocks move only when the fold says
+# something happened. A correction is for what the loop learned late — `pr`,
+# `branch`, `head_sha`, `paths`, a reduced `issues` list — and for `attempts`
+# when a person forgives a cap on the record. One `append --type batch.meta
+# --json '{"state":"ready","ci_gate":"full_green","review_gate":"clean"}'`
+# otherwise skipped every check in this file at once.
+META_GUARDED = frozenset(
+    {"id", "state", "ci_gate", "review_gate", "created", "updated", "progress_at"}
+)
+
 # Counters that measure whether a batch is converging rather than how much has
 # happened to it. `cap_breached` deliberately ignores these: a runaway ceiling
 # and a wrong diagnosis are different verdicts read off different numbers. Each
@@ -462,7 +475,8 @@ def _apply(state: State, event: dict) -> None:
         batch["attempts"]["reruns"] += 1
 
     elif kind == "batch.meta" and batch:
-        batch.update({k: v for k, v in event.items() if k not in {"type", "ts", "batch"}})
+        skip = {"type", "ts", "batch"} | META_GUARDED
+        batch.update({k: v for k, v in event.items() if k not in skip})
 
     elif kind == "escalation":
         state.escalations.append(event)

@@ -681,3 +681,36 @@ def test_init_without_root_still_lands_in_the_repositorys_own_foreman(
 def test_the_python_init_still_takes_a_repository(tmp_path):
     """Every test fixture in the suite calls it that way; the signature stands."""
     assert ledger.init(tmp_path) == tmp_path / ledger.LEDGER_DIR
+
+
+# --- batch.meta corrects what the loop learned late, never what it must earn --
+
+
+def test_a_meta_event_cannot_move_the_state_or_clear_a_gate(root):
+    """One documented append skipped every check in the file at once: the
+    batch read as ready with both gates clear, and blocking_gates was empty."""
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.append(
+        root,
+        "batch.meta",
+        batch="b-001",
+        state="ready",
+        ci_gate="full_green",
+        review_gate="clean",
+        progress_at="2099-01-01T00:00:00Z",
+        pr=7,
+    )
+    batch = ledger.load(root).batches["b-001"]
+    assert batch["state"] == "planned"
+    assert batch["ci_gate"] == "pending" and batch["review_gate"] == "pending"
+    assert ledger.blocking_gates(batch) == ["ci", "review"]
+    assert batch["progress_at"] != "2099-01-01T00:00:00Z"
+    assert batch["pr"] == 7, "the fields a correction is for still apply"
+
+
+def test_a_meta_event_still_forgives_a_cap_on_the_record(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    for sha in "abc":
+        ledger.append(root, "batch.pushed", batch="b-001", sha=sha)
+    ledger.append(root, "batch.meta", batch="b-001", attempts={"pushes": 0})
+    assert ledger.load(root).batches["b-001"]["attempts"]["pushes"] == 0
