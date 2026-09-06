@@ -358,3 +358,145 @@ def test_triage_is_switched_off_on_an_empty_ledger_too():
 def test_an_empty_ledger_still_says_so():
     st = state_with(last_triage_at=None)
     assert loop.next_action(st, CONFIG)["reason"] == "nothing in the ledger yet"
+
+
+# --- issue #17: the push cap counts volume; convergence is what matters -------
+
+# What config.example.json ships: a loose runaway ceiling on raw pushes, with
+# the real judgement made by the convergence check below.
+LOOSE_CAPS = {**CONFIG, "caps": {"pushes": 8, "review_rounds": 5, "reruns": 2}}
+
+
+def _attempts(**counts):
+    return {"pushes": 0, "review_rounds": 0, "reruns": 0, "futile_pushes": 0, **counts}
+
+
+def test_pushes_that_keep_leaving_ci_red_the_same_way_escalate():
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "blocked",
+            "ci_gate": "failed",
+            "attempts": _attempts(pushes=3, futile_pushes=3),
+        }
+    )
+    action = loop.next_action(st, LOOSE_CAPS)
+    assert action["do"] == "escalate" and "diagnosis" in action["reason"]
+
+
+def test_three_pushes_that_each_resolved_review_findings_do_not_escalate():
+    """PR #7: three pushes, three rounds of findings, each one cleared.
+
+    A PR that survives three genuine review rounds is a good PR; counting the
+    pushes it took punishes it for being reviewed properly.
+    """
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "blocked",
+            "ci_gate": "failed",
+            "attempts": _attempts(pushes=3, review_rounds=3),
+        }
+    )
+    assert loop.next_action(st, LOOSE_CAPS)["do"] == "unblock"
+
+
+def test_the_raw_push_count_is_still_a_hard_runaway_ceiling():
+    st = state_with(
+        {"id": "b-001", "state": "blocked", "attempts": _attempts(pushes=8, futile_pushes=0)}
+    )
+    action = loop.next_action(st, LOOSE_CAPS)
+    assert action["do"] == "escalate" and "pushes at cap" in action["reason"]
+
+
+def test_the_futile_push_ceiling_can_be_configured():
+    st = state_with(
+        {
+            "id": "b-001",
+            "state": "blocked",
+            "ci_gate": "failed",
+            "attempts": _attempts(pushes=2, futile_pushes=2),
+        }
+    )
+    assert loop.next_action(st, LOOSE_CAPS)["do"] == "unblock"
+    tight = {**LOOSE_CAPS, "caps": {**LOOSE_CAPS["caps"], "futile_pushes": 2}}
+    assert loop.next_action(st, tight)["do"] == "escalate"
+
+
+# --- issue #58: a merged batch must not hide an issue it left open -----------
+
+
+def _triaged(number, at):
+    return {number: {"issue": number, "verdict": "actionable", "ts": at}}
+
+
+def test_an_issue_its_merged_batch_left_open_is_offered_for_batching_again():
+    """b-001 merged as PR #7, but issue #5 is still open on the tracker.
+
+    Triage lists open issues only, so a triage record written after the merge
+    is evidence the merge did not close it.
+    """
+    st = state_with({"id": "b-001", "state": "merged", "issues": [5], "pr": 7})
+    st.batches["b-001"]["progress_at"] = _aged(48)
+    st.issues = _triaged(5, _aged(1))
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "batch" and action["issues"] == [5]
+
+
+def test_an_issue_whose_merged_batch_closed_it_stays_out_of_the_queue():
+    """No triage has seen it since the merge, so nothing says it is still open."""
+    st = state_with({"id": "b-001", "state": "merged", "issues": [5], "pr": 7})
+    st.batches["b-001"]["progress_at"] = _aged(1)
+    st.issues = _triaged(5, _aged(48))
+    assert loop.next_action(st, CONFIG)["do"] != "batch"
+
+
+def test_an_issue_held_by_an_escalated_batch_is_not_re_batched():
+    """A human is deciding what happens to it; a second batch would collide."""
+    st = state_with({"id": "b-001", "state": "escalated", "issues": [5]})
+    st.batches["b-001"]["progress_at"] = _aged(48)
+    st.issues = _triaged(5, _aged(1))
+    assert loop.next_action(st, CONFIG)["do"] != "batch"
+
+
+def test_an_issue_a_live_batch_is_working_on_is_never_re_batched():
+    st = state_with(
+        {"id": "b-001", "state": "open", "issues": [5], "pr": 7, "ci_gate": "pending"},
+        {"id": "b-002", "state": "merged", "issues": [5], "pr": 6},
+    )
+    st.batches["b-002"]["progress_at"] = _aged(48)
+    st.issues = _triaged(5, _aged(1))
+    assert loop.next_action(st, CONFIG)["do"] == "watch"
+
+
+# --- issue #62: a batch mid-build is in flight, not nowhere ------------------
+
+
+def test_a_batch_left_mid_build_is_resumed_before_a_new_one_is_started():
+    """A build interrupted by a crash or a closed laptop is exactly what the
+    durable ledger exists to recover."""
+    st = state_with({"id": "b-002", "state": "building"}, {"id": "b-003", "state": "planned"})
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "build" and action["batch"] == "b-002"
+
+
+def test_a_build_in_progress_counts_against_the_open_work_limit():
+    st = state_with({"id": "b-002", "state": "building"}, {"id": "b-003", "state": "planned"})
+    assert loop.in_flight_count(st) == 1
+
+
+def test_no_new_build_starts_while_every_slot_is_held_by_a_running_build():
+    st = state_with(
+        {"id": "b-001", "state": "building"},
+        {"id": "b-002", "state": "building"},
+        {"id": "b-003", "state": "planned"},
+    )
+    action = loop.next_action(st, CONFIG)
+    assert loop.in_flight_count(st) == 2
+    assert action["batch"] != "b-003", "the WIP limit is reached; drain before starting"
+
+
+def test_a_mid_build_batch_is_not_resumed_once_the_ci_budget_is_spent():
+    st = state_with({"id": "b-002", "state": "building"}, spend=[_spend(60 * 60)])
+    action = loop.next_action(st, CONFIG)
+    assert action["do"] == "idle" and "budget" in action["reason"].lower()

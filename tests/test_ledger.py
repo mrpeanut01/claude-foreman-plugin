@@ -1,5 +1,6 @@
 """Ledger: an append-only event log folded into current state."""
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -186,7 +187,12 @@ def test_counters_track_pushes_reviews_and_reruns(root):
     ledger.gate(root, "b-001", "review", "changes_requested")
     ledger.append(root, "ci.rerun", batch="b-001", job="integration")
     batch = ledger.fold(ledger.read_events(root)).batches["b-001"]
-    assert batch["attempts"] == {"pushes": 2, "review_rounds": 1, "reruns": 1}
+    assert batch["attempts"] == {
+        "pushes": 2,
+        "review_rounds": 1,
+        "reruns": 1,
+        "futile_pushes": 0,
+    }
 
 
 @pytest.mark.parametrize(
@@ -256,3 +262,144 @@ def test_recreating_an_existing_batch_id_does_not_erase_it():
     )
     assert state.batches["b-001"]["state"] == "merged"
     assert state.batches["b-001"]["issues"] == [1, 2]
+
+
+# --- issue #17: the push cap must measure diagnosis, not volume ---------------
+
+
+def test_a_push_that_leaves_ci_failing_the_same_way_is_counted_as_futile(root):
+    _open_batch(root)
+    ledger.gate(root, "b-001", "ci", "failed")
+    ledger.append(root, "batch.pushed", batch="b-001", sha="a")
+    ledger.gate(root, "b-001", "ci", "failed")
+    attempts = ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]
+    assert attempts["futile_pushes"] == 1
+    assert attempts["pushes"] == 1, "the raw count is still the runaway ceiling"
+
+
+def test_futile_pushes_accumulate_while_ci_keeps_coming_back_red(root):
+    _open_batch(root)
+    for _ in range(3):
+        ledger.gate(root, "b-001", "ci", "failed")
+        ledger.append(root, "batch.pushed", batch="b-001", sha="a")
+    ledger.gate(root, "b-001", "ci", "failed")
+    assert ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]["futile_pushes"] == 3
+
+
+def test_a_push_that_turns_ci_green_ends_the_futile_run(root):
+    _open_batch(root)
+    ledger.gate(root, "b-001", "ci", "failed")
+    ledger.append(root, "batch.pushed", batch="b-001", sha="a")
+    ledger.gate(root, "b-001", "ci", "failed")
+    ledger.append(root, "batch.pushed", batch="b-001", sha="b")
+    ledger.gate(root, "b-001", "ci", "cheap_green")
+    assert ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]["futile_pushes"] == 0
+
+
+def test_pushes_that_answer_review_findings_are_not_futile(root):
+    """PR #7: three pushes, each clearing the previous round's findings.
+
+    CI was green throughout; only the reviewer kept finding new things. That is
+    a PR being reviewed properly, and the push cap must not punish it.
+    """
+    _open_batch(root)
+    for _ in range(3):
+        ledger.gate(root, "b-001", "review", "changes_requested")
+        ledger.append(root, "batch.pushed", batch="b-001", sha="a")
+        ledger.gate(root, "b-001", "ci", "full_green")
+    attempts = ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]
+    assert attempts["pushes"] == 3
+    assert attempts["futile_pushes"] == 0
+
+
+def test_ci_failing_twice_without_a_push_between_is_not_a_futile_push(root):
+    """Nothing was attempted, so nothing failed to fix it."""
+    _open_batch(root)
+    ledger.gate(root, "b-001", "ci", "failed")
+    ledger.gate(root, "b-001", "ci", "failed")
+    assert ledger.fold(ledger.read_events(root)).batches["b-001"]["attempts"]["futile_pushes"] == 0
+
+
+# --- issue #62: an interrupted build has to be resumable ---------------------
+
+
+def test_re_entering_building_is_allowed_so_an_interrupted_build_can_resume(root):
+    ledger.append(root, "batch.created", batch="b-001", issues=[1])
+    ledger.transition(root, "b-001", "building")
+    before = ledger.fold(ledger.read_events(root)).batches["b-001"]["progress_at"]
+    ledger.transition(root, "b-001", "building")
+    batch = ledger.fold(ledger.read_events(root)).batches["b-001"]
+    assert batch["state"] == "building"
+    assert batch["progress_at"] == before, "restarting is not progress"
+
+
+# --- issue #64: a ledger path must not follow the caller around --------------
+
+
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", "-c", "user.email=f@example.com", "-c", "user.name=foreman", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """A repo plus the build worktree `commands/build.md` prescribes.
+
+    Returns (checkout, worktree). The whole build and push happens with the cwd
+    inside the worktree, which is where the second ledger used to appear.
+    """
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    _git(checkout, "init", "-q", "-b", "main")
+    _git(checkout, "commit", "-q", "--allow-empty", "-m", "root")
+    linked = tmp_path / "foreman-b-002"
+    _git(checkout, "worktree", "add", "-q", str(linked), "-b", "foreman/b-002")
+    return checkout, linked
+
+
+def test_a_write_from_a_build_worktree_lands_in_the_real_ledger(worktree, monkeypatch):
+    checkout, linked = worktree
+    ledger.init(checkout)
+    monkeypatch.chdir(linked)
+    ledger.append(Path(ledger.LEDGER_DIR), "batch.pushed", batch="b-002", sha="abc123")
+    assert not (linked / ledger.LEDGER_DIR).exists(), "no second ledger in the worktree"
+    events = ledger.read_events(checkout / ledger.LEDGER_DIR)
+    assert [e["type"] for e in events] == ["batch.pushed"]
+
+
+def test_a_read_from_a_build_worktree_sees_the_real_ledger(worktree, monkeypatch):
+    checkout, linked = worktree
+    root = ledger.init(checkout)
+    ledger.append(root, "batch.created", batch="b-002", issues=[1])
+    monkeypatch.chdir(linked)
+    assert "b-002" in ledger.load(Path(ledger.LEDGER_DIR)).batches
+
+
+def test_init_from_a_build_worktree_does_not_create_a_second_ledger(worktree, monkeypatch):
+    checkout, linked = worktree
+    monkeypatch.chdir(linked)
+    ledger.init(Path("."))
+    assert (checkout / ledger.LEDGER_DIR).is_dir()
+    assert not (linked / ledger.LEDGER_DIR).exists()
+
+
+def test_an_explicit_ledger_path_still_wins(worktree, monkeypatch, tmp_path):
+    checkout, linked = worktree
+    elsewhere = ledger.init(tmp_path / "elsewhere")
+    monkeypatch.chdir(linked)
+    ledger.append(elsewhere, "batch.pushed", batch="b-002", sha="abc123")
+    assert len(ledger.read_events(elsewhere)) == 1
+    assert not (checkout / ledger.LEDGER_DIR).exists()
+
+
+def test_a_directory_outside_any_repo_still_works(tmp_path, monkeypatch):
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    ledger.init(Path("."))
+    ledger.append(Path(ledger.LEDGER_DIR), "issue.triaged", issue=1, verdict="actionable")
+    assert len(ledger.read_events(outside / ledger.LEDGER_DIR)) == 1
