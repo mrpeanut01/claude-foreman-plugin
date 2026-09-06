@@ -12,6 +12,7 @@ CLI:
     batch.py apply --plan batches.json [--ledger .foreman]
     batch.py paths --batch b-001 --base main [--head HEAD] [--ledger .foreman]
         [--repo-dir .] [--apply]
+    batch.py split --batch b-001 --failing 42 [--ledger .foreman]
 
 `plan` reads the ledger too, to allocate ids that continue past the ones already
 issued, so its --ledger must name the same directory `apply` will write to.
@@ -365,7 +366,53 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ledger", default=".foreman")
     p.add_argument("--repo-dir", default=".", help="the working tree holding the branch")
     p.add_argument("--apply", action="store_true", help="record the recomputed paths in the ledger")
+    p = sub.add_parser("split", help="peel a failing issue off a batch into one of its own")
+    p.add_argument("--batch", required=True)
+    p.add_argument("--failing", type=int, required=True, help="the issue whose commit is red")
+    p.add_argument("--ledger", default=".foreman")
     return parser
+
+
+def record_split(root: Path, batch_id: str, failing_issue: int, ledger_mod) -> dict:
+    """Split on the record: the batch keeps the rest, the failing issue gets its own.
+
+    The whole economic case for batching rests on this being cheap, and it
+    was not reachable at all — `split()` had unit tests and no caller, so an
+    agent following the recipes had no way to invoke it. The batch keeps its
+    id, branch and PR: dropping one commit from a branch is a rebase and a
+    push, not a new PR. The failing issue becomes `<id>a`, planned, and the
+    loop builds it on its own.
+    """
+    state = ledger_mod.load(root)
+    record = state.batches.get(batch_id)
+    if record is None:
+        raise CannotSplit(f"no batch {batch_id!r} in {root}")
+    failing, rest = split(record, failing_issue)
+    if failing["id"] in state.batches:
+        raise CannotSplit(f"{failing['id']} already exists; this batch was split before")
+    ledger_mod.append(
+        root, "batch.meta", batch=batch_id, issues=rest["issues"], split_off=[failing_issue]
+    )
+    ledger_mod.append(
+        root,
+        "batch.created",
+        batch=failing["id"],
+        issues=failing["issues"],
+        paths=failing["paths"],
+        risk=failing["risk"],
+        split_from=batch_id,
+    )
+    return {
+        "batch": batch_id,
+        "keeps": rest["issues"],
+        "failing": {"id": failing["id"], "issues": failing["issues"], "state": "planned"},
+        "then": [
+            f"in the worktree, drop #{failing_issue}'s commit from the branch "
+            "(git rebase --onto, or git revert) and push with --force-with-lease; "
+            "the PR then carries the rest, and the push resets both gates",
+            f"the loop builds {failing['id']} on its own when a slot is free",
+        ],
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -416,6 +463,15 @@ def main(argv: list[str] | None = None) -> int:
     import ledger as ledger_mod
 
     root = Path(args.ledger)
+
+    if args.cmd == "split":
+        try:
+            outcome = record_split(root, args.batch, args.failing, ledger_mod)
+        except CannotSplit as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps(outcome, indent=2))
+        return 0
 
     if args.cmd == "paths":
         record = ledger_mod.load(root).batches.get(args.batch)

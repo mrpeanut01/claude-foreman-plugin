@@ -428,7 +428,7 @@ def _accepted_flags(subcommand: str) -> set[str]:
     }
 
 
-@pytest.mark.parametrize("subcommand", ["plan", "apply", "paths"])
+@pytest.mark.parametrize("subcommand", ["plan", "apply", "paths", "split"])
 def test_the_docstring_documents_every_flag_a_subcommand_accepts(subcommand):
     """plan reads the ledger to allocate ids. A caller following a docstring that
     omitted --ledger got an empty taken set and ids restarting at b-001."""
@@ -646,3 +646,55 @@ def test_a_full_batch_is_named_as_the_reason_too():
     records = [rec(n, paths=[f"f{n}.py"]) for n in range(1, 5)]
     groups = batch.group_issues(records, CONFIG)  # max_batch_issues is 3
     assert "max_batch_issues" in groups[1]["started_because"]
+
+
+# --- splitting is a subcommand, so the recipes can actually do it -------------
+
+
+def _open_batch(root, *issues):
+    ledger.append(
+        root, "batch.created", batch="b-001", issues=list(issues), paths=["a.py"], risk="low"
+    )
+    for s in ("building", "built", "open"):
+        ledger.transition(root, "b-001", s)
+
+
+def test_split_keeps_the_rest_on_the_batch_and_gives_the_failing_issue_its_own(tmp_path, capsys):
+    """`split()` had unit tests and no caller; the skills called it load-bearing."""
+    root = ledger.init(tmp_path)
+    _open_batch(root, 1, 2, 3)
+    rc = batch.main(["split", "--batch", "b-001", "--failing", "2", "--ledger", str(root)])
+    assert rc == 0
+    state = ledger.load(root)
+    assert state.batches["b-001"]["issues"] == [1, 3]
+    assert state.batches["b-001"]["state"] == "open", "the branch and PR carry on"
+    assert state.batches["b-001a"]["issues"] == [2]
+    assert state.batches["b-001a"]["state"] == "planned"
+    out = json.loads(capsys.readouterr().out)
+    assert out["failing"]["id"] == "b-001a" and out["keeps"] == [1, 3]
+    assert any("force-with-lease" in step for step in out["then"])
+
+
+def test_split_refuses_a_batch_of_one_and_writes_nothing(tmp_path, capsys):
+    root = ledger.init(tmp_path)
+    _open_batch(root, 1)
+    before = len(ledger.read_events(root))
+    assert batch.main(["split", "--batch", "b-001", "--failing", "1", "--ledger", str(root)]) == 1
+    assert "nothing to split" in capsys.readouterr().err
+    assert len(ledger.read_events(root)) == before
+
+
+def test_split_refuses_an_issue_the_batch_does_not_hold(tmp_path, capsys):
+    root = ledger.init(tmp_path)
+    _open_batch(root, 1, 2)
+    assert batch.main(["split", "--batch", "b-001", "--failing", "9", "--ledger", str(root)]) == 1
+    assert "#9" in capsys.readouterr().err
+
+
+def test_split_refuses_to_split_the_same_batch_twice(tmp_path, capsys):
+    root = ledger.init(tmp_path)
+    _open_batch(root, 1, 2, 3)
+    batch.main(["split", "--batch", "b-001", "--failing", "2", "--ledger", str(root)])
+    capsys.readouterr()
+    assert batch.main(["split", "--batch", "b-001", "--failing", "3", "--ledger", str(root)]) == 1
+    assert "before" in capsys.readouterr().err

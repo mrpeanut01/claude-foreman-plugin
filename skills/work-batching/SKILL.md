@@ -93,8 +93,19 @@ A batch is harder to attribute on failure and has a wider blast radius on merge.
 Three mitigations, and you need all three:
 
 1. **One commit per issue**, message naming the issue.
-2. **`batch.split()` on failure** — peel the failing commit into `b-001a`, let
-   `b-001b` carry on. One extra suite run, not a redo.
+2. **Split on failure** — peel the failing issue off, let the rest carry on.
+   One extra suite run, not a redo:
+
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" split --batch b-001 --failing 42
+   ```
+
+   The batch keeps its id, branch and PR with the remaining issues; #42
+   becomes `b-001a`, planned, and the loop builds it on its own. What the
+   command cannot do is edit the branch: drop the commit yourself (`git
+   rebase --onto`, or `git revert`) and push with `--force-with-lease` — git,
+   not gh, so the wrapper has no say — and the push resets both gates for the
+   PR that now carries the rest.
 3. **Risk ceiling**, so a batch is never more dangerous than its safest member
    would suggest.
 

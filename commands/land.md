@@ -171,7 +171,17 @@ tracker. Closing it here is the cheap version.
 ## On a red gate
 
 CI failed → classify flake vs bug (`modules/ci-watch.md`), then rerun, fix, or
-escalate as `flake_decision` says. Review requested changes → address the
+escalate as `flake_decision` says. When the bug is one issue's commit and the
+rest of the batch is fine, split rather than fix in place:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" split --batch <id> --failing <issue>
+```
+
+The batch keeps the rest; the failing issue becomes `<id>a`, planned. Then drop
+its commit from the branch in the worktree and push with `--force-with-lease`
+(git, not gh), which is a push like any other: record `batch.pushed`, and both
+gates run again on what is left. See `Skill(foreman:work-batching)`. Review requested changes → address the
 findings, push, and record the push (`batch.pushed`, as in step 1); the gates
 reset and both run again, and step 5 will confirm the paths afresh for the new
 head. Rounds continue while the
