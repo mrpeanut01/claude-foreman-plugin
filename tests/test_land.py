@@ -720,3 +720,63 @@ def test_the_locus_run_survives_the_file_being_named_alongside_others():
         [finding("scripts/triage.py", "high", "b"), finding("scripts/land.py", "high", ARC[2])],
     ]
     assert "scripts/land.py" in land.review_stalled(rounds, hard_ceiling=5)
+
+
+# --- issue #49: firing on some pull requests is not firing on every one ------
+
+
+def event_job(**events):
+    """Shaped like a profile entry with per-event data, as parse_workflows emits."""
+    return {
+        "events": events,
+        "display": None,
+        "tier": "cheap",
+        "required": False,
+        "triggers": sorted(events),
+        "path_filters": [],
+        "pr_path_filters": [],
+    }
+
+
+def test_a_job_gated_on_ready_for_review_alone_is_not_requirable():
+    """The standard way to hold an E2E suite until a PR leaves draft. foreman
+    opens non-draft PRs, so the event never fires and no check is ever created."""
+    assert (
+        land.can_report_on_pr(event_job(pull_request={"types": ["ready_for_review"]}), "main")
+        is False
+    )
+
+
+def test_a_job_gated_on_edited_alone_is_not_requirable():
+    assert land.can_report_on_pr(event_job(pull_request={"types": ["edited"]}), "main") is False
+
+
+def test_the_default_activity_types_still_make_a_job_requirable():
+    types = {"types": ["opened", "synchronize", "reopened"]}
+    assert land.can_report_on_pr(event_job(pull_request=types), "main") is True
+
+
+def test_a_ready_for_review_job_does_not_hold_the_gate_open_forever():
+    profile = {
+        "required_checks": [],
+        "protection_known": False,
+        "jobs": {
+            "lint": event_job(pull_request={}),
+            "e2e": event_job(pull_request={"types": ["ready_for_review"]}),
+        },
+    }
+    assert land.ci_gate([check("lint", "SUCCESS")], profile, "main") == "full_green"
+
+
+def test_a_ready_for_review_job_that_does_report_is_still_waited_on():
+    """Not requirable is not ignorable: a check that appears still holds the gate."""
+    profile = {
+        "required_checks": [],
+        "protection_known": False,
+        "jobs": {
+            "lint": event_job(pull_request={}),
+            "e2e": event_job(pull_request={"types": ["ready_for_review"]}),
+        },
+    }
+    checks = [check("lint", "SUCCESS"), check("e2e", "PENDING")]
+    assert land.ci_gate(checks, profile, "main") == "pending"

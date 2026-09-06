@@ -110,9 +110,19 @@ _NOISE = {
 
 PR_TRIGGERS = ("pull_request", "pull_request_target")
 FILTER_KEYS = ("paths", "paths_ignore", "branches", "tags")
-# Activity types that fire while a pull request is open. A trigger restricted to
-# `closed` or `labeled` never reports on an open PR.
-PR_OPEN_TYPES = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
+# Activity types that fire on EVERY pull request, which is what requirable means.
+# GitHub's default when `types:` is omitted is [opened, synchronize, reopened],
+# and `opened` is the member of it that every pull request necessarily raises.
+#
+# The near misses matter more than the obvious ones. `closed` and `labeled` never
+# fire on an open PR at all, but `ready_for_review` and `edited` do — just not on
+# every PR. `on: pull_request: types: [ready_for_review]` is the standard way to
+# hold an expensive E2E suite until a PR leaves draft; foreman opens non-draft
+# PRs and edits nothing, so no check is ever created and requiring one hangs the
+# gate until `stale_after_s` escalates it. `synchronize` has the same shape: it
+# fires on the pushes after creation, which a PR that is right first time never
+# gets.
+PR_UNCONDITIONAL_TYPES = {"opened"}
 
 
 def _branch_allows(branch: str, patterns: list[str]) -> bool:
@@ -151,8 +161,10 @@ def _unconditional(
             return False
 
     types = cfg.get("types")
-    if types and not (set(types) & PR_OPEN_TYPES):
-        return False  # e.g. types: [closed] — never fires while the PR is open
+    if types and not (set(types) & PR_UNCONDITIONAL_TYPES):
+        # e.g. types: [closed], which never fires while the PR is open, or
+        # types: [ready_for_review], which fires for some PRs but not this one.
+        return False
     return True
 
 
