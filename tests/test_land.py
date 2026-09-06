@@ -928,3 +928,40 @@ def test_an_explicit_sha_still_gates_when_the_pr_read_fails(monkeypatch, capsys,
     )
     out = json.loads(capsys.readouterr().out)
     assert out["head_sha"] == NEW and out["gate"] == "full_green"
+
+
+# --- review: dropping a stale result must not leave a green in its place ------
+
+UNREQUIRED = {
+    "required_checks": [],
+    "protection_known": True,
+    "jobs": {"lint": job(required=True)},
+}
+
+
+def test_a_stale_failure_leaves_nothing_to_call_green(monkeypatch):
+    """Protection naming no context still does not make an empty picture green.
+
+    Dropping the previous commit's red is right — it describes another commit.
+    But before the SHA scoping this read `failed`, and reading it `full_green`
+    moves the gate in the one direction that costs a merge.
+    """
+    stale = [sha_check("lint", "FAILURE", OLD)]
+    assert land.ci_gate(stale, UNREQUIRED, None, NEW) == "pending"
+
+
+def test_a_commit_whose_checks_have_not_arrived_is_not_green_either():
+    """The SHA-addressed read returns [] in the window right after a push."""
+    assert land.ci_gate([], UNREQUIRED, None, NEW) == "pending"
+
+
+def test_a_repo_that_declares_no_ci_at_all_is_not_held_pending_forever():
+    """The boundary: nothing declared and nothing dropped means nothing to wait for."""
+    no_ci = {"required_checks": [], "protection_known": True, "jobs": {}}
+    assert land.ci_gate([], no_ci, None, NEW) == "full_green"
+
+
+def test_a_green_for_this_commit_is_still_green_beside_a_dropped_stale_red():
+    """Waiting is for what has not reported, not for what has."""
+    mixed = [sha_check("lint", "FAILURE", OLD), sha_check("lint", "SUCCESS", NEW)]
+    assert land.ci_gate(mixed, UNREQUIRED, None, NEW) == "full_green"

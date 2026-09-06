@@ -335,7 +335,12 @@ def ci_gate(
     dropped before anything is judged. What is left may be nothing, and nothing
     is `pending`: honest ignorance, never green.
     """
-    checks = checks_for_sha(checks, expected_sha)
+    scoped = checks_for_sha(checks, expected_sha)
+    # A result naming another commit is not evidence about this one — but that it
+    # exists at all is evidence that this pull request runs CI, and that this
+    # commit's own results are still to come.
+    dropped = len(scoped) != len(checks or [])
+    checks = scoped
     summary = classify_checks(checks, profile)
     if summary["failed"]:
         return "failed"
@@ -363,7 +368,18 @@ def ci_gate(
             # Anything that did report counts, requirable or not.
             return "full_green" if not summary["actionable_pending"] else "pending"
 
-        # Protection says nothing is required, so nothing can block.
+        # Protection says nothing is required, so nothing can block a merge.
+        # "Nothing blocks" is not "CI has already spoken", though. When the gate
+        # is scoped to a commit and nothing in the list describes it — every
+        # result belonged to another commit, or none has arrived in the window
+        # after a push — a repo that runs CI at all has simply not reported yet.
+        # Reading that as green is how a batch merges past a suite that never
+        # ran, and it is strictly worse than the `failed` the dropped stale red
+        # used to produce. Nothing declared and nothing dropped is the one case
+        # with nothing to wait for: a repo with no CI, which protection agrees
+        # requires nothing.
+        if expected_sha and not checks and (dropped or profile.get("jobs")):
+            return "pending"
         return "full_green" if not summary["actionable_pending"] else "pending"
 
     done = set(summary["passed"])
