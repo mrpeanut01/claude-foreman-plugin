@@ -693,7 +693,7 @@ def changed_files(root: Path, base: str) -> list[str]:
     return sorted(found)
 
 
-def undeterminable_diff(base: str, exc: PathsUnavailable) -> dict:
+def undeterminable_diff(base: str, exc: PathsUnavailable, root: Path | str = ".") -> dict:
     """The report for a gate that never learned what it was grading.
 
     `blocked`, the same status and exit 2 a check this machine cannot run gets,
@@ -701,11 +701,24 @@ def undeterminable_diff(base: str, exc: PathsUnavailable) -> dict:
     as much as the refusal — the default base is `main`, so a repo whose trunk is
     `master` or `develop` hits this on the very first run, and a gate whose only
     output is "no" gets worked around rather than fixed.
+
+    Same shape as every other report (issue #82). The exit-2 path is the one an
+    automated caller is most likely to parse, because it is the one that needs
+    explaining, and a report that differs only on the failure path is the one
+    that breaks a consumer later. So the context keys are all here and say the
+    truthful thing: no file is known to have changed, the impact map is not
+    complete, tests are required and none ran.
     """
     return {
         "status": "blocked",
         "exit_code": 2,
-        "changed": None,
+        "root": str(root),
+        "changed": [],
+        "impacted_tests": [],
+        "impact_complete": False,
+        "tests_required": True,
+        "jobs": [],
+        "deferred_to_ci": [],
         "tests_ran": False,
         "steps": [],
         "failed": [],
@@ -779,7 +792,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         changed = args.changed if args.changed is not None else changed_files(root, args.base)
     except PathsUnavailable as exc:
-        print(json.dumps(undeterminable_diff(args.base, exc), indent=2))
+        print(json.dumps(undeterminable_diff(args.base, exc, root), indent=2))
         return 2
 
     if args.cmd == "plan":

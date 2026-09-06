@@ -861,6 +861,29 @@ def test_a_diff_the_gate_could_not_read_blocks_it_rather_than_passing_it(repo, t
     assert any("--base" in note for note in report["notes"])
 
 
+def test_an_undeterminable_diff_reports_in_the_same_shape_as_every_other_gate(
+    repo, toolbox, capsys
+):
+    """Issue #82. A consumer that reads `changed`, `tests_required` or `jobs` off
+    a gate report must not have to special-case the one report most worth
+    reading. Every key a run report carries is here, and each says the truthful
+    thing: nothing is known to have changed, the map is incomplete, tests are
+    required and none ran."""
+    workflow(repo, CHECK_ONLY)
+    gate.main(["run", "--root", str(repo), "--changed", "README.md", "--profile", "none.json"])
+    ordinary = out(capsys)
+
+    install_tool(toolbox, "git", BROKEN_GIT)
+    assert gate.main(["run", "--root", str(repo), "--profile", "none.json"]) == 2
+    report = out(capsys)
+
+    assert set(report) == set(ordinary)
+    assert report["changed"] == []
+    assert report["impact_complete"] is False
+    assert report["tests_required"] is True
+    assert report["root"] == str(repo)
+
+
 def test_plan_will_not_plan_against_a_diff_it_could_not_read(repo, toolbox, capsys):
     install_tool(toolbox, "git", BROKEN_GIT)
     workflow(repo, CHECK_ONLY)
