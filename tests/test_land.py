@@ -510,3 +510,273 @@ def test_a_push_only_path_filter_does_not_excuse_a_pull_request_job():
 def test_a_pull_request_path_filter_still_makes_a_job_conditional():
     spec = job(path_filters=["docs/**"], pr_path_filters=["docs/**"])
     assert land._can_report(spec) is False
+
+
+# --- issue #8: a reported name must be resolved to the job that declared it ---
+
+# Branch protection names the contexts GitHub actually reports. For a matrix job
+# that is one context per cell — never the workflow's job key, which is what the
+# profile is keyed by. `e2e` therefore carries required=False even though both of
+# its cells are required to merge.
+MATRIX = {
+    "required_checks": ["lint", "e2e (chrome)", "e2e (firefox)"],
+    "protection_known": True,
+    "jobs": {
+        "lint": {"tier": "cheap", "required": True, "display": None},
+        "e2e": {"tier": "expensive", "required": False, "display": None},
+        "coverage": {"tier": "cheap", "required": False, "display": None},
+    },
+}
+
+
+def test_a_matrix_cell_inherits_the_tier_of_the_job_that_declared_it():
+    """Otherwise the expensive tier is invisible and gets paid for on every push."""
+    checks = [
+        check("lint", "SUCCESS"),
+        check("e2e (chrome)", "PENDING"),
+        check("e2e (firefox)", "PENDING"),
+    ]
+    assert land.ci_gate(checks, MATRIX) == "cheap_green"
+
+
+def test_a_matrix_cell_of_an_advisory_job_is_advisory_too():
+    s = land.classify_checks([check("coverage (3.11)", "FAILURE")], MATRIX)
+    assert s["failed"] == [] and s["advisory_failed"] == ["coverage (3.11)"]
+
+
+def test_a_required_context_is_never_advisory_whatever_its_job_key_says():
+    """`e2e` reads required=False; the cell protection names is still required."""
+    s = land.classify_checks([check("e2e (chrome)", "FAILURE")], MATRIX)
+    assert s["failed"] == ["e2e (chrome)"]
+    assert land.ci_gate([check("e2e (chrome)", "FAILURE")], MATRIX) == "failed"
+
+
+# --- issue #9: a gate verdict is a statement about one commit ----------------
+# The ledger resets both gates on `batch.pushed` for exactly this reason. If the
+# check list read straight afterwards still describes the previous commit, the
+# reset buys nothing.
+
+NEW = "a" * 40
+OLD = "b" * 40
+
+
+def sha_check(name, state, sha, description=""):
+    return {"name": name, "state": state, "description": description, "head_sha": sha}
+
+
+def test_checks_from_the_previous_commit_do_not_make_the_new_one_green():
+    stale = [sha_check(n, "SUCCESS", OLD) for n in ("lint", "unit", "integration")]
+    assert land.ci_gate(stale, PROFILE, expected_sha=NEW) == "pending"
+
+
+def test_checks_carrying_no_commit_at_all_cannot_prove_anything():
+    """`gh pr checks` output has no head SHA, so it can never be attributed."""
+    unattributable = [check(n, "SUCCESS") for n in ("lint", "unit", "integration")]
+    assert land.ci_gate(unattributable, PROFILE, expected_sha=NEW) == "pending"
+
+
+def test_checks_for_the_commit_being_gated_are_read_normally():
+    fresh = [sha_check(n, "SUCCESS", NEW) for n in ("lint", "unit", "integration")]
+    assert land.ci_gate(fresh, PROFILE, expected_sha=NEW) == "full_green"
+
+
+def test_a_failure_on_the_previous_commit_does_not_fail_the_new_one():
+    """Stale evidence is evidence of nothing, in either direction."""
+    mixed = [sha_check("lint", "FAILURE", OLD), sha_check("lint", "SUCCESS", NEW)]
+    s = land.classify_checks(mixed, PROFILE, expected_sha=NEW)
+    assert s["failed"] == [] and s["passed"] == ["lint"] and s["stale"] == ["lint"]
+
+
+def test_an_abbreviated_sha_still_identifies_the_commit():
+    fresh = [sha_check(n, "SUCCESS", NEW) for n in ("lint", "unit", "integration")]
+    assert land.ci_gate(fresh, PROFILE, expected_sha=NEW[:7]) == "full_green"
+
+
+def test_asking_for_no_particular_commit_keeps_the_unscoped_reading():
+    green = [check(n, "SUCCESS") for n in ("lint", "unit", "integration")]
+    assert land.ci_gate(green, PROFILE) == "full_green"
+    assert land.classify_checks(green, PROFILE)["stale"] == []
+
+
+def test_fetching_checks_for_a_sha_uses_the_sha_addressed_endpoints(monkeypatch):
+    calls = []
+
+    def fake_gh(args):
+        calls.append(" ".join(args))
+        if "check-runs" in args[-1]:
+            return {
+                "check_runs": [
+                    {
+                        "name": "test (3.11)",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": NEW,
+                        "output": {"title": "3 passed"},
+                        "html_url": "https://example/run",
+                    }
+                ]
+            }
+        return {
+            "statuses": [
+                {
+                    "context": "buildkite",
+                    "state": "pending",
+                    "description": "waiting for agent",
+                    "target_url": "https://example/status",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(land, "_gh_json", fake_gh)
+    entries = land.fetch_checks("o/r", 7, sha=NEW)
+
+    assert all(f"commits/{NEW}" in call for call in calls), calls
+    assert {e["name"] for e in entries} == {"test (3.11)", "buildkite"}
+    assert {e["state"] for e in entries} == {"SUCCESS", "PENDING"}
+    # Every entry must carry the commit it describes, or the gate cannot check it.
+    assert all(e["head_sha"] == NEW for e in entries)
+
+
+def test_fetching_checks_with_no_sha_still_reads_the_pull_request(monkeypatch):
+    monkeypatch.setattr(land, "_gh_json", lambda args: [{"name": "lint", "state": "SUCCESS"}])
+    assert land.fetch_checks("o/r", 7) == [{"name": "lint", "state": "SUCCESS"}]
+
+
+# --- issue #29: two defects in one file are not one finding repeating --------
+
+
+def test_two_different_defects_in_one_file_are_not_one_repeated_finding():
+    """Half the content words are the locus and the verb; the noun is the defect."""
+    a = finding("scripts/parse.py", "high", "missing null check in parse_config")
+    b = finding("scripts/parse.py", "medium", "missing type check in parse_config")
+    assert land.same_finding(a, b) is False
+    assert land.review_stalled([[a], [b]], hard_ceiling=5) is None
+
+
+def test_a_repeat_that_only_adds_words_is_still_a_repeat():
+    """A rewording elaborates; it does not name something new."""
+    a = finding("scripts/parse.py", "high", "missing null check in parse_config")
+    b = finding("scripts/parse.py", "high", "still a missing null check in parse_config on line 4")
+    assert land.same_finding(a, b) is True
+
+
+def test_two_findings_naming_different_things_are_different_however_much_they_share():
+    a = finding("src/pool.py", "high", "connection pool leaks handles on timeout")
+    b = finding("src/pool.py", "high", "connection pool leaks handles on shutdown")
+    assert land.same_finding(a, b) is False
+
+
+# --- issue #36: a locus wrong round after round is deadlock, however worded --
+
+
+def locus_rounds(*summaries, file="scripts/land.py", severity="high"):
+    return [[finding(file, severity, summary)] for summary in summaries]
+
+
+ARC = (
+    "empty check list read as full_green",
+    "requiring every declared job hangs on unreportable ones",
+    "a running job is invisible, so the gate merges early",
+)
+
+
+def test_one_file_wrong_in_three_consecutive_rounds_is_a_deadlock():
+    """PR #7's own arc: one function, four rounds, alternating directions."""
+    reason = land.review_stalled(locus_rounds(*ARC), hard_ceiling=5)
+    assert reason and "locus" in reason.lower() and "scripts/land.py" in reason
+
+
+def test_two_rounds_on_one_file_is_ordinary_iteration():
+    assert land.review_stalled(locus_rounds(*ARC[:2]), hard_ceiling=5) is None
+
+
+def test_three_rounds_spread_across_files_is_progress():
+    rounds = [
+        [finding("scripts/land.py", "high", ARC[0])],
+        [finding("scripts/triage.py", "high", "auth vocabulary is incomplete")],
+        [finding("scripts/loop.py", "high", "the daily budget never refreshes")],
+    ]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_a_round_that_clears_the_file_breaks_the_run():
+    rounds = [
+        [finding("scripts/land.py", "high", ARC[0])],
+        [finding("scripts/loop.py", "high", "the daily budget never refreshes")],
+        [finding("scripts/land.py", "high", ARC[2])],
+    ]
+    assert land.review_stalled(rounds, hard_ceiling=5) is None
+
+
+def test_repeated_low_findings_in_one_file_are_not_a_deadlock():
+    """A low finding never blocked a merge, so repeating one blocks nothing."""
+    assert land.review_stalled(locus_rounds(*ARC, severity="low"), hard_ceiling=5) is None
+
+
+def test_the_locus_run_survives_the_file_being_named_alongside_others():
+    rounds = [
+        [finding("scripts/land.py", "high", ARC[0]), finding("scripts/loop.py", "high", "a")],
+        [finding("scripts/land.py", "high", ARC[1])],
+        [finding("scripts/triage.py", "high", "b"), finding("scripts/land.py", "high", ARC[2])],
+    ]
+    assert "scripts/land.py" in land.review_stalled(rounds, hard_ceiling=5)
+
+
+# --- issue #49: firing on some pull requests is not firing on every one ------
+
+
+def event_job(**events):
+    """Shaped like a profile entry with per-event data, as parse_workflows emits."""
+    return {
+        "events": events,
+        "display": None,
+        "tier": "cheap",
+        "required": False,
+        "triggers": sorted(events),
+        "path_filters": [],
+        "pr_path_filters": [],
+    }
+
+
+def test_a_job_gated_on_ready_for_review_alone_is_not_requirable():
+    """The standard way to hold an E2E suite until a PR leaves draft. foreman
+    opens non-draft PRs, so the event never fires and no check is ever created."""
+    assert (
+        land.can_report_on_pr(event_job(pull_request={"types": ["ready_for_review"]}), "main")
+        is False
+    )
+
+
+def test_a_job_gated_on_edited_alone_is_not_requirable():
+    assert land.can_report_on_pr(event_job(pull_request={"types": ["edited"]}), "main") is False
+
+
+def test_the_default_activity_types_still_make_a_job_requirable():
+    types = {"types": ["opened", "synchronize", "reopened"]}
+    assert land.can_report_on_pr(event_job(pull_request=types), "main") is True
+
+
+def test_a_ready_for_review_job_does_not_hold_the_gate_open_forever():
+    profile = {
+        "required_checks": [],
+        "protection_known": False,
+        "jobs": {
+            "lint": event_job(pull_request={}),
+            "e2e": event_job(pull_request={"types": ["ready_for_review"]}),
+        },
+    }
+    assert land.ci_gate([check("lint", "SUCCESS")], profile, "main") == "full_green"
+
+
+def test_a_ready_for_review_job_that_does_report_is_still_waited_on():
+    """Not requirable is not ignorable: a check that appears still holds the gate."""
+    profile = {
+        "required_checks": [],
+        "protection_known": False,
+        "jobs": {
+            "lint": event_job(pull_request={}),
+            "e2e": event_job(pull_request={"types": ["ready_for_review"]}),
+        },
+    }
+    checks = [check("lint", "SUCCESS"), check("e2e", "PENDING")]
+    assert land.ci_gate(checks, profile, "main") == "pending"

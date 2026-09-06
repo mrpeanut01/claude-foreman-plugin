@@ -71,6 +71,12 @@ PR_EVENTS = {"pull_request", "pull_request_target", "push"}
 # things each round is progress. Only the first is worth escalating on.
 REVIEW_MATCH_THRESHOLD = 0.5
 DEFAULT_REVIEW_CEILING = 5
+# Consecutive rounds carrying a blocking finding in the same file before that
+# counts as deadlock on its own. Two is ordinary iteration — a reviewer reading
+# one file twice. Three says the fixes are not converging on a correct model of
+# that code, and it has to fire below the hard ceiling to say something more
+# useful than "you ran out of rounds".
+LOCUS_REPEAT_ROUNDS = 3
 _WORD = re.compile(r"[a-z0-9]+")
 _NOISE = {
     "the",
@@ -104,9 +110,19 @@ _NOISE = {
 
 PR_TRIGGERS = ("pull_request", "pull_request_target")
 FILTER_KEYS = ("paths", "paths_ignore", "branches", "tags")
-# Activity types that fire while a pull request is open. A trigger restricted to
-# `closed` or `labeled` never reports on an open PR.
-PR_OPEN_TYPES = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
+# Activity types that fire on EVERY pull request, which is what requirable means.
+# GitHub's default when `types:` is omitted is [opened, synchronize, reopened],
+# and `opened` is the member of it that every pull request necessarily raises.
+#
+# The near misses matter more than the obvious ones. `closed` and `labeled` never
+# fire on an open PR at all, but `ready_for_review` and `edited` do — just not on
+# every PR. `on: pull_request: types: [ready_for_review]` is the standard way to
+# hold an expensive E2E suite until a PR leaves draft; foreman opens non-draft
+# PRs and edits nothing, so no check is ever created and requiring one hangs the
+# gate until `stale_after_s` escalates it. `synchronize` has the same shape: it
+# fires on the pushes after creation, which a PR that is right first time never
+# gets.
+PR_UNCONDITIONAL_TYPES = {"opened"}
 
 
 def _branch_allows(branch: str, patterns: list[str]) -> bool:
@@ -145,8 +161,10 @@ def _unconditional(
             return False
 
     types = cfg.get("types")
-    if types and not (set(types) & PR_OPEN_TYPES):
-        return False  # e.g. types: [closed] — never fires while the PR is open
+    if types and not (set(types) & PR_UNCONDITIONAL_TYPES):
+        # e.g. types: [closed], which never fires while the PR is open, or
+        # types: [ready_for_review], which fires for some PRs but not this one.
+        return False
     return True
 
 
@@ -192,7 +210,59 @@ def can_report_on_pr(spec: dict, base_branch: str | None = None) -> bool:
 _can_report = can_report_on_pr
 
 
-def _is_advisory(name: str, profile: dict) -> bool:
+# A check result names the commit it ran against. Anything shorter than this is
+# not enough of a SHA to identify one.
+MIN_SHA_PREFIX = 7
+
+
+def describes_commit(entry: dict, expected_sha: str) -> bool:
+    """Whether this check result provably ran against `expected_sha`.
+
+    A result that names no commit is not evidence about this one. `gh pr checks`
+    reports whatever the pull request last had, so between a push and the new
+    workflow run registering it returns the PREVIOUS commit's results — which is
+    the whole hazard this predicate exists to close.
+    """
+    reported = str(entry.get("head_sha") or entry.get("headSha") or "")
+    if len(reported) < MIN_SHA_PREFIX or len(expected_sha or "") < MIN_SHA_PREFIX:
+        return False
+    # Either side may be abbreviated: `git rev-parse --short HEAD` on one side,
+    # a full API SHA on the other.
+    return reported.startswith(expected_sha) or expected_sha.startswith(reported)
+
+
+def checks_for_sha(checks: list[dict], expected_sha: str | None) -> list[dict]:
+    """The checks that describe `expected_sha`; all of them when no SHA is given."""
+    if not expected_sha:
+        return list(checks or [])
+    return [c for c in (checks or []) if describes_commit(c, expected_sha)]
+
+
+def _shapes(profile: dict) -> list[dict]:
+    """The job list `ci_profile.attribute` wants: job key plus declared display name."""
+    return [
+        {"name": name, "display": (spec or {}).get("display")}
+        for name, spec in (profile.get("jobs") or {}).items()
+    ]
+
+
+def _job_for(name: str, profile: dict, shapes: list[dict] | None = None) -> dict:
+    """The profile entry for a reported check name, or {} when nothing matches.
+
+    GitHub reports matrix cells (`test (3.11)`) and reusable-workflow legs
+    (`caller / called`), while the profile is keyed by the workflow's job key
+    (`test`). Indexing `jobs` with the reported name therefore misses on exactly
+    the repos this system is for. `ci_profile.attribute` already reverses those
+    display forms, and returns None rather than guessing.
+    """
+    jobs = profile.get("jobs") or {}
+    if name in jobs:
+        return jobs[name] or {}
+    key = attribute(name, _shapes(profile) if shapes is None else shapes)
+    return (jobs.get(key) or {}) if key else {}
+
+
+def _is_advisory(name: str, profile: dict, shapes: list[dict] | None = None) -> bool:
     """Unknown checks count as required: an unknown gate may block the queue.
 
     When branch protection could not be read, nothing is known to be advisory.
@@ -202,11 +272,19 @@ def _is_advisory(name: str, profile: dict) -> bool:
     """
     if not profile.get("protection_known", False):
         return False
-    job = (profile.get("jobs") or {}).get(name)
+    if name in set(profile.get("required_checks") or []):
+        # Protection names this exact context. The job's own `required` flag is
+        # computed by matching the job KEY against those contexts, so a matrix
+        # job whose cells are required still reads required=False. Believing the
+        # flag over the context list would file a failing required cell as
+        # advisory, and a red gate would read green.
+        return False
+    job = _job_for(name, profile, shapes)
     return bool(job) and job.get("required") is False
 
 
-def classify_checks(checks: list[dict], profile: dict) -> dict:
+def classify_checks(checks: list[dict], profile: dict, expected_sha: str | None = None) -> dict:
+    shapes = _shapes(profile)
     summary = {
         "passed": [],
         "failed": [],
@@ -215,11 +293,17 @@ def classify_checks(checks: list[dict], profile: dict) -> dict:
         "advisory_pending": [],
         "human_gate_pending": [],
         "pending": [],
+        "stale": [],
     }
     for entry in checks or []:
         name = entry.get("name", "")
+        if expected_sha and not describes_commit(entry, expected_sha):
+            # Belongs to another commit, or names none at all. Counting it in
+            # either direction lets CI that never saw this code decide its gate.
+            summary["stale"].append(name)
+            continue
         state = (entry.get("state") or entry.get("bucket") or "").upper()
-        advisory = _is_advisory(name, profile)
+        advisory = _is_advisory(name, profile, shapes)
 
         if state in PASSED:
             summary["passed"].append(name)
@@ -237,8 +321,21 @@ def classify_checks(checks: list[dict], profile: dict) -> dict:
     return summary
 
 
-def ci_gate(checks: list[dict], profile: dict, base_branch: str | None = None) -> str:
-    """Translate a check list into the ledger's ci_gate value."""
+def ci_gate(
+    checks: list[dict],
+    profile: dict,
+    base_branch: str | None = None,
+    expected_sha: str | None = None,
+) -> str:
+    """Translate a check list into the ledger's ci_gate value.
+
+    `expected_sha` is the commit this verdict is about. A gate verdict is a
+    statement about one commit — that is why the ledger resets both gates on
+    `batch.pushed` — so results that cannot be shown to describe that commit are
+    dropped before anything is judged. What is left may be nothing, and nothing
+    is `pending`: honest ignorance, never green.
+    """
+    checks = checks_for_sha(checks, expected_sha)
     summary = classify_checks(checks, profile)
     if summary["failed"]:
         return "failed"
@@ -249,9 +346,7 @@ def ci_gate(checks: list[dict], profile: dict, base_branch: str | None = None) -
             # Nothing is known to be optional, so decide from what the workflows
             # declare plus what has actually reported.
             declared = profile.get("jobs") or {}
-            shapes = [
-                {"name": name, "display": spec.get("display")} for name, spec in declared.items()
-            ]
+            shapes = _shapes(profile)
             requirable = {n: s for n, s in declared.items() if can_report_on_pr(s, base_branch)}
             covered = {attribute(name, shapes) for name in summary["passed"]}
             reported = {attribute(c.get("name", ""), shapes) for c in (checks or [])}
@@ -271,9 +366,15 @@ def ci_gate(checks: list[dict], profile: dict, base_branch: str | None = None) -
         # Protection says nothing is required, so nothing can block.
         return "full_green" if not summary["actionable_pending"] else "pending"
 
-    jobs = profile.get("jobs") or {}
     done = set(summary["passed"])
-    expensive = [n for n in required if (jobs.get(n) or {}).get("tier") == "expensive"]
+    # Required checks are protection contexts — the names GitHub reports — so
+    # their tier lives under the job that declared them, not under the context.
+    # Reading the tier off the context directly finds nothing for every matrix
+    # cell, the expensive job then counts as cheap, and cheap_green collapses
+    # into full_green: the expensive tier gets launched on every push, which is
+    # the whole saving the ladder exists to make.
+    shapes = _shapes(profile)
+    expensive = [n for n in required if _job_for(n, profile, shapes).get("tier") == "expensive"]
     cheap = [n for n in required if n not in expensive]
 
     if all(n in done for n in required):
@@ -348,34 +449,74 @@ def same_finding(a: dict, b: dict, threshold: float = REVIEW_MATCH_THRESHOLD) ->
     wa, wb = _words(a.get("summary")), _words(b.get("summary"))
     if not wa or not wb:
         return False
-    return len(wa & wb) / len(wa | wb) >= threshold
+    if len(wa & wb) / len(wa | wb) < threshold:
+        return False
+    # Overlap alone is not enough. Two summaries about the same file share their
+    # locus and their verb for free, so "missing null check in parse_config" and
+    # "missing type check in parse_config" share most of their content words
+    # while naming two unrelated defects. What separates them is that each names
+    # something the other does not. A genuine rewording only elaborates: it adds
+    # or drops filler, so one summary's words still contain the other's.
+    return not (wa - wb and wb - wa)
+
+
+def _blocking(round_findings: list[dict]) -> list[dict]:
+    """Only findings that stood between the batch and a merge."""
+    return [f for f in round_findings or [] if str(f.get("severity", "")).lower() in SERIOUS]
+
+
+def _repeated_locus(rounds: list[list[dict]], span: int) -> str | None:
+    """A file that carried a blocking finding in each of the last `span` rounds.
+
+    Repeated wording is one deadlock signal; repeated *locus* is a stronger one.
+    A builder and reviewer can name a genuinely different defect in the same
+    function every round, in alternating directions, and never once repeat
+    themselves textually — while the thing being described is a model of that
+    code that neither of them has right. A human watching that arc stops the
+    patching and asks for the spec; this is the rule that does the same.
+    """
+    if span < 1 or len(rounds) < span:
+        return None
+    recent = [{f.get("file") for f in _blocking(r) if f.get("file")} for r in rounds[-span:]]
+    if not all(recent):
+        return None  # a round with no blocking finding at all breaks the run
+    shared = set.intersection(*recent)
+    return sorted(shared)[0] if shared else None
 
 
 def review_stalled(
-    rounds: list[list[dict]], hard_ceiling: int = DEFAULT_REVIEW_CEILING
+    rounds: list[list[dict]],
+    hard_ceiling: int = DEFAULT_REVIEW_CEILING,
+    locus_span: int = LOCUS_REPEAT_ROUNDS,
 ) -> str | None:
     """Reason to stop reviewing, or None to allow another round.
 
     Rounds elapsed is the wrong measure. A builder and reviewer who surface a
     different real defect each round are converging, however many rounds it
-    takes; two who trade the same finding are not. Only blocking severities
-    count — a repeated `low` never stood between the batch and a merge.
+    takes; two who trade the same finding are not, and two who keep being wrong
+    about the same code are not either. Only blocking severities count — a
+    repeated `low` never stood between the batch and a merge.
     """
     if len(rounds) >= hard_ceiling:
         return f"review reached the hard ceiling of {hard_ceiling} rounds"
     if len(rounds) < 2:
         return None
 
-    def blocking(round_findings):
-        return [f for f in round_findings if str(f.get("severity", "")).lower() in SERIOUS]
-
-    previous, current = blocking(rounds[-2]), blocking(rounds[-1])
+    previous, current = _blocking(rounds[-2]), _blocking(rounds[-1])
     for now in current:
         if any(same_finding(before, now) for before in previous):
             return (
                 f"the same finding survived a round (repeat): "
                 f"{now.get('file')} - {str(now.get('summary', ''))[:80]}"
             )
+
+    locus = _repeated_locus(rounds, locus_span)
+    if locus:
+        return (
+            f"{locus_span} rounds running have found a blocking defect in the same "
+            f"place (locus): {locus}. The fixes are not converging on a correct "
+            "model of that code - stop patching and write the model down."
+        )
     return None
 
 
@@ -439,7 +580,51 @@ def _gh_json(args: list[str]):
         return None
 
 
-def fetch_checks(repo: str, pr: int) -> list[dict]:
+def _from_check_run(run: dict, sha: str) -> dict:
+    """One check run in the shape the classifier reads."""
+    return {
+        "name": run.get("name") or "",
+        # A run still in flight has no conclusion yet; its status is the state.
+        "state": str(run.get("conclusion") or run.get("status") or "").upper(),
+        "description": (run.get("output") or {}).get("title") or "",
+        "workflow": (run.get("check_suite") or {}).get("workflow_name") or "",
+        "link": run.get("html_url") or "",
+        "head_sha": run.get("head_sha") or sha,
+    }
+
+
+def _from_status(status: dict, sha: str) -> dict:
+    """One legacy commit status — external CI that never moved to check runs.
+
+    `gh pr checks` reports these alongside check runs, so reading only check runs
+    would drop a required context and hang the gate.
+    """
+    return {
+        "name": status.get("context") or "",
+        "state": str(status.get("state") or "").upper(),
+        "description": status.get("description") or "",
+        "workflow": "",
+        "link": status.get("target_url") or "",
+        "head_sha": sha,
+    }
+
+
+def fetch_checks(repo: str, pr: int, sha: str | None = None) -> list[dict]:
+    """Check results for this pull request, tagged with the commit they describe.
+
+    Given a `sha`, both reads are SHA-addressed, so anything that comes back
+    provably ran against that commit. `gh pr checks` cannot say that: its output
+    carries no head SHA, and in the window between a push and the new run
+    registering it returns the previous commit's results.
+    """
+    if sha:
+        runs = _gh_json(["api", f"repos/{repo}/commits/{sha}/check-runs?per_page=100"]) or {}
+        combined = _gh_json(["api", f"repos/{repo}/commits/{sha}/status?per_page=100"]) or {}
+        return [
+            *[_from_check_run(run, sha) for run in (runs.get("check_runs") or [])],
+            *[_from_status(st, sha) for st in (combined.get("statuses") or [])],
+        ]
+
     raw = _gh_json(
         [
             "pr",
@@ -464,7 +649,7 @@ def fetch_pr(repo: str, pr: int) -> dict:
                 "--repo",
                 repo,
                 "--json",
-                "number,labels,isDraft,mergeable,reviewDecision,url,baseRefName",
+                "number,labels,isDraft,mergeable,reviewDecision,url,baseRefName,headRefOid",
             ]
         )
         or {}
@@ -482,6 +667,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--repo", required=True)
     p.add_argument("--profile", default=".foreman/ci-profile.json")
+    p.add_argument(
+        "--sha",
+        help="the commit this gate is about; defaults to the PR's current head",
+    )
     p = sub.add_parser("verdict")
     p.add_argument("--file", required=True)
     p = sub.add_parser("blockers")
@@ -498,12 +687,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "checks":
         profile = load_json(args.profile, {})
-        checks = fetch_checks(args.repo, args.pr)
-        base = (fetch_pr(args.repo, args.pr) or {}).get("baseRefName")
-        summary = classify_checks(checks, profile)
+        pr = fetch_pr(args.repo, args.pr) or {}
+        # GitHub knows the new head the moment a push lands; its checks appear
+        # later. Scoping the read to that head is what stops the previous
+        # commit's green from being reported as this commit's.
+        sha = args.sha or pr.get("headRefOid")
+        checks = fetch_checks(args.repo, args.pr, sha)
+        base = pr.get("baseRefName")
+        summary = classify_checks(checks, profile, sha)
         print(
             json.dumps(
-                {**summary, "base_branch": base, "gate": ci_gate(checks, profile, base)},
+                {
+                    **summary,
+                    "base_branch": base,
+                    "head_sha": sha,
+                    "gate": ci_gate(checks, profile, base, sha),
+                },
                 indent=2,
             )
         )

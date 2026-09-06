@@ -59,13 +59,45 @@ both clean. Two reviews cost less than one bad merge into an auth path.
 **Escalate when findings repeat, not when rounds elapse.**
 
 `land.review_stalled(rounds, hard_ceiling)` compares the blocking findings of the
-last two rounds. A finding that survives a round — same file, same severity,
-substantially the same complaint — means the builder and reviewer are trading the
-same objection, and another round will trade it again. That is deadlock, and it
+last two rounds. A finding that survives a round — same file, same severity
+band, the same complaint reworded — means the builder and reviewer are trading
+the same objection, and another round will trade it again. That is deadlock, and it
 escalates.
 
+*The same complaint reworded* means one summary reads as an elaboration of the
+other. Two summaries that each name something the other does not are two defects
+in one file, not one defect repeated: "missing null check in parse_config" and
+"missing type check in parse_config" share most of their words and describe
+unrelated bugs, and escalating that pair would call a converging PR a deadlock.
+
 Different findings each round is the opposite: the reviewer is working through
-layers, and quality is rising. Let it run.
+layers, and quality is rising. Let it run — unless they keep landing in the same
+place.
+
+### The same place, round after round
+
+Repeated wording is one deadlock signal; a repeated **locus** is a stronger one.
+Three consecutive rounds each carrying a blocking finding in the same file
+escalates, whatever the summaries say.
+
+This is the arc that produced the rule, on this repo, in one function:
+
+| Round | Finding | Direction |
+|-------|---------|-----------|
+| 2 | empty check list read as `full_green` | merges early |
+| 3 | required every declared job, hangs on unreportable ones | never merges |
+| 4 | running job invisible; workflow-level paths disabled the requirement | merges early |
+| 5 | branches/tags/paths-ignore unmodelled | both |
+
+Every round named a real and different defect, so textually it read as progress.
+But the same code had been wrong four times running in alternating directions,
+which is not a sequence of bugs — it is one missing model. Two rounds on a file
+is ordinary iteration; three says stop patching and write the model down, which
+is what a human called here. The spec table in `tests/test_gate_spec.py` is what
+came out of doing that.
+
+The locus is the file, because a file is what a finding records. If your
+reviewer reports a symbol too, the same argument applies one level finer.
 
 > This rule replaced a flat cap of 2, which was justified as *"a third round of an
 > agent negotiating with an agent is not going to converge."* Dogfooding showed
