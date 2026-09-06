@@ -250,6 +250,45 @@ def test_an_unreadable_diff_is_raised_not_reported_as_no_paths(repo):
         batch.diff_paths("no-such-base", repo=repo)
 
 
+def test_git_missing_from_path_refuses_the_same_way_a_failed_diff_does(repo, tmp_path):
+    """`gate._git` catches OSError for exactly this; the two siblings must agree.
+
+    Only a non-zero exit was converted here, so with no git on PATH the command
+    died on a `FileNotFoundError` traceback instead of the one-line refusal.
+    """
+    empty = tmp_path / "no-tools"
+    empty.mkdir()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("PATH", str(empty))
+        with pytest.raises(batch.PathsUnavailable):
+            batch.diff_paths("main", repo=repo)
+
+
+def test_the_paths_command_exits_1_when_git_cannot_be_run(repo, tmp_path, capsys):
+    """The refusal a caller sees: exit 1 and a reason, not a stack trace."""
+    root = ledger.init(tmp_path / "ledger-home")
+    ledger.append(root, "batch.created", batch="b-001", issues=[1], paths=["src/upload.py"])
+    empty = tmp_path / "no-tools"
+    empty.mkdir()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("PATH", str(empty))
+        rc = batch.main(
+            [
+                "paths",
+                "--batch",
+                "b-001",
+                "--base",
+                "main",
+                "--ledger",
+                str(root),
+                "--repo-dir",
+                str(repo),
+            ]
+        )
+    assert rc == 1
+    assert "git" in capsys.readouterr().err
+
+
 def test_an_empty_diff_is_no_observation_of_what_a_batch_touches(repo):
     """git succeeded and still said nothing, so there is nothing to replace intent with."""
     _git(repo, "checkout", "-q", "main")

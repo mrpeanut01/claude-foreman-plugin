@@ -188,13 +188,22 @@ def diff_paths(base: str, head: str = "HEAD", repo: Path | str | None = None) ->
     Three dots, not two: `base...head` diffs head against the merge base, so
     everything that landed on trunk after the branch started is excluded. With
     two dots a busy trunk makes every batch look like it touched half the repo.
+
+    Every way the diff can fail to arrive raises `PathsUnavailable`, including
+    git not being runnable at all — the same refusal `gate._git` makes, for the
+    same reason. Converting only a non-zero exit left `FileNotFoundError` to
+    reach the caller as a traceback instead of the one-line reason `main` is
+    written to print.
     """
-    done = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}...{head}"],
-        cwd=str(repo) if repo else None,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        done = subprocess.run(
+            ["git", "diff", "--name-only", f"{base}...{head}"],
+            cwd=str(repo) if repo else None,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise PathsUnavailable(f"git diff {base}...{head} could not be run: {exc}") from exc
     if done.returncode != 0:
         # Never return [] here. An empty path list clears the protected-path
         # gate, so a failed git call would read as "this batch is safe".
