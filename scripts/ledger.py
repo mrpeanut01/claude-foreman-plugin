@@ -275,8 +275,19 @@ def _now() -> str:
 
 
 def append(root: Path, event_type: str, **fields) -> dict:
+    """Write one event. Creates the ledger directory if nothing has yet.
+
+    Two writers skipped `init`: `findings.py file` and `batch.py apply`. The
+    first created a GitHub issue — which the wrapper cannot undo — and then
+    died on the missing directory before recording that it had, so the issue
+    existed with no trace of the review that raised it. An append is the act
+    of recording something that has already happened, and refusing to record
+    it does not make it unhappen.
+    """
     event = {"ts": _now(), "type": event_type, **fields}
-    with (resolve_root(root) / EVENTS).open("a", encoding="utf-8") as fh:
+    path = resolve_root(root) / EVENTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event, sort_keys=False) + "\n")
     return event
 

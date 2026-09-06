@@ -637,3 +637,15 @@ def test_a_config_in_a_directory_outside_any_repository_still_resolves(tmp_path,
     (outside / ledger.LEDGER_DIR / ledger.CONFIG_FILE).write_text(json.dumps({"auto_merge": True}))
     monkeypatch.chdir(outside)
     assert ledger.load_config(None) == {"auto_merge": True}
+
+
+# --- an append never fails for want of a directory ----------------------------
+
+
+def test_an_append_creates_the_ledger_directory_it_needs(tmp_path):
+    """`findings.py file` created a GitHub issue and then died here, before it
+    could record that it had. Recording does not make a thing happen, so
+    refusing to record it does not make it unhappen."""
+    fresh = tmp_path / "never-inited" / ledger.LEDGER_DIR
+    ledger.append(fresh, "finding.filed", url="https://x/1")
+    assert [e["type"] for e in ledger.read_events(fresh)] == ["finding.filed"]

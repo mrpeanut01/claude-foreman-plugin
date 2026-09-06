@@ -343,3 +343,22 @@ def test_a_plan_for_another_repository_files_nothing(tmp_path, monkeypatch, caps
     )
     assert rc == 1
     assert "o/r" in capsys.readouterr().err
+
+
+def test_filing_into_a_ledger_that_does_not_exist_yet_still_records_the_issue(
+    tmp_path, monkeypatch, capsys
+):
+    """The issue was created, then the append raised FileNotFoundError: a real
+    issue on the tracker with no ledger trace of the review that raised it."""
+    import ledger as ledger_mod
+
+    monkeypatch.setattr(findings, "create_issue", lambda repo, issue, wrapper: "https://x/7")
+    result = findings.plan([f()], CONTEXT, LABELS, [])
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps({**result, "context": CONTEXT}))
+    fresh = tmp_path / "never-inited" / ".foreman"
+    rc = findings.main(["file", "--plan", str(plan_file), "--repo", "o/r", "--ledger", str(fresh)])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["filed"] == ["https://x/7"]
+    (event,) = ledger_mod.read_events(fresh)
+    assert event["type"] == "finding.filed" and event["url"] == "https://x/7"

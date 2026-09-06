@@ -534,3 +534,29 @@ def test_a_misspelled_risk_ceiling_is_said_out_loud_when_planning(tmp_path, caps
     assert rc == 0
     assert "risk_ceiling" in captured.err and "strict" in captured.err
     assert [b["issues"] for b in json.loads(captured.out)["batches"]] == [[11], [12]]
+
+
+# --- apply must not need a ledger to exist before the first batch -------------
+
+
+def test_apply_records_every_batch_into_a_ledger_that_did_not_exist_yet(tmp_path, capsys):
+    """The only runtime exercise of `batch.py apply` in the suite. It crashed on
+    a fresh checkout, silently dropping every batch.created in the plan."""
+    plan = tmp_path / "batches.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "batches": [
+                    {"id": "b-001", "issues": [1, 2], "paths": ["a.py"], "risk": "low"},
+                    {"id": "b-002", "issues": [3], "paths": [], "risk": "medium"},
+                ]
+            }
+        )
+    )
+    fresh = tmp_path / "repo" / ".foreman"
+    rc = batch.main(["apply", "--plan", str(plan), "--ledger", str(fresh)])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["created"] == ["b-001", "b-002"]
+    state = ledger.load(fresh)
+    assert state.batches["b-001"]["issues"] == [1, 2]
+    assert state.batches["b-002"]["state"] == "planned"
