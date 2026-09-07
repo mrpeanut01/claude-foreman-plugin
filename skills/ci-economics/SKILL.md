@@ -1,6 +1,6 @@
 ---
 name: ci-economics
-description: Spend CI deliberately on repos with slow test suites — measure job costs, map a diff to the tests that cover it, batch issues to amortize a monolithic suite, run an escalating tier ladder, and tell flakes from real failures. Use when deciding what to run locally, how large a batch should be, whether to rerun a failed job, or why CI feels expensive.
+description: Spend CI deliberately on repos with slow test suites — measure job costs, map a diff to the tests that cover it, batch issues to amortize a monolithic suite, run an escalating tier ladder, launch benchmarks and simulations only on a diff that can move them, and tell flakes from real failures. Use when deciding what to run locally, how large a batch should be, whether a benchmark is worth running on this change, whether to rerun a failed job, or why CI feels expensive.
 ---
 
 # CI Economics
@@ -12,7 +12,7 @@ Everything here follows from that.
 Read the profile first — `.foreman/ci-profile.json`, built by `/foreman:ci-profile`.
 Without it every rule below degrades to guessing.
 
-## The five tactics, in order of money saved
+## The six tactics, in order of money saved
 
 ### 1. Local gate — never spend CI to learn what a laptop knows
 
@@ -61,17 +61,42 @@ push ─▶ local gate ─┬─▶ cheap CI (lint, typecheck, unit)  ─┐
 ```
 
 Review and cheap CI run **concurrently**; the expensive tier waits for both.
+Benchmarks sit outside this ladder entirely — they are measurements, not gates,
+and tactic 4 decides whether they run at all.
 A review costs minutes of tokens; the suite costs 40 minutes of compute. Putting
 the cheap judge first is the whole trick. `ledger.may_run_expensive_tier(batch)`
 is the gate.
 
-### 4. Tell flakes from real failures before reacting
+### 4. Launch a benchmark only on a diff that can move it
+
+A test returns a verdict; a benchmark returns a number. A number cannot say the
+diff is wrong, so waiting for one holds a correctness fix behind an answer to a
+different question — and a number only means anything when the diff could have
+moved it.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ci_profile.py" benchmark-plan \
+  --changed $(git diff --name-only origin/main...HEAD) --batch <id>
+```
+
+`run` lists only jobs something *said* to run: a benchmark is launched when a
+`paths:` filter or a `benchmark_paths` entry selects the diff, never because
+nothing said it should not. Anything undeclared comes back `unknown` and is
+launched on nothing — reported as a gap to declare, because both guesses are
+wrong invisibly. See [benchmark-runs.md](modules/benchmark-runs.md); the rule
+that a name-matched guess may never loosen a merge gate lives there.
+
+A warranted run goes in **its own PR**, not this batch's. The batch is a
+correctness fix; serialising a 40-minute measurement in front of it costs the
+whole saving the ladder exists to make, and the measurement cannot veto the fix.
+
+### 5. Tell flakes from real failures before reacting
 
 A flake is **one commit where the same job both failed and passed**. Failing every
 time is a real failure. Classify with a confidence score and act on the number,
 not the vibe — see [flake-budget.md](modules/flake-budget.md).
 
-### 5. Merge queue, once, at the end
+### 6. Merge queue, once, at the end
 
 The full suite runs against real trunk exactly once per batch, in the queue, with
 `gh pr merge --auto --squash`. Cap concurrent open PRs (default 3): every trunk
@@ -90,3 +115,4 @@ escalates rather than queueing work it cannot pay for.
 | Building or refreshing the profile | [profiling.md](modules/profiling.md) |
 | Deciding what to run locally | [impact-analysis.md](modules/impact-analysis.md) |
 | A job failed and you must rerun or fix | [flake-budget.md](modules/flake-budget.md) |
+| A repo has benchmarks, simulations or soaks | [benchmark-runs.md](modules/benchmark-runs.md) |

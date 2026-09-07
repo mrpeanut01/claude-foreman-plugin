@@ -55,7 +55,7 @@ Act on `gate`, never on the raw check list. Wait only on `actionable_pending`;
 | `pending` | Every check not yet resolved, whatever kind; the three rows below split it |
 | `actionable_pending` | Required, still running. The only thing worth waiting for |
 | `human_gate_pending` | Waiting on a person. Report it and move to another batch |
-| `advisory_pending` / `advisory_failed` | Not required. Informational |
+| `advisory_pending` / `advisory_failed` | Not required. Informational — a `benchmark_jobs` entry puts a measurement here even when protection is unreadable |
 | `failed` | Required and red. Fix or adjudicate |
 | `stale` | Reported against **another commit**. Ignored — it proves nothing about this one |
 
@@ -167,6 +167,34 @@ Skipping this step is no longer silent, but it is not repaired either.
 issue still open, and a person then closes it by hand — the loop will not batch
 it again, because a second PR for work already on trunk is worse than an untidy
 tracker. Closing it here is the cheap version.
+
+**7. File what this batch warrants measuring.**
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ci_profile.py" benchmark-plan \
+  --changed <the batch's confirmed paths> --batch <id> > bench.json
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/findings.py" plan --verdict bench.json \
+  --batch <id> --repo OWNER/NAME --source "the benchmark plan" > bench-plan.json
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/findings.py" file --plan bench-plan.json \
+  --repo OWNER/NAME
+```
+
+The paths are the ones step 5 confirmed and wrote to the ledger, so read them
+back with `ledger.py state --batch <id>` rather than re-diffing a worktree that
+`git worktree remove` may already have taken.
+
+Nothing here blocks anything, and that is the point. A benchmark returns a
+number, and a number cannot say the fix was wrong — so it never sat in this
+batch's merge path, and the run this step files becomes work of its own that
+triage batches into its own pull request. `benchmark-plan` prints an empty
+`findings` list on a repo with no benchmarks, or on a diff none of them measure,
+and the two `findings.py` lines then file nothing.
+
+Run it **after** the merge, not before. A measurement taken against a branch that
+never landed is wasted, and a benchmark issue for a batch that got blocked is
+work queued for a change that does not exist yet. See `benchmark-runs.md` in
+`ci-economics` for what decides `warranted`, and why an undeclared benchmark is
+reported as a gap rather than guessed at.
 
 ## On a red gate
 

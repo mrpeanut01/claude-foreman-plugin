@@ -833,6 +833,7 @@ def test_probe_writes_the_profile_into_the_repository_when_run_from_a_worktree(
             "jobs": {},
             "cheap_tier_s": None,
             "expensive_tier_s": None,
+            "benchmark_jobs": [],
             "unmeasured_jobs": [],
         },
     )

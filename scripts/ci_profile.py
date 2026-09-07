@@ -12,6 +12,7 @@ Every number here is measured from real runs, not declared in a config file.
 CLI:
     ci_profile.py probe --repo OWNER/NAME [--runs 50] [--out PATH]
     ci_profile.py impact --changed FILE [FILE ...]
+    ci_profile.py benchmark-plan --changed FILE [FILE ...] [--batch b-001]
 """
 
 from __future__ import annotations
@@ -30,10 +31,41 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import ledger  # noqa: E402
+from globs import matches_any, path_included  # noqa: E402
 
 # A job whose p95 sits under this runs in the cheap tier: it is worth paying on
 # every push. Anything slower waits behind the cheap tier and the review gate.
 DEFAULT_TIER_THRESHOLD_S = 300
+
+# --- what kind of answer a job gives -----------------------------------------
+# `tier` says what a job costs. It does not say what its result *means*, and for
+# one family of jobs the difference decides whether waiting for it is worth
+# anything at all.
+#
+# A test returns a verdict: this code is correct, or it is not. A benchmark or a
+# simulation returns a measurement: this code took 4.2s, this loop converged in
+# 31 iterations. A verdict is why the merge waits. A measurement is not — it is
+# a number to compare against yesterday's, and blocking a correctness fix until
+# it arrives buys nothing, because nothing about the number says the fix is
+# wrong. Worse, a measurement only means something when the diff could have
+# moved it: run one on a README change and it costs the full wall clock to
+# reproduce noise.
+#
+# So `kind` is a second axis, orthogonal to `tier`, and it is what decides
+# whether a job is worth launching on this particular diff.
+KIND_TEST = "test"
+KIND_BENCHMARK = "benchmark"
+
+# The vocabulary a repo uses when it means "measurement". Word-boundary anchored
+# on purpose: `perf` as a substring matches `perform_migration_check`, and a
+# migration check is a verdict. `sim` is deliberately absent for the same reason
+# — it is a fragment of `similarity`, `simple` and `simulator-build`, and the
+# cost of a wrong guess here is a correctness job stops being waited on.
+BENCHMARK_VOCABULARY = re.compile(
+    r"(?<![a-z0-9])(?:bench(?:mark)?(?:ing|s)?|perf|performance|simulation|simulate|soak"
+    r"|load[-_ ]?test|stress[-_ ]?test|throughput|latency)(?![a-z0-9])",
+    re.I,
+)
 
 
 class ProfileError(Exception):
@@ -233,6 +265,44 @@ def classify_tiers(
     }
 
 
+def classify_kinds(
+    jobs: list[dict], declared: list[str] | None = None
+) -> dict[str, tuple[str, str]]:
+    """Name -> (kind, why we say so), for every job in the workflow graph.
+
+    Two sources, and which one answered is recorded, because the two carry very
+    different weight downstream.
+
+    `config` — `benchmark_jobs` in .foreman/config.json, matched as GitHub filter
+    patterns against the job key, its display name and its workflow name. A human
+    wrote it down; it is a fact about this repo, and `land.py` will stop waiting
+    on a job on the strength of it.
+
+    `name` — the job calls itself a benchmark. That is a guess, and a guess may
+    never be the reason a merge stops waiting for a check: a job named
+    `perf-regression-test` that really does gate the merge would be waved through
+    on nothing but its name. So a name match only ever *narrows* what is spent
+    where being wrong is harmless — it keeps benchmarks off the laptop, and it
+    keeps them from being launched on a diff that cannot move their numbers.
+    Whether a check gates the merge stays with branch protection.
+    """
+    patterns = list(declared or [])
+    kinds: dict[str, tuple[str, str]] = {}
+    for job in jobs:
+        name = job["name"]
+        # Every name this job answers to. A repo that hides `bench` behind
+        # `name: Nightly` is caught by the workflow, and one whose workflow is
+        # `CI` is caught by the job key.
+        aliases = [name, job.get("display") or "", job.get("workflow") or ""]
+        if any(matches_any(alias, patterns) for alias in aliases if alias):
+            kinds[name] = (KIND_BENCHMARK, "config")
+        elif any(BENCHMARK_VOCABULARY.search(alias) for alias in aliases if alias):
+            kinds[name] = (KIND_BENCHMARK, "name")
+        else:
+            kinds[name] = (KIND_TEST, "default")
+    return kinds
+
+
 def flake_rates(job_runs: list[dict]) -> dict[str, float]:
     """A flake is one commit where the same job both failed and passed.
 
@@ -313,6 +383,242 @@ def impacted_tests(changed: list[str], repo_root: Path) -> tuple[list[str], bool
             else:
                 complete = False
     return sorted(hits), complete
+
+
+# --- does this diff warrant a benchmark run? ----------------------------------
+
+
+def _pr_config(spec: dict) -> dict | None:
+    """The pull_request trigger's merged filter config, or None if it has none.
+
+    `pull_request_target` counts too: it produces a check on the pull request in
+    exactly the same way, and a repo that uses it for its benchmarks (the usual
+    reason being a fork that needs secrets) declares its paths there.
+    """
+    events = spec.get("events") or {}
+    for name in ("pull_request", "pull_request_target"):
+        cfg = events.get(name)
+        if isinstance(cfg, dict):
+            return cfg
+    return None
+
+
+def _selected_by(cfg: dict, changed: list[str]) -> tuple[bool | None, list[str]]:
+    """GitHub's own answer to "does this diff run this job?", and what decided it.
+
+    Returns (runs, the changed files that decided it), or (None, []) when the
+    trigger declares no path filter and so cannot answer. `paths` runs the job
+    when ANY changed file matches; `paths-ignore` runs it when any changed file
+    does NOT match. Both are any-tests over the diff, not all-tests — a
+    one-file-matched diff runs the job, which is why an empty diff runs nothing.
+    """
+    paths = list(cfg.get("paths") or [])
+    ignore = list(cfg.get("paths_ignore") or cfg.get("paths-ignore") or [])
+    if not paths and not ignore:
+        return None, []
+    if paths:
+        hits = [f for f in changed if path_included(f, paths)]
+        if hits or not ignore:
+            return bool(hits), hits
+    # `paths-ignore` alone, or a `paths` list nothing matched while an ignore
+    # list also exists: what runs the job is a file the ignore list does not
+    # cover. `path_included` is still the right test — an ignore list may itself
+    # carry `!` re-inclusions — so the ignored set is what it includes, and the
+    # deciding files are the rest.
+    hits = [f for f in changed if not path_included(f, ignore)]
+    return bool(hits), hits
+
+
+def _configured_paths(benchmark_paths: object, job: str) -> list[str]:
+    """`benchmark_paths` as globs for one job: a flat list covers every job."""
+    if isinstance(benchmark_paths, dict):
+        return list(benchmark_paths.get(job) or [])
+    if isinstance(benchmark_paths, (list, tuple)):
+        return list(benchmark_paths)
+    return []
+
+
+def _decision(job: str, spec: dict, **fields) -> dict:
+    """One job's answer, always carrying where the job is declared.
+
+    The workflow file is what makes the resulting issue actionable: "declare what
+    `bench` covers" is a sentence somebody has to turn into a `paths:` filter, and
+    they need to be told which of thirty workflow files to open.
+    """
+    return {"job": job, "workflow_file": spec.get("workflow_file"), **fields}
+
+
+def warrants_benchmark(
+    job: str, spec: dict, changed: list[str], benchmark_paths: object = None
+) -> dict:
+    """Whether this diff can move this benchmark's numbers.
+
+    Three answers, not two, and the third is the one that matters.
+
+    `true`  — something the benchmark covers changed. Worth measuring.
+    `false` — nothing it covers changed. A run here reproduces noise at full
+              wall-clock cost, which is the spend this whole decision exists to
+              stop.
+    `null`  — nothing in the repo says what this benchmark covers, so neither
+              answer is honest. It is reported as a gap rather than guessed at,
+              because both guesses are bad in a way that never surfaces:
+              guessing `true` restores the every-PR spend, and guessing `false`
+              silently stops measuring a benchmark nobody will notice went quiet.
+              A gap becomes work (see `benchmark_findings`), and once someone
+              declares the paths, every future diff gets a real answer.
+
+    The ladder is ordered by who is more likely to be right. A `paths:` filter on
+    the job's own trigger is GitHub's answer, already agreed by the team and
+    already enforced on every push — deciding differently here would put the loop
+    at odds with what CI actually does.
+    """
+    cfg = _pr_config(spec)
+    if cfg is not None:
+        runs, hits = _selected_by(cfg, changed)
+        if runs is not None:
+            return _decision(job, spec, warranted=runs, basis="workflow path filter", matched=hits)
+
+    configured = _configured_paths(benchmark_paths, job)
+    if configured:
+        # Written to look like a workflow `paths:` filter because that is what it
+        # stands in for, so it reads by the same rules — `!` included.
+        hits = [f for f in changed if path_included(f, configured)]
+        return _decision(
+            job, spec, warranted=bool(hits), basis="configured benchmark_paths", matched=hits
+        )
+
+    if changed and all(_is_doc(f) for f in changed):
+        # The one thing that can be said without any declaration at all. Prose
+        # has no runtime, so no benchmark reading can move because of it.
+        return _decision(job, spec, warranted=False, basis="documentation-only diff", matched=[])
+
+    return _decision(
+        job,
+        spec,
+        warranted=None,
+        basis="nothing declares what this benchmark covers",
+        matched=[],
+    )
+
+
+def benchmark_plan(profile: dict, changed: list[str], config: dict | None = None) -> dict:
+    """What to measure on this diff, and what to leave unmeasured.
+
+    `run` is the only field that spends anything, and it is deliberately narrow:
+    a job is launched when something says it should be, never merely because
+    nothing said it should not. That asymmetry is the saving.
+    """
+    config = config or {}
+    changed = list(changed or [])
+    jobs = profile.get("jobs") or {}
+    benchmark_paths = config.get("benchmark_paths")
+
+    decisions = [
+        warrants_benchmark(name, spec, changed, benchmark_paths)
+        for name, spec in sorted(jobs.items())
+        if (spec or {}).get("kind") == KIND_BENCHMARK
+    ]
+    run = [d["job"] for d in decisions if d["warranted"] is True]
+    skip = [d["job"] for d in decisions if d["warranted"] is False]
+    unknown = [d["job"] for d in decisions if d["warranted"] is None]
+
+    saved = sum((jobs.get(name) or {}).get("p95") or 0 for name in skip + unknown)
+    return {
+        "decisions": decisions,
+        "run": run,
+        "skip": skip,
+        "unknown": unknown,
+        "seconds_not_spent": saved,
+        "recommendation": _benchmark_recommendation(run, unknown),
+    }
+
+
+def _benchmark_recommendation(run: list[str], unknown: list[str]) -> str:
+    if run:
+        return (
+            f"this diff can move {', '.join(run)} — measure it, but as its own effort: "
+            "a measurement is not a verdict, so it must not sit in this batch's merge path"
+        )
+    if unknown:
+        return (
+            f"nothing declares what {', '.join(unknown)} covers, so nothing is launched; "
+            "declare it once in benchmark_paths and every future diff gets a real answer"
+        )
+    return "no benchmark on this repo can be moved by this diff"
+
+
+BENCHMARK_LABEL_HINT = "enhancement"
+
+
+def benchmark_findings(plan: dict, batch: str | None = None) -> list[dict]:
+    """The plan as findings, so `findings.py` can file them without a second filer.
+
+    This is the "parallel effort" half of the decision. A benchmark that this
+    diff warrants must still not gate the batch — the batch is a correctness fix
+    and the benchmark is a number — so the run does not go into the batch's PR.
+    It goes here, becomes an issue, and triage picks it up as work of its own,
+    which is how it ends up in its own pull request running beside the fix
+    instead of in front of it.
+
+    A gap gets an issue for the same reason: it is a one-line declaration that
+    permanently improves every later decision, and nothing else in the loop will
+    ever produce it.
+    """
+    where = f"batch `{batch}`" if batch else "this diff"
+    decisions = plan.get("decisions") or []
+    findings = []
+
+    for decision in decisions:
+        if decision["warranted"] is not True:
+            continue
+        job = decision["job"]
+        workflow = decision.get("workflow_file")
+        matched = ", ".join(f"`{m}`" for m in decision["matched"][:5]) or "the diff"
+        findings.append(
+            {
+                "summary": f"Run the {job} benchmark against {where}: it changed {matched}",
+                "severity": "low",
+                "file": f".github/workflows/{workflow}" if workflow else "unknown file",
+                "failure_scenario": (
+                    f"{where} changed code that {job} measures ({decision['basis']}), so its "
+                    f"numbers may have moved. The batch merges on correctness signals and does "
+                    f"not wait for this, which is why it needs an effort of its own: without "
+                    f"one the change lands and the measurement is never taken."
+                ),
+            }
+        )
+
+    # One finding for every undeclared benchmark, not one each. Two of them
+    # produce titles differing by a single word, which `findings.plan` reads as
+    # duplicates and rightly so — but the survivor names one job, so the other
+    # benchmark's gap would be closed by an issue that never mentions it, and
+    # would never be raised again. The fix is the shape, not the threshold: this
+    # is one edit to one file, so it is one issue.
+    gaps = [d for d in decisions if d["warranted"] is None]
+    if gaps:
+        named = ", ".join(d["job"] for d in gaps)
+        declared_in = sorted(
+            {f".github/workflows/{d['workflow_file']}" for d in gaps if d.get("workflow_file")}
+        )
+        findings.append(
+            {
+                "summary": (f"Declare in benchmark_paths what these benchmarks cover: {named}"),
+                "severity": "low",
+                # The config is where the answer goes. The workflows are named in
+                # the body, since a `paths:` filter on the job itself is the
+                # better fix wherever the job can carry one.
+                "file": ".foreman/config.json",
+                "failure_scenario": (
+                    f"Nothing in the workflows or in .foreman/config.json says which paths "
+                    f"{named} measure, so the loop cannot tell a diff that moves their numbers "
+                    f"from one that cannot. It will not guess, so they are launched on no diff "
+                    f"at all — benchmarks that have quietly stopped measuring anything. A "
+                    f"`paths:` filter in {', '.join(declared_in) or 'the workflow'}, or a "
+                    f"benchmark_paths entry per job, ends this permanently."
+                ),
+            }
+        )
+    return findings
 
 
 # --- assembly -----------------------------------------------------------------
@@ -413,6 +719,7 @@ def build_profile(
     job_runs: list[dict],
     protection: dict | None,
     threshold_s: int = DEFAULT_TIER_THRESHOLD_S,
+    benchmark_jobs: list[str] | None = None,
 ) -> dict:
     jobs, problems = parse_workflows(workflow_dir, report_problems=True)
     attributed, unattributed = attribute_runs(job_runs, jobs)
@@ -445,6 +752,10 @@ def build_profile(
     for name, events in declared.items():
         by_name[name]["events"] = {event: _merge_triggers(cfgs) for event, cfgs in events.items()}
     jobs = list(by_name.values())
+    # After the merge, not before: a job name declared in two workflows is one
+    # check, and `benchmark_jobs: ["nightly"]` matching either declaration has to
+    # mark the single job it collapses into.
+    kinds = classify_kinds(jobs, benchmark_jobs)
 
     # Branch protection stores required checks as the names GitHub *reports*, not
     # as the keys the workflow declares. A matrix job `test` reports one context
@@ -489,12 +800,21 @@ def build_profile(
             "p95": stat["p95"] if stat else None,
             "samples": stat["n"] if stat else 0,
             "tier": tiers.get(name, "unmeasured"),
+            "kind": kinds.get(name, (KIND_TEST, "default"))[0],
+            "kind_source": kinds.get(name, (KIND_TEST, "default"))[1],
             "required": name in required_jobs,
             "flake_rate": round(flakes.get(name, 0.0), 3),
         }
 
     def tier_cost(tier: str) -> float:
         return sum(j["p95"] or 0 for j in merged.values() if j["tier"] == tier)
+
+    # Counted separately from the tiers rather than carved out of them, because
+    # the two questions are independent: a benchmark is usually expensive but a
+    # 40-second smoke simulation is cheap, and it is still not a verdict. The
+    # tier totals stay the honest answer to "what does a full run cost"; this is
+    # the answer to "how much of that is measurement the loop need not wait for".
+    benchmarks = sorted(n for n, j in merged.items() if j["kind"] == KIND_BENCHMARK)
 
     return {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -506,6 +826,8 @@ def build_profile(
         "protection_known": bool(protection),
         "cheap_tier_s": tier_cost("cheap"),
         "expensive_tier_s": tier_cost("expensive"),
+        "benchmark_jobs": benchmarks,
+        "benchmark_s": sum(merged[n]["p95"] or 0 for n in benchmarks),
         "unmeasured_jobs": sorted(unmeasured),
         "unattributed_runs": unattributed,
         "problems": problems,
@@ -572,12 +894,43 @@ def _fetch_protection(repo: str) -> dict | None:
     return _gh_json(["api", f"repos/{repo}/branches/{branch}/protection"])
 
 
+def declared_benchmarks(config_path: str | None = None) -> list[str]:
+    """`benchmark_jobs` from the config, read quietly.
+
+    `ledger.load_config` warns when the file is missing, and rightly — running
+    without caps is dangerous. Missing this key is not: it costs a name-matched
+    guess instead of a declaration, which is the documented fallback. Probing a
+    repo should not print a scare about brakes it is not touching.
+    """
+    resolved = ledger.resolve_config(config_path)
+    if not resolved.is_file():
+        return []
+    try:
+        loaded = json.loads(resolved.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []  # load_config raises on this where it matters; here it is a hint
+    value = loaded.get("benchmark_jobs")
+    return [str(v) for v in value] if isinstance(value, (list, tuple)) else []
+
+
+def _quiet_config(config_path: str | None = None) -> dict:
+    """The whole config, read without the missing-file warning. See above."""
+    resolved = ledger.resolve_config(config_path)
+    if not resolved.is_file():
+        return {}
+    try:
+        return json.loads(resolved.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
 def probe(
     repo: str,
     runs: int = 50,
     branch: str | None = None,
     workflow_dir: Path | None = None,
     threshold_s: int = DEFAULT_TIER_THRESHOLD_S,
+    benchmark_jobs: list[str] | None = None,
 ) -> dict:
     """Pull real run history off GitHub. Read-only: run list, jobs, protection.
 
@@ -601,7 +954,11 @@ def probe(
         raise ProfileError(f"no workflow directory at {workflow_dir}: nothing to profile")
 
     profile = build_profile(
-        workflow_dir, _fetch_job_runs(repo, runs, branch), _fetch_protection(repo), threshold_s
+        workflow_dir,
+        _fetch_job_runs(repo, runs, branch),
+        _fetch_protection(repo),
+        threshold_s,
+        benchmark_jobs,
     )
     profile["repo"] = repo
     return profile
@@ -628,6 +985,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("impact")
     p.add_argument("--changed", nargs="+", required=True)
     p.add_argument("--root", default=".")
+    p = sub.add_parser(
+        "benchmark-plan",
+        help="decide which benchmark or simulation jobs this diff can move",
+    )
+    p.add_argument("--changed", nargs="+", required=True)
+    p.add_argument("--profile", default=None)
+    p.add_argument("--config", default=None)
+    p.add_argument("--batch", default=None, help="named in the findings, for provenance")
 
     args = parser.parse_args(argv)
     if args.cmd == "probe":
@@ -638,6 +1003,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.branch,
                 Path(args.workflows) if args.workflows else None,
                 args.threshold,
+                declared_benchmarks(),
             )
         except ProfileError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -656,8 +1022,28 @@ def main(argv: list[str] | None = None) -> int:
                     "jobs": len(profile["jobs"]),
                     "cheap_tier_s": profile["cheap_tier_s"],
                     "expensive_tier_s": profile["expensive_tier_s"],
+                    "benchmark_jobs": profile["benchmark_jobs"],
                     "unmeasured": profile["unmeasured_jobs"],
                 },
+                indent=2,
+            )
+        )
+    elif args.cmd == "benchmark-plan":
+        profile = ledger.load_profile(args.profile)
+        if not profile.get("jobs"):
+            # No profile means no `kind` on anything, so this cannot answer. Say
+            # so rather than returning an empty plan, which reads identically to
+            # "this repo has no benchmarks" and would quietly excuse every one.
+            print(
+                "warning: no CI profile, so no job is known to be a benchmark; "
+                "run `ci_profile.py probe` before trusting an empty plan",
+                file=sys.stderr,
+            )
+        config = ledger.load_config(args.config) if args.config else _quiet_config()
+        plan = benchmark_plan(profile, args.changed, config)
+        print(
+            json.dumps(
+                {**plan, "findings": benchmark_findings(plan, args.batch)},
                 indent=2,
             )
         )
