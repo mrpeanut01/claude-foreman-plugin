@@ -821,21 +821,20 @@ def worktree(tmp_path):
 
 
 def test_probe_writes_the_profile_into_the_repository_when_run_from_a_worktree(
-    worktree, monkeypatch, capsys
+    worktree, tmp_path, monkeypatch, capsys
 ):
     """Written against the caller, the default created a second `.foreman` in the
     worktree, and the profile every other script anchors to stayed missing."""
     checkout, linked = worktree
+    # A real profile, not a hand-rolled dict of the fields `main` happens to
+    # print today. This test is about *where* the file lands, and it should not
+    # need editing every time the summary grows a key — which it has, twice.
+    empty = tmp_path / "no-workflows"
+    empty.mkdir()
     monkeypatch.setattr(
         ci_profile,
         "probe",
-        lambda *a, **k: {
-            "jobs": {},
-            "cheap_tier_s": None,
-            "expensive_tier_s": None,
-            "benchmark_jobs": [],
-            "unmeasured_jobs": [],
-        },
+        lambda *a, **k: ci_profile.build_profile(empty, job_runs=[], protection=None),
     )
     monkeypatch.chdir(linked)
 

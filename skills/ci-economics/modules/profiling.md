@@ -27,13 +27,43 @@ gating and reads them only for information.
 > Which cells those were is still in `required_checks`, which lists the contexts
 > verbatim.
 
-**`protection_known`** — whether branch protection could actually be read.
+**`protection_known`** — whether the merge gate could actually be read.
 
 > This one is load-bearing. When protection is absent or unreadable, every job
 > lands in the profile with `required: false`. Read literally, that says nothing
 > can block a merge, and a fully red CI becomes a green gate. So `false` here
 > means **unknown**, and `land.py` treats every check as required until proven
 > otherwise. Never "simplify" that back.
+
+GitHub keeps the answer in **two** places and a repo may use either or both:
+
+| Mechanism | Endpoint | Needs |
+|-----------|----------|-------|
+| Classic branch protection | `branches/{b}/protection` | admin |
+| Repository rulesets | `rules/branches/{b}` | read |
+
+Both are read and **unioned**, because GitHub enforces both at once and a check
+required by either blocks the merge. Reading only the first left the loop blind
+on every repo configured with rulesets — the modern default — since that
+endpoint answers 404 there.
+
+**`protection_sources`** records what each endpoint said (`read` / `absent` /
+`unreadable`), so an `unknown` verdict can be diagnosed instead of guessed at.
+The subtle case: a 404 from the classic endpoint is a *fact* (this branch is not
+protected), while a 403 is *ignorance* (your token lacks admin). Rules read plus
+classic unreadable stays **unknown** — reporting the rules alone would claim
+"these and nothing else" about a question half of which went unanswered.
+
+**`required_approvals`** — how many approving reviews a merge needs, from
+whichever mechanism demanded the most.
+
+> **A non-zero value here means the loop cannot merge unattended.** foreman's
+> review gate is a ledger fact, not a GitHub approval: the reviewer agent writes
+> `review.verdict` and never asks GitHub to approve anything. And GitHub refuses
+> an approval from the pull request's own author, so a loop that opens its own
+> PRs cannot satisfy the rule even if it tried. `land.merge_blockers` reads
+> GitHub's own `reviewDecision` and refuses, rather than queueing an auto-merge
+> that can never fire and letting the batch go stale.
 
 **`samples`** — how many finished runs the numbers come from. `samples: 0` yields
 `tier: "unmeasured"`, listed in `unmeasured_jobs`.

@@ -894,6 +894,28 @@ def merge_blockers(
         if actual != wanted:
             blockers.append(f"{gate} gate is {actual}, needs {wanted}")
 
+    # GitHub's own verdict on whether this PR may merge, which `_pr_view` has
+    # always fetched and nothing has ever read. It is the one place classic
+    # branch protection and rulesets are already reconciled, so it needs no
+    # profile and no second API call.
+    #
+    # This matters because foreman's review gate is a ledger fact, not a GitHub
+    # approval: the reviewer agent writes `review.verdict` and never calls
+    # `gh pr review`. On a repo that requires approvals the two are disconnected
+    # — the ledger reads `clean`, `--auto` queues a merge that can never fire,
+    # and the batch sits in `merging` until `stale_after_s` escalates it. Naming
+    # it here turns a silent stall into a sentence.
+    decision = str(pr.get("reviewDecision") or "").upper()
+    if decision == "REVIEW_REQUIRED":
+        blockers.append(
+            "GitHub requires an approving review that this loop cannot produce: the "
+            "review gate is a ledger fact, and GitHub refuses an approval from the "
+            "pull request's own author. Approve it yourself, or give the reviewer a "
+            "separate identity (a second account or a GitHub App)"
+        )
+    elif decision == "CHANGES_REQUESTED":
+        blockers.append("a reviewer on GitHub has requested changes")
+
     held = sorted(BLOCKING_LABELS & {str(item).lower() for item in (pr.get("labels") or [])})
     for label in held:
         blockers.append(f"PR carries the {label} label")
