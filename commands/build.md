@@ -54,6 +54,12 @@ exactly like a check that passed, so the gate refuses to call a missing tool
 green. The last time this section was a list of steps to remember, `ruff format
 --check` was the step forgotten, and CI paid for it.
 
+Benchmarks and simulations are deliberately not in it, and the gate says so per
+job. A benchmark measured on a laptop is not a cheaper version of CI's
+measurement but a different one — a machine with a browser and a language server
+on it produces a number that cannot join the series CI has been building on
+consistent hardware.
+
 Do not substitute your own commands, and do not run "the parts that matter".
 Every failure caught here costs seconds; the same failure caught in CI costs a
 suite run and a round trip, and on a repo with a 40-minute suite that is the

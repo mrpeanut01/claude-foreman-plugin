@@ -7,7 +7,7 @@ PR with an **independent** agent, and auto-merge on green.
 Built for repos where the test suite is slow enough that how you spend CI is the
 main constraint on throughput.
 
-> **Status: all five phases implemented, 764 tests.** Dogfooded against this
+> **Status: all five phases implemented, 935 tests.** Dogfooded against this
 > repository's own issue queue, which is where most of those tests came from.
 > Not yet run unattended against a production repo — `auto_merge` ships
 > `false` for that reason.
@@ -42,6 +42,7 @@ Most of what an autonomous dev loop wastes is CI, and it wastes it one way:
 | **Local gate** | Map the diff to its covering tests, run those locally, push only when green |
 | **Batching** | A 40-minute suite costs 40 minutes whether the PR fixes one issue or five — so group compatible issues, one commit each |
 | **Tier ladder** | Cheap CI and the agent review run concurrently; the expensive suite waits for both |
+| **Benchmarks off the critical path** | A benchmark returns a number, not a verdict — so it runs only on a diff that can move it, and never in the merge path |
 | **Flake budget** | A flake is *one commit where a job both failed and passed* — rerun those, fix everything else, capped at 2 |
 | **Merge queue** | The full suite runs against real trunk exactly once, at the end |
 

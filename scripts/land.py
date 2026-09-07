@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import ledger as ledger_mod  # noqa: E402
-from ci_profile import attribute  # noqa: E402
+from ci_profile import KIND_BENCHMARK, attribute  # noqa: E402
 from globs import compile_glob, matches_any  # noqa: E402
 from ledger import PROGRESS_COUNTERS  # noqa: E402
 
@@ -303,6 +303,31 @@ def _job_for(name: str, profile: dict, shapes: list[dict] | None = None) -> dict
     return (jobs.get(key) or {}) if key else {}
 
 
+def is_declared_benchmark(name: str, profile: dict, shapes: list[dict] | None = None) -> bool:
+    """A check the operator has declared to be a measurement rather than a verdict.
+
+    `kind_source` is what makes this safe to act on. A job the profiler guessed
+    was a benchmark from its name is not excused from anything here: guessing
+    wrong would wave a real correctness gate through, and a name is not evidence.
+    A `benchmark_jobs` entry in config is — someone wrote down that this job
+    measures rather than judges, which is exactly the fact branch protection
+    cannot supply and `protection_known: false` otherwise leaves unknown.
+
+    Protection still outranks it, twice. `required_checks` names the exact context
+    and is consulted before this predicate is reached; `required` on the job
+    catches the matrix case, where protection named `bench (3.11)` and the loop is
+    now asking about `bench (3.12)`. That flag rounds partial coverage **up** by
+    design, so honouring it here keeps a declared benchmark under exactly the rule
+    every other job is under: one required cell means the whole job gates. The
+    alternative is a repo that required one cell of its benchmark discovering the
+    other cells were quietly excused by a config key.
+    """
+    job = _job_for(name, profile, shapes)
+    if job.get("required") is True:
+        return False
+    return job.get("kind") == KIND_BENCHMARK and job.get("kind_source") == "config"
+
+
 def _is_advisory(name: str, profile: dict, shapes: list[dict] | None = None) -> bool:
     """Unknown checks count as required: an unknown gate may block the queue.
 
@@ -311,14 +336,24 @@ def _is_advisory(name: str, profile: dict, shapes: list[dict] | None = None) -> 
     CI into a green gate, which is the one outcome this whole system exists to
     prevent.
     """
-    if not profile.get("protection_known", False):
-        return False
     if name in set(profile.get("required_checks") or []):
         # Protection names this exact context. The job's own `required` flag is
         # computed by matching the job KEY against those contexts, so a matrix
         # job whose cells are required still reads required=False. Believing the
         # flag over the context list would file a failing required cell as
         # advisory, and a red gate would read green.
+        #
+        # Read before everything below, because the benchmark rule fires even
+        # under unknown protection and protection has to be able to overrule it:
+        # a repo that made its benchmark a required check has said the merge
+        # waits for it, and no config key gets to contradict that.
+        return False
+    if is_declared_benchmark(name, profile, shapes):
+        # The one thing knowable without protection: this job returns a number,
+        # and a number is not a verdict on the diff. Waiting for it holds a
+        # correctness fix behind a measurement that cannot say the fix is wrong.
+        return True
+    if not profile.get("protection_known", False):
         return False
     job = _job_for(name, profile, shapes)
     return bool(job) and job.get("required") is False
@@ -399,7 +434,12 @@ def ci_gate(
         if not profile.get("protection_known", False):
             # Nothing is known to be optional, so decide from what the workflows
             # declare plus what has actually reported.
-            requirable = {n: s for n, s in declared.items() if can_report_on_pr(s, base_branch)}
+            requirable = {
+                n: s
+                for n, s in declared.items()
+                if can_report_on_pr(s, base_branch)
+                and not is_declared_benchmark(n, profile, shapes)
+            }
             covered = {attribute(name, shapes) for name in summary["passed"]}
 
             if requirable:

@@ -278,6 +278,7 @@ def select_jobs(
                 "name": name,
                 "workflow_file": spec.get("workflow_file"),
                 "tier": spec.get("tier") or "unmeasured",
+                "kind": spec.get("kind"),
                 "events": spec.get("events"),
                 "triggers": spec.get("triggers"),
             }
@@ -289,10 +290,34 @@ def select_jobs(
             "Run `ci_profile.py probe` to learn what each job costs."
         )
         source = [{**job, "tier": "unknown"} for job in ci_profile.parse_workflows(workflow_dir)]
+        # Unprofiled is exactly when a nightly soak is most likely to be swept
+        # into the local gate, so the name check still runs here. It is the same
+        # guess `classify_kinds` makes with no config to consult, and the same
+        # bounded cost of being wrong.
+        kinds = ci_profile.classify_kinds(source)
+        source = [{**job, "kind": kinds[job["name"]][0]} for job in source]
 
     chosen, deferred = [], []
     for job in source:
         if not _on_pull_request(job):
+            continue
+        if job.get("kind") == ci_profile.KIND_BENCHMARK:
+            # A benchmark measured on a laptop is not a cheaper version of the
+            # same measurement, it is a different one: a machine with a browser
+            # and a language server on it produces a number that cannot be
+            # compared against the series CI has been building on consistent
+            # hardware. Running it here spends the wall clock and answers nothing.
+            #
+            # Unlike `land.py`, this defers on a name match too. The worst a
+            # wrong guess can do here is leave a correctness job to CI, which
+            # costs money; there it would stop the loop waiting for a real gate,
+            # which costs correctness. Different stakes, different bar.
+            deferred.append(
+                {
+                    "job": job["name"],
+                    "reason": "benchmark: a laptop's numbers cannot join CI's series",
+                }
+            )
             continue
         if job["tier"] not in LOCAL_TIERS:
             deferred.append(

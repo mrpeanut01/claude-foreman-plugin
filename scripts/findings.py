@@ -8,6 +8,8 @@ never be worked.
 
 CLI:
     findings.py plan --verdict verdict.json --batch b-001 --pr 7 --repo OWNER/NAME
+    findings.py plan --verdict bench.json --batch b-001 --repo OWNER/NAME \
+        --source "the benchmark plan"
     findings.py file --plan plan.json --repo OWNER/NAME [--ledger .foreman]
 """
 
@@ -83,8 +85,14 @@ def to_issue(finding: dict, context: dict, available_labels: list[str]) -> dict:
     # back to the review that raised the finding, so it is exactly the line that
     # must not render a null — the batch and round carry it when the PR cannot.
     raised_on = f" of PR #{context['pr']}" if context.get("pr") else ""
+    # Who raised this. It defaults to the review because that is where findings
+    # came from when this filer was the only producer, but it is no longer the
+    # only one: `ci_profile.py benchmark-plan` produces findings too, and an
+    # issue that says a benchmark gap was "raised by the independent review"
+    # sends the next reader to a verdict file that never mentions it.
+    source = context.get("source") or "the independent review"
     body = [
-        f"Raised by the independent review{raised_on} "
+        f"Raised by {source}{raised_on} "
         f"(batch `{context.get('batch')}`, round {context.get('round')}).",
         "",
         f"**Severity:** {finding.get('severity', 'unknown')}  ",
@@ -248,11 +256,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("plan")
-    p.add_argument("--verdict", required=True)
+    p.add_argument(
+        "--verdict",
+        required=True,
+        help="a review verdict, or any JSON carrying a `findings` list — "
+        "`ci_profile.py benchmark-plan` emits one",
+    )
     p.add_argument("--repo", required=True)
     p.add_argument("--batch", required=True)
     p.add_argument("--pr", type=int)
     p.add_argument("--round", type=int, default=1)
+    p.add_argument(
+        "--source",
+        default=None,
+        help="who raised these, for the provenance line (default: the independent review)",
+    )
     p = sub.add_parser("file")
     p.add_argument("--plan", required=True)
     p.add_argument("--repo", required=True)
@@ -263,7 +281,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "plan":
         verdict = json.loads(Path(args.verdict).read_text())
-        context = {"batch": args.batch, "pr": args.pr, "round": args.round, "repo": args.repo}
+        context = {
+            "batch": args.batch,
+            "pr": args.pr,
+            "round": args.round,
+            "repo": args.repo,
+            "source": args.source,
+        }
         result = from_verdict(
             verdict, context, fetch_labels(args.repo), fetch_open_issues(args.repo)
         )

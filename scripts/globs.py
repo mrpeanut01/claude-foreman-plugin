@@ -106,3 +106,30 @@ def matches_any(path: str, patterns) -> str | None:
         if compile_glob(pattern).match(path):
             return pattern
     return None
+
+
+def path_included(path: str, patterns) -> bool:
+    """GitHub's `paths:` semantics for one file: the LAST matching pattern wins.
+
+    `matches_any` above answers a different question — "does any pattern match" —
+    and for a filter list carrying `!` exclusions that answer is wrong twice
+    over: an exclusion is compiled as literal text beginning with `!`, so it
+    never matches anything, and if it did, a first-match scan would let an
+    earlier positive override a later negative. GitHub evaluates the list in
+    order and lets each later match overrule the one before it, which is what
+    makes `['src/**', '!src/**/*.md']` mean "source but not its prose".
+
+    A list of only exclusions includes everything they do not name, since there
+    is no positive pattern for a file to fail. An empty list includes nothing:
+    callers ask whether a *declared* filter selects this file, and a filter that
+    declares nothing has not selected it.
+    """
+    patterns = list(patterns or [])
+    if not patterns:
+        return False
+    included = all(p.startswith("!") for p in patterns)
+    for pattern in patterns:
+        negated = pattern.startswith("!")
+        if compile_glob(pattern[1:] if negated else pattern).match(path):
+            included = not negated
+    return included
