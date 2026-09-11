@@ -17,9 +17,9 @@ CLI:
 `plan` reads the ledger too, to allocate ids that continue past the ones already
 issued, so its --ledger must name the same directory `apply` will write to.
 Without --triage it plans from the ledger alone: every issue triage recorded as
-actionable that no batch yet holds. That is the set `loop.py next` names when it
-answers `batch`, and the only source that survives a new session — the triage
-file lives in /tmp.
+actionable that no batch yet holds and the last complete triage pass did not
+leave out. That is the set `loop.py next` names when it answers `batch`, and the
+only source that survives a new session — the triage file lives in /tmp.
 """
 
 from __future__ import annotations
@@ -30,6 +30,10 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+# A sibling module. Running this file puts its directory on `sys.path`, and any
+# importer already had that directory there to import this one.
+import ledger
 
 WEIGHT = {"small": 1, "medium": 2, "large": 4}
 RISK_ORDER = ["low", "medium", "high"]
@@ -187,13 +191,23 @@ def ungrouped_records(state, records: list[dict] | None = None) -> list[dict]:
     triage re-records an issue whenever its `updatedAt` moves, and a second
     batch for work already in flight or on trunk is the outcome
     `loop._grouped_issues` exists to prevent.
+
+    From the ledger, an issue the last complete triage pass no longer listed is
+    left out too. `ledger.missing_from_complete_pass` is the rule
+    `loop.next_action` applies, so the recipe never batches what the loop
+    refused. A triage plan is not filtered that way: it is a newer read of the
+    open list than any pass the ledger holds, and every issue in it was open
+    when it looked.
     """
     taken = grouped_issues(state)
-    source = records if records is not None else list(state.issues.values())
+    from_ledger = records is None
+    source = list(state.issues.values()) if from_ledger else records
     return [
         r
         for r in sorted(source, key=lambda r: r.get("issue") or 0)
-        if r.get("verdict") == "actionable" and r.get("issue") not in taken
+        if r.get("verdict") == "actionable"
+        and r.get("issue") not in taken
+        and not (from_ledger and ledger.missing_from_complete_pass(state, r.get("issue")))
     ]
 
 

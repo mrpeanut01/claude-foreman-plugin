@@ -24,7 +24,7 @@ its `--root` belongs to, since from a build worktree that is the main checkout.
 | `type` | Required fields | Effect on folded state |
 |--------|-----------------|------------------------|
 | `issue.triaged` | `issue`, `verdict` | Upserts `issues[n]`. Re-triage overwrites; the log keeps both. It is also a sighting (see below), dated by `observed_at` when present and by `ts` otherwise. |
-| `triage.completed` | `open_issues` | Sets `last_triage_at`, and stamps every issue in `open_issues` into `open_seen_at` — both dated by `observed_at` when present, `ts` otherwise. Written once per `triage.py apply`, **even when it labelled nothing** — it marks that a pass happened, and `loop.triage_due` reads it to decide when to look for new issues. Without it the loop asks for triage on every tick. |
+| `triage.completed` | `open_issues` | Sets `last_triage_at`, and stamps every issue in `open_issues` into `open_seen_at` — both dated by `observed_at` when present, `ts` otherwise. Written once per `triage.py apply`, **even when it labelled nothing** — it marks that a pass happened, and `loop.triage_due` reads it to decide when to look for new issues. Without it the loop asks for triage on every tick. With `open_issues_complete: true` — the fetch came back short of `--limit`, so the list is every open issue — it also sets `last_complete_triage_at` (see *What absence produces*). |
 | `batch.created` | `batch`, `issues` | Creates the batch in `planned`, both gates `pending`. Optional `branch`, `pr`. **Ignored when the id already exists** — ids are unique, so a repeat is a numbering bug, and replacing the record would discard a merge. |
 | `batch.state` | `batch`, `from`, `to` | Moves the batch. Only ever written by `ledger.transition`. `building -> building` is the resume: it records no progress, so it increments `attempts.build_resumes` instead — the only number that grows while a batch is parked mid-build. |
 | `batch.pushed` | `batch`, `sha` | **Resets both gates to `pending`** and increments `attempts.pushes`. Remembers the CI verdict it was pushed into, so the next CI result can score the push: red again the same way increments `attempts.futile_pushes`, any green resets that run to 0. |
@@ -85,6 +85,39 @@ the morning digest is right to consider finished.
 which is what stops it repeating every tick. Handing the issue back to batching
 instead was unreachable and unbounded in both directions — see the note in
 `loop._grouped_issues`.
+
+### What absence produces: out of the queue, and only after a complete pass
+
+A sighting proves an issue open; a missing one proves nothing, unless the pass
+read the whole open list. `triage.py plan` fetches the newest `--limit` open
+issues, so a list that came back full may stop short of issues still open, and a
+fetch that failed returns no list at all. So the plan records
+`open_issues_complete` — true only when `gh` answered with fewer than `--limit` —
+`apply` copies it onto `triage.completed`, and the fold keeps the newest such
+pass as `last_complete_triage_at`.
+
+`ledger.missing_from_complete_pass` is the one rule that reads it: an issue last
+seen before the last complete pass was not on the list that pass read, so it was
+closed, transferred or deleted since. Before this, triage wrote nothing at all
+about an issue that closed, so its `actionable` record stayed batchable for good:
+`loop.py next` answered `batch` for finished work, and `batch.py plan` cut it.
+
+- **Batching** leaves the issue out, in `loop.next_action` and `batch.py plan`
+  alike. A plan built from a triage file is not filtered: the file is a newer read
+  of the open list than any pass the ledger holds.
+- **A `planned` batch** whose every issue is missing escalates instead of
+  building. With only some missing it builds, and the action's reason names the
+  missing ones for `commands/build.md` to drop.
+- **A reopened issue** needs no rule of its own: the next pass lists it, that
+  sighting is newer, and it is batchable again.
+- **`merged_leaving_open` is untouched.** Releasing an issue from a merged batch
+  still takes a positive sighting; absence is only ever a reason not to *start*
+  work.
+
+None of this can bite on a stale picture, so a due triage runs before the loop
+builds a `planned` batch or cuts a new one. A ledger written before the field
+existed holds no complete pass, and nothing is inferred from it until the first
+pass that records one.
 
 ## Why a push resets both gates
 

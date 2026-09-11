@@ -1028,6 +1028,47 @@ def test_an_issue_listed_twice_is_recorded_once(tmp_path, monkeypatch):
     assert _completed(tmp_path)["open_issues"] == [4]
 
 
+# --- only a pass that read the whole open list can say an issue has gone -------
+
+
+def test_a_fetch_that_came_back_short_of_its_limit_read_every_open_issue(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    plan, _ = _plan_from(monkeypatch, capsys)
+    assert plan["open_issues_complete"] is True
+
+
+def test_a_fetch_that_filled_its_limit_may_have_been_cut_off(monkeypatch, capsys, tmp_path):
+    """`gh issue list --limit N` returns the newest N; with N back, the rest were never read."""
+    monkeypatch.chdir(tmp_path)
+    plan, _ = _plan_from(monkeypatch, capsys, "--limit", "1")
+    assert plan["open_issues_complete"] is False
+
+
+def test_a_fetch_that_failed_is_not_an_empty_tracker(monkeypatch, capsys, tmp_path):
+    """`_gh_json` answers None for no gh, no auth or unreadable output. Read as an
+    empty list, that is a complete pass that saw nothing open, and every issue the
+    ledger knows would leave the queue at once."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(triage, "_gh_json", lambda args: None)
+    assert triage.main(["plan", "--repo", "me/mine"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["triaged"] == [] and plan["open_issues_complete"] is False
+
+
+def test_apply_records_whether_the_pass_read_the_whole_open_list(tmp_path):
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps({"repo": "me/mine", "skipped": [5], "open_issues_complete": True}))
+    _apply(tmp_path, path)
+    assert _completed(tmp_path)["open_issues_complete"] is True
+
+
+def test_a_plan_from_before_the_field_existed_claims_no_complete_pass(tmp_path):
+    _apply(tmp_path, _plan_with_skips(tmp_path, skipped=[5]))
+    assert _completed(tmp_path)["open_issues_complete"] is False
+
+
 # --- issue #80: a sighting is dated by when the plan looked, not when it was applied
 
 

@@ -542,24 +542,29 @@ def _gh_json(args: list[str]):
         return None  # no gh on PATH is one more way to have no answer
 
 
-def fetch_issues(repo: str, limit: int = 50) -> list[dict]:
-    raw = (
-        _gh_json(
-            [
-                "issue",
-                "list",
-                "--repo",
-                repo,
-                "--state",
-                "open",
-                "--limit",
-                str(limit),
-                "--json",
-                "number,title,body,labels,state,updatedAt",
-            ]
-        )
-        or []
+def fetch_issues(repo: str, limit: int = 50) -> list[dict] | None:
+    """The newest `limit` open issues, or None when `gh` gave no answer.
+
+    None and `[]` are different facts. An empty list is a tracker with nothing
+    open; None is a fetch that failed, and `plan` must not record it as a pass
+    that read the whole open list.
+    """
+    raw = _gh_json(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,title,body,labels,state,updatedAt",
+        ]
     )
+    if raw is None:
+        return None
     for item in raw:
         item["labels"] = [
             item["name"] if isinstance(item, dict) else item for item in item.get("labels", [])
@@ -635,7 +640,15 @@ def main(argv: list[str] | None = None) -> int:
         # — a plan is a file, and a person reads it before applying — and the
         # sightings it records are true as of now, not as of then (issue #80).
         observed_at = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
-        issues = fetch_issues(args.repo, args.limit)
+        fetched = fetch_issues(args.repo, args.limit)
+        issues = fetched or []
+        # Whether this is the *whole* open list, which is what lets an issue's
+        # absence from it mean the issue has gone (`ledger.missing_from_complete_pass`).
+        # `gh issue list --limit N` returns the newest N, so a list that came back
+        # full may stop short of issues still open. And a fetch that failed is not
+        # an empty tracker: read as one, every issue the ledger knows would leave
+        # the batching queue at once.
+        complete = fetched is not None and len(issues) < args.limit
         available = fetch_labels(args.repo)
         records, skipped = [], []
         for item in issues:
@@ -648,6 +661,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "repo": args.repo,
                     "observed_at": observed_at,
+                    "open_issues_complete": complete,
                     "triaged": records,
                     "skipped": skipped,
                     "queueable": [r["issue"] for r in queueable(records)],
@@ -714,6 +728,9 @@ def main(argv: list[str] | None = None) -> int:
         triaged=applied,
         failed=len(failed),
         open_issues=seen_open,
+        # Copied, never inferred here: only `plan` saw how many issues came back
+        # against its `--limit`. A plan from before the field existed claims nothing.
+        open_issues_complete=plan.get("open_issues_complete") is True,
         **stamp,
     )
     print(json.dumps({"applied": applied, "failed": failed}))

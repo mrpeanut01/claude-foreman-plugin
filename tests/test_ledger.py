@@ -402,6 +402,78 @@ def test_an_older_ledger_with_no_open_issues_field_still_folds(root):
     assert state.open_seen_at == {} and state.last_triage_at
 
 
+# --- a closed issue is one a pass that read the whole open list left out ------
+
+
+def _seen(root, issue, at):
+    ledger.append(root, "issue.triaged", issue=issue, verdict="actionable", observed_at=at)
+
+
+def _pass(root, at, saw, complete):
+    flag = {} if complete is None else {"open_issues_complete": complete}
+    ledger.append(
+        root, "triage.completed", triaged=0, open_issues=list(saw), observed_at=at, **flag
+    )
+
+
+def test_a_pass_that_read_the_whole_open_list_is_recorded_as_complete(root):
+    _pass(root, "2026-01-02T00:00:00Z", saw=[5], complete=True)
+    state = ledger.fold(ledger.read_events(root))
+    assert state.last_complete_triage_at == "2026-01-02T00:00:00Z"
+
+
+@pytest.mark.parametrize("complete", [False, None, "yes"])
+def test_a_pass_that_may_have_been_cut_off_is_not_complete(root, complete):
+    """`None` is a pass from before the field existed, which proves nothing either way."""
+    _pass(root, "2026-01-02T00:00:00Z", saw=[5], complete=complete)
+    assert ledger.fold(ledger.read_events(root)).last_complete_triage_at is None
+
+
+def test_an_issue_a_complete_pass_left_out_is_missing_from_the_tracker(root):
+    _seen(root, 5, "2026-01-01T00:00:00Z")
+    _seen(root, 9, "2026-01-01T00:00:00Z")
+    _pass(root, "2026-01-02T00:00:00Z", saw=[9], complete=True)
+    state = ledger.fold(ledger.read_events(root))
+    assert ledger.missing_from_complete_pass(state, 5)
+    assert not ledger.missing_from_complete_pass(state, 9)
+
+
+def test_an_issue_left_out_of_a_pass_that_may_have_been_cut_off_is_not_missing(root):
+    """A pass that filled `--limit` read the newest issues only: the rest are unread, not closed."""
+    _seen(root, 5, "2026-01-01T00:00:00Z")
+    _pass(root, "2026-01-02T00:00:00Z", saw=[9], complete=False)
+    assert not ledger.missing_from_complete_pass(ledger.fold(ledger.read_events(root)), 5)
+
+
+def test_an_issue_seen_open_after_the_complete_pass_is_not_missing(root):
+    """Reopened: a later pass lists it, complete or not, and that sighting is newer."""
+    _seen(root, 5, "2026-01-01T00:00:00Z")
+    _pass(root, "2026-01-02T00:00:00Z", saw=[], complete=True)
+    _pass(root, "2026-01-03T00:00:00Z", saw=[5], complete=False)
+    assert not ledger.missing_from_complete_pass(ledger.fold(ledger.read_events(root)), 5)
+
+
+def test_an_issue_recorded_by_the_same_pass_is_not_missing(root):
+    """`apply` stamps its records and its completed pass with one `observed_at`."""
+    _seen(root, 5, "2026-01-02T00:00:00Z")
+    _pass(root, "2026-01-02T00:00:00Z", saw=[5], complete=True)
+    assert not ledger.missing_from_complete_pass(ledger.fold(ledger.read_events(root)), 5)
+
+
+def test_nothing_is_missing_until_a_complete_pass_has_happened(root):
+    _seen(root, 5, "2026-01-01T00:00:00Z")
+    _pass(root, "2026-01-02T00:00:00Z", saw=[], complete=None)
+    assert not ledger.missing_from_complete_pass(ledger.fold(ledger.read_events(root)), 5)
+
+
+@pytest.mark.parametrize("stamp", [None, "not-a-date"])
+def test_a_sighting_whose_stamp_cannot_be_read_keeps_the_issue(stamp):
+    """A stamp the fold stored but cannot date is a different fact from an issue
+    no pass ever listed. It is not evidence of anything, so it drops no work."""
+    state = ledger.State(last_complete_triage_at="2026-01-02T00:00:00Z", open_seen_at={5: stamp})
+    assert not ledger.missing_from_complete_pass(state, 5)
+
+
 # --- issue #17: the push cap must measure diagnosis, not volume ---------------
 
 

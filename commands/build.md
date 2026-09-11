@@ -78,3 +78,8 @@ Stop there. Opening the PR is `/foreman:land`.
 Do not force it. Drop that issue from the batch, append a `batch.meta` event with
 the reduced issue list, and escalate the dropped one with a reason. A batch that
 half-solves something is worse than a batch that solves less.
+
+An issue `loop.py next` names in its `build` reason as missing from the last
+complete triage pass is wrong in exactly this sense — closed, moved or deleted
+since the batch was cut — so drop it before writing its test. A batch whose every
+issue is missing never reaches this command: the loop escalates it instead.

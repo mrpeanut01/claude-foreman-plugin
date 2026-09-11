@@ -14,12 +14,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" plan --ledger .foreman > /tmp/f
 ```
 
 `plan` reads the ledger twice over: for the actionable issues no batch yet
-holds, which is what it groups, and for the ids already issued, so new ids
-continue past them. Point `--ledger` at the same directory `apply` writes to, or
-ids restart at `b-001` and collide with batches that already exist — from any
-directory but the repo root, the default is not that directory. `--triage
-/tmp/foreman-triage.json` groups a triage file's records instead; an issue a
-batch already holds is left out from either source.
+holds and the last complete triage pass still listed, which is what it groups,
+and for the ids already issued, so new ids continue past them. Point `--ledger`
+at the same directory `apply` writes to, or ids restart at `b-001` and collide
+with batches that already exist — from any directory but the repo root, the
+default is not that directory. `--triage /tmp/foreman-triage.json` groups a
+triage file's records instead; an issue a batch already holds is left out from
+either source, and a triage file is not checked against older passes.
 
 ## The arithmetic
 

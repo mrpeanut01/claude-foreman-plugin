@@ -56,14 +56,12 @@ def budget_remaining(state: ledger.State, config: dict) -> float | None:
 
 
 def when(stamp: str | None) -> datetime | None:
-    """An ISO timestamp as an aware datetime, or None when unreadable."""
-    if not stamp:
-        return None
-    try:
-        seen = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return seen if seen.tzinfo else seen.replace(tzinfo=UTC)
+    """An ISO timestamp as an aware datetime, or None when unreadable.
+
+    `ledger.moment` is the one parser: `ledger.missing_from_complete_pass`
+    compares the same stamps this module ages, and two copies could disagree.
+    """
+    return ledger.moment(stamp)
 
 
 def seconds_since(stamp: str | None, now: datetime | None = None) -> float | None:
@@ -151,8 +149,8 @@ def _grouped_issues(state: ledger.State) -> set[int]:
     re-triage an issue whose `updatedAt` has not moved, and a PR that merges
     without a closing keyword does not move it. `next_action` answered `batch`
     on every tick forever; no counter moved, no cap applied, and because that
-    branch sits above `triage_due` the loop stopped looking for new issues at
-    all. The mirror case was worse: had the `updatedAt` moved, triage would
+    branch then sat above `triage_due` the loop stopped looking for new issues
+    at all. The mirror case was worse: had the `updatedAt` moved, triage would
     re-record the issue, a second batch would be cut for work already on trunk,
     and merging it would release the issue again, without bound.
 
@@ -360,6 +358,42 @@ def next_action(state: ledger.State, config: dict) -> dict:
                     break
                 return {"do": action, "batch": batch["id"], "reason": reason}
 
+    # Everything above holds a worktree, a branch or a PR; everything below starts
+    # new work, and a due triage goes between the two. Below `batch` it could not
+    # run for as long as the ledger still offered an issue, and its pass is the
+    # only thing that says an issue has closed, so the loop cut batches, and built
+    # planned ones, for work already finished. It costs no CI, so it stays ahead
+    # of the budget stop.
+    if triage_due(state, limits):
+        reason = (
+            "nothing in the ledger yet"
+            if not state.issues and not state.batches
+            else "no triage within the refresh window; look for new issues, and for closed "
+            "ones, before starting new work"
+        )
+        return {"do": "triage", "reason": reason}
+
+    # A planned batch with nothing left to build. Ahead of the budget and the WIP
+    # limit, because an escalation spends neither; and a person's call, because the
+    # ledger cannot say whether each issue closed as done, closed as not planned,
+    # or moved.
+    for batch in live:
+        issues = batch.get("issues") or []
+        if batch["state"] != "planned" or not issues:
+            continue
+        if all(ledger.missing_from_complete_pass(state, n) for n in issues):
+            listed = ", ".join(f"#{n}" for n in issues)
+            return {
+                "do": "escalate",
+                "batch": batch["id"],
+                "reason": (
+                    f"every issue {batch['id']} holds ({listed}) was missing from the last "
+                    "triage pass that read the whole open list, so each was closed, moved or "
+                    "deleted and building it would redo finished work; abandon the batch, "
+                    "or requeue it if an issue was reopened"
+                ),
+            }
+
     for batch in live:
         if batch["state"] == "planned":
             if not can_spend:
@@ -367,12 +401,27 @@ def next_action(state: ledger.State, config: dict) -> dict:
                 break
             if in_flight_count(state) >= max_open:
                 break  # WIP limit: draining beats starting
-            return {"do": "build", "batch": batch["id"], "reason": "capacity to start new work"}
+            reason = "capacity to start new work"
+            gone = [
+                n for n in batch.get("issues") or [] if ledger.missing_from_complete_pass(state, n)
+            ]
+            if gone:
+                # No reason to hold back the rest: `commands/build.md` drops an issue
+                # that turns out to be wrong, so the loop only has to say which.
+                listed = ", ".join(f"#{n}" for n in gone)
+                pronoun = "it" if len(gone) == 1 else "them"
+                reason += (
+                    f"; {listed} missing from the last complete triage pass, so drop "
+                    f"{pronoun} from the batch before building"
+                )
+            return {"do": "build", "batch": batch["id"], "reason": reason}
 
     ungrouped = [
         n
         for n, r in sorted(state.issues.items())
-        if r.get("verdict") == "actionable" and n not in _grouped_issues(state)
+        if r.get("verdict") == "actionable"
+        and n not in _grouped_issues(state)
+        and not ledger.missing_from_complete_pass(state, n)
     ]
     if ungrouped:
         return {
@@ -380,14 +429,6 @@ def next_action(state: ledger.State, config: dict) -> dict:
             "issues": ungrouped,
             "reason": f"{len(ungrouped)} actionable issue(s) not yet in a batch",
         }
-
-    if triage_due(state, limits):
-        reason = (
-            "nothing in the ledger yet"
-            if not state.issues and not state.batches
-            else "no triage within the refresh window; look for new issues"
-        )
-        return {"do": "triage", "reason": reason}
 
     if budget_blocked:
         return {

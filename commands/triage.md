@@ -28,6 +28,13 @@ a plan is safe to read slowly — but it is a snapshot, and one built before a
 batch merged still describes the queue from before the merge. Re-plan rather
 than apply a plan older than the work that has landed since.
 
+It also carries `open_issues_complete`: `true` only when the fetch came back
+short of `--limit`, so the list is every open issue. That is the only kind of
+pass that can take a closed issue out of the batching queue — an issue missing
+from a list that filled `--limit` may simply be older than the cut-off — so keep
+`--limit` above the repository's open-issue count. A fetch that failed is never
+complete.
+
 ## Show the plan, then apply
 
 Render the plan as a table (issue, kind, size, risk, verdict, labels, why) and

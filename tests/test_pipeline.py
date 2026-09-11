@@ -111,6 +111,18 @@ def test_the_loop_walks_a_batch_from_planned_to_merged(tmp_path, triaged):
     root = ledger.init(tmp_path)
     for record in triaged:
         ledger.append(root, "issue.triaged", **record)
+    # What `triage.py apply` always writes after its records. Without it the ledger
+    # holds verdicts from a pass it never recorded, a state no script produces, and
+    # a due triage rightly comes before starting new work. Five issues against the
+    # default `--limit` of 50 is a whole open list.
+    ledger.append(
+        root,
+        "triage.completed",
+        triaged=len(triaged),
+        failed=0,
+        open_issues=[i["number"] for i in ISSUES],
+        open_issues_complete=True,
+    )
     batches = batch.group_issues(triaged, CONFIG)
     work = next(b for b in batches if 3 not in b["issues"])
     ledger.append(
