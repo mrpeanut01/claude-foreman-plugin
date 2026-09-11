@@ -331,6 +331,104 @@ def required_checks(protection: dict | None) -> list[str]:
     return sorted(dict.fromkeys(names))
 
 
+def required_approvals(protection: dict | None) -> int:
+    """How many human approvals a merge needs, from whichever source declared it.
+
+    Classic protection nests this under `required_pull_request_reviews`; a
+    ruleset states it on the `pull_request` rule. `protection_from_rules` puts
+    both in the same place, so this reads one field.
+    """
+    if not protection:
+        return 0
+    stated = protection.get("required_approving_review_count")
+    if stated is None:
+        reviews = protection.get("required_pull_request_reviews") or {}
+        stated = reviews.get("required_approving_review_count")
+    try:
+        return max(0, int(stated or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# --- rulesets -----------------------------------------------------------------
+# GitHub answers "what gates this branch?" in two places, and this only ever read
+# one of them. Classic branch protection lives at `branches/{b}/protection`;
+# rulesets — now the default way new repos are configured — live at
+# `rules/branches/{b}` and are invisible there. A ruleset-protected repo
+# therefore came back 404, was recorded as `protection_known: false`, and every
+# required check it declared was simply never learned.
+#
+# That failed safe: unknown protection makes `land.py` treat every declared job
+# as required. But it is still the loop working blind on exactly the repos most
+# likely to have real gates, and it hides a required-approval rule that no agent
+# review can satisfy (see `required_approvals` above and `land.merge_blockers`).
+
+
+RULESET_STATUS_CHECKS = "required_status_checks"
+RULESET_PULL_REQUEST = "pull_request"
+
+
+def protection_from_rules(rules: object) -> dict | None:
+    """A branch's effective ruleset rules, in the shape `required_checks` reads.
+
+    Returns None only when the rules could not be read at all. An empty list is
+    a successful answer — "no ruleset applies to this branch" — and is not the
+    same claim as "we could not ask", which is the whole distinction
+    `protection_known` exists to carry.
+
+    One caveat, recorded rather than guessed around: this endpoint reports the
+    rules it says apply, and a ruleset in `evaluate` mode does not actually block
+    a merge. Counting one anyway over-requires, which is the direction this repo
+    already chose everywhere else — a check believed required that never reports
+    stalls the batch and escalates to a person, where the opposite error merges
+    past a gate. Rounding up at worst costs a wait.
+    """
+    if rules is None or not isinstance(rules, list):
+        return None
+    contexts: list[str] = []
+    approvals = 0
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        params = rule.get("parameters") or {}
+        if rule.get("type") == RULESET_STATUS_CHECKS:
+            for entry in params.get("required_status_checks") or []:
+                context = (entry or {}).get("context") if isinstance(entry, dict) else None
+                if context:
+                    contexts.append(str(context))
+        elif rule.get("type") == RULESET_PULL_REQUEST:
+            # Several rulesets can each demand approvals; the strictest wins,
+            # because satisfying one does not satisfy another.
+            try:
+                approvals = max(approvals, int(params.get("required_approving_review_count") or 0))
+            except (TypeError, ValueError):
+                pass
+    return {
+        "required_status_checks": {"checks": [{"context": c} for c in contexts]},
+        "required_approving_review_count": approvals,
+    }
+
+
+def combine_protection(classic: dict | None, from_rules: dict | None) -> dict | None:
+    """Both mechanisms at once, since GitHub enforces both at once.
+
+    A repo may carry classic protection and a ruleset, and a check required by
+    either blocks the merge. So the contexts are unioned and the approval counts
+    maxed: taking one source as authoritative would drop whatever the other
+    demanded. None only when neither could be read.
+    """
+    if classic is None and from_rules is None:
+        return None
+    contexts = set(required_checks(classic)) | set(required_checks(from_rules))
+    merged = {
+        "required_status_checks": {"checks": [{"context": c} for c in sorted(contexts)]},
+        "required_approving_review_count": max(
+            required_approvals(classic), required_approvals(from_rules)
+        ),
+    }
+    return merged
+
+
 # --- test impact --------------------------------------------------------------
 
 
@@ -720,6 +818,7 @@ def build_profile(
     protection: dict | None,
     threshold_s: int = DEFAULT_TIER_THRESHOLD_S,
     benchmark_jobs: list[str] | None = None,
+    protection_sources: dict | None = None,
 ) -> dict:
     jobs, problems = parse_workflows(workflow_dir, report_problems=True)
     attributed, unattributed = attribute_runs(job_runs, jobs)
@@ -824,6 +923,14 @@ def build_profile(
         # Absent protection means we do not know what is required. Recording
         # that as a fact stops land.py reading it as "nothing is".
         "protection_known": bool(protection),
+        # Which of GitHub's two mechanisms answered, so an "unknown" verdict can
+        # be diagnosed without re-running the calls by hand.
+        "protection_sources": protection_sources or {},
+        # Approvals no agent review can produce: foreman's review gate is a
+        # ledger fact, not a GitHub approval. `land.merge_blockers` refuses
+        # rather than queueing a merge that will sit unmergeable until it goes
+        # stale.
+        "required_approvals": required_approvals(protection),
         "cheap_tier_s": tier_cost("cheap"),
         "expensive_tier_s": tier_cost("expensive"),
         "benchmark_jobs": benchmarks,
@@ -885,13 +992,73 @@ def _fetch_job_runs(repo: str, runs: int, branch: str | None) -> list[dict]:
     return job_runs
 
 
-def _fetch_protection(repo: str) -> dict | None:
+def _gh_api(args: list[str]) -> tuple[object, int | None]:
+    """`gh api`, with the HTTP status when it failed.
+
+    `_gh_json` folds every failure into None, which is right where any failure
+    means the same thing. Here it does not: a 404 from the protection endpoint
+    means "this branch is not protected", a definite fact, while a 403 means
+    "you may not ask", which is ignorance. Reading the second as the first is
+    how an unreadable gate turns into a green one.
+    """
+    try:
+        done = subprocess.run(["gh", *args], capture_output=True, text=True)
+    except OSError:
+        return None, None  # no gh on PATH is one more way to have no answer
+    if done.returncode == 0:
+        try:
+            return (json.loads(done.stdout) if done.stdout.strip() else None), 200
+        except json.JSONDecodeError:
+            return None, None
+    match = re.search(r"\(HTTP (\d{3})\)", done.stderr or "")
+    return None, int(match.group(1)) if match else None
+
+
+def fetch_protection(repo: str) -> tuple[dict | None, dict]:
+    """What gates this repo's default branch, from both places GitHub keeps it.
+
+    Returns `(protection, sources)`. `protection` is None for UNKNOWN, never for
+    "nothing is required" — `build_profile` records that as `protection_known`,
+    and `land.py` then treats every declared check as required rather than
+    letting an unread gate read as an open one.
+
+    `sources` says what each endpoint actually answered, because "unknown" is
+    otherwise indistinguishable from a bug and someone will eventually
+    "simplify" the caution away rather than re-run two API calls by hand.
+    """
     view = _gh_json(["repo", "view", repo, "--json", "defaultBranchRef"]) or {}
     branch = (view.get("defaultBranchRef") or {}).get("name", "main")
-    # Absent or inaccessible protection is normal, not an error — but it means
-    # UNKNOWN, not "nothing is required". build_profile records that as
-    # protection_known, and land.py then treats every check as required.
-    return _gh_json(["api", f"repos/{repo}/branches/{branch}/protection"])
+
+    classic, status = _gh_api(["api", f"repos/{repo}/branches/{branch}/protection"])
+    # 404 on this endpoint is the documented answer for an unprotected branch,
+    # and the branch came from `defaultBranchRef`, so it exists. That makes the
+    # 404 a fact: nothing classic gates this branch. Any other failure — 403 for
+    # a token without admin, a network error, no `gh` at all — is ignorance, and
+    # must not be laundered into one.
+    classic_known = classic is not None or status == 404
+
+    raw_rules = _gh_json(["api", f"repos/{repo}/rules/branches/{branch}"])
+    from_rules = protection_from_rules(raw_rules)
+
+    sources = {
+        "branch": branch,
+        "classic": "read" if classic is not None else ("absent" if status == 404 else "unreadable"),
+        "rulesets": "unreadable" if from_rules is None else ("absent" if not raw_rules else "read"),
+    }
+
+    if not classic_known:
+        # Either nothing could be read, or — the ordinary case for a token
+        # without admin — every ruleset rule could be read and classic
+        # protection could not. Reporting the rules as the whole answer would
+        # say "these and nothing else" about a question half of which went
+        # unanswered, so this stays UNKNOWN and `sources` records which half.
+        return None, sources
+    return combine_protection(classic, from_rules), sources
+
+
+def _fetch_protection(repo: str) -> dict | None:
+    """Retained for callers that want only the verdict."""
+    return fetch_protection(repo)[0]
 
 
 def declared_benchmarks(config_path: str | None = None) -> list[str]:
@@ -953,12 +1120,14 @@ def probe(
     if not workflow_dir.is_dir():
         raise ProfileError(f"no workflow directory at {workflow_dir}: nothing to profile")
 
+    protection, sources = fetch_protection(repo)
     profile = build_profile(
         workflow_dir,
         _fetch_job_runs(repo, runs, branch),
-        _fetch_protection(repo),
+        protection,
         threshold_s,
         benchmark_jobs,
+        sources,
     )
     profile["repo"] = repo
     return profile
@@ -1023,6 +1192,9 @@ def main(argv: list[str] | None = None) -> int:
                     "cheap_tier_s": profile["cheap_tier_s"],
                     "expensive_tier_s": profile["expensive_tier_s"],
                     "benchmark_jobs": profile["benchmark_jobs"],
+                    "protection_known": profile["protection_known"],
+                    "protection_sources": profile["protection_sources"],
+                    "required_approvals": profile["required_approvals"],
                     "unmeasured": profile["unmeasured_jobs"],
                 },
                 indent=2,

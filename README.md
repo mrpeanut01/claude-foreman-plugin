@@ -7,7 +7,7 @@ PR with an **independent** agent, and auto-merge on green.
 Built for repos where the test suite is slow enough that how you spend CI is the
 main constraint on throughput.
 
-> **Status: all five phases implemented, 935 tests.** Dogfooded against this
+> **Status: all five phases implemented, 960 tests.** Dogfooded against this
 > repository's own issue queue, which is where most of those tests came from.
 > Not yet run unattended against a production repo — `auto_merge` ships
 > `false` for that reason.
