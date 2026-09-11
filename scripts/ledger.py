@@ -127,6 +127,10 @@ class State:
     reverts: list[dict] = field(default_factory=list)
     ci_spend: list[dict] = field(default_factory=list)
     last_triage_at: str | None = None
+    # The newest pass whose list was the *whole* open list: its fetch came back
+    # short of `--limit`. Only against one of these does an issue's absence mean
+    # the issue has gone — see `missing_from_complete_pass`.
+    last_complete_triage_at: str | None = None
     # When triage last found each issue on the tracker's *open* list. Separate
     # from `issues` because the most useful sighting is usually of an issue
     # triage deliberately did not re-record — see `triage.should_skip`.
@@ -444,8 +448,15 @@ def _apply(state: State, event: dict) -> None:
         # already recorded, which is the half-applied event the fold's
         # contract says cannot happen.
         stamps = dict.fromkeys(seen, when)
+        # `is True`, not truthiness. This is what lets an issue's absence from the
+        # list mean it has gone (`missing_from_complete_pass`), so only a pass that
+        # said so in exactly those words counts: an older pass, a `false` and a
+        # stray string all leave the last complete pass where it was.
+        complete = event.get("open_issues_complete") is True
         state.last_triage_at = when
         state.open_seen_at.update(stamps)
+        if complete:
+            state.last_complete_triage_at = when
 
     elif kind == "issue.triaged":
         state.issues[event["issue"]] = {k: v for k, v in event.items() if k != "type"}
@@ -566,6 +577,52 @@ def load(root: Path) -> State:
 
 
 # --- rules --------------------------------------------------------------------
+
+
+def moment(stamp: str | None) -> datetime | None:
+    """An ISO timestamp as an aware datetime, or None when missing or unreadable.
+
+    Stamps arrive as `...Z` from `_now` and `triage.py plan` and as `+00:00` from
+    anything else that wrote one, so they are compared as instants, never as
+    strings.
+    """
+    if not stamp:
+        return None
+    try:
+        seen = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return seen if seen.tzinfo else seen.replace(tzinfo=UTC)
+
+
+def missing_from_complete_pass(state: State, issue: int) -> bool:
+    """Whether the last triage pass that read the whole open list left this issue out.
+
+    Triage asks GitHub for open issues only, so it never wrote a word about an
+    issue that closed, and its `actionable` record stayed batchable for good:
+    `loop.next_action` answered `batch` for finished work and `batch.py plan` cut
+    it. Absence is the only evidence the tracker offers, and it is evidence only
+    from a list that was whole. A fetch that filled `--limit` stopped at the
+    newest N and never read the rest; a fetch that failed read nothing.
+
+    So an issue is missing when a complete pass exists and its last sighting is
+    older than that pass: closed, moved or deleted since. Seen by that pass or any
+    later one, it is not, which is how a reopened issue comes back with no rule of
+    its own. No complete pass, no inference, which is every ledger written before
+    `open_issues_complete` existed. A sighting whose stamp cannot be read is not
+    evidence of anything, so it keeps the issue rather than dropping work on it.
+
+    Nothing is released by this. `loop.merged_leaving_open` still needs a positive
+    sighting to hand a merged batch's issue to a person; absence is only ever a
+    reason not to *start* work.
+    """
+    complete = moment(state.last_complete_triage_at)
+    if complete is None:
+        return False
+    if issue not in state.open_seen_at:
+        return True
+    seen = moment(state.open_seen_at[issue])
+    return seen is not None and seen < complete
 
 
 def blocking_gates(batch: dict) -> list[str]:

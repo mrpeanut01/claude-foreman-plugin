@@ -84,13 +84,15 @@ batch on `watch` forever, and watching increments no counter, so nothing else
 would ever surface it.
 
 `triage_every_s` is the earliest the loop will look for new issues again, not the
-latest. The triage branch in `loop.next_action` sits below every live batch and
-below any actionable issue not yet in one, so a batch parked on `watch` holds
-triage off for as long as it stays live: with `triage_every_s` 3600 and
-`stale_after_s` 5400, nothing is triaged until that batch goes stale and
-escalates an hour and a half later. Triage spends no CI, so it is checked ahead
-of the budget stop. Setting it to `0` switches triage off, which means the loop
-only ever works on what the ledger already holds.
+latest. The triage branch in `loop.next_action` sits below every batch in flight,
+so a batch parked on `watch` holds triage off for as long as it stays live: with
+`triage_every_s` 3600 and `stale_after_s` 5400, nothing is triaged until that
+batch goes stale and escalates an hour and a half later. It sits above starting
+new work, though — building a `planned` batch or cutting a new one — because a
+picture older than the window is exactly the one that cannot know which issues
+closed since it was taken. Triage spends no CI, so it is checked ahead of the
+budget stop. Setting it to `0` switches triage off, which means the loop only
+ever works on what the ledger already holds.
 
 `caps.pushes` is deliberately loose at 8. It counts every push, including the
 ones that resolved review findings, so a PR that survives several genuine review

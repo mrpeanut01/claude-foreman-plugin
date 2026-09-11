@@ -620,6 +620,53 @@ def test_a_ledger_holding_no_ungrouped_issue_plans_nothing(tmp_path, capsys, mon
     assert json.loads(capsys.readouterr().out)["batches"] == []
 
 
+def _complete_pass_into(root, saw, at):
+    ledger.append(
+        root,
+        "triage.completed",
+        triaged=0,
+        open_issues=list(saw),
+        open_issues_complete=True,
+        observed_at=at,
+    )
+
+
+def test_plan_from_the_ledger_leaves_out_an_issue_a_complete_triage_pass_no_longer_listed(
+    tmp_path, capsys, monkeypatch
+):
+    """The same set `loop.py next` names, or the recipe batches what the loop refused."""
+    monkeypatch.chdir(tmp_path)
+    root = ledger.init(tmp_path)
+    for n in (11, 12):
+        ledger.append(
+            root,
+            "issue.triaged",
+            issue=n,
+            verdict="actionable",
+            size="small",
+            risk="low",
+            paths=["same.py"],
+            title=f"issue {n}",
+            observed_at="2026-01-01T00:00:00Z",
+        )
+    _complete_pass_into(root, saw=[12], at="2026-01-02T00:00:00Z")
+    batch.main(["plan", "--ledger", str(root)])
+    assert [b["issues"] for b in json.loads(capsys.readouterr().out)["batches"]] == [[12]]
+
+
+def test_a_triage_file_is_not_overruled_by_an_older_pass_that_missed_its_issue(
+    tmp_path, capsys, monkeypatch
+):
+    """A triage file is a fresh read of the open list; any pass the ledger holds is older."""
+    monkeypatch.chdir(tmp_path)
+    root = ledger.init(tmp_path)
+    _complete_pass_into(root, saw=[], at="2026-01-01T00:00:00Z")
+    triage_file = tmp_path / "triage.json"
+    triage_file.write_text(json.dumps({"triaged": _actionable(12)}))
+    batch.main(["plan", "--triage", str(triage_file), "--ledger", str(root)])
+    assert [b["issues"] for b in json.loads(capsys.readouterr().out)["batches"]] == [[12]]
+
+
 # --- why a batch had to start is reported, not discarded ---------------------
 
 

@@ -17,6 +17,9 @@ when the same queue is triaged every day.
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/triage.py" plan --repo OWNER/NAME --limit 50
 ```
 
+Keep `--limit` above the open-issue count. Only a pass that read the whole open
+list (`open_issues_complete`) can take a closed issue out of the batching queue.
+
 ## Three rules that override everything
 
 **1. Labels come only from the repo's own vocabulary.** `plan_labels` intersects

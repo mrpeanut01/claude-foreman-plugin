@@ -1,6 +1,6 @@
 {
   "name": "foreman",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Runs the dev loop end to end: triage issues, batch them by CI cost, build, review independently, and auto-merge on green",
   "author": {
     "name": "mrpeanut01",

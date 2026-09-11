@@ -740,6 +740,102 @@ def test_a_triage_pass_from_before_the_merge_is_not_evidence():
     assert loop.next_action(ledger.fold(events), CONFIG)["do"] == "idle"
 
 
+# --- a closed issue leaves the queue ------------------------------------------
+
+
+def _actionable_event(issue, at):
+    return {"ts": at, "type": "issue.triaged", "issue": issue, "verdict": "actionable"}
+
+
+def _complete_pass(at, saw):
+    """A pass whose fetch came back short of `--limit`, so every open issue is in `saw`."""
+    return {**_triage_pass(at, saw), "open_issues_complete": True}
+
+
+def _planned_events(batch_id, issues, at):
+    return [
+        *(_actionable_event(n, at) for n in issues),
+        {"ts": at, "type": "batch.created", "batch": batch_id, "issues": list(issues)},
+    ]
+
+
+def test_an_issue_a_complete_triage_pass_no_longer_lists_is_not_offered_for_batching():
+    """The defect. Triage asks GitHub for open issues only, so it writes nothing
+    about an issue that closes, and the loop kept answering `batch` for finished
+    work until something cut a batch for it."""
+    events = [
+        _actionable_event(5, _aged(72)),
+        _actionable_event(9, _aged(72)),
+        _complete_pass(_aged(0.2), saw=[9]),
+    ]
+    action = loop.next_action(ledger.fold(events), CONFIG)
+    assert action["do"] == "batch" and action["issues"] == [9]
+
+
+def test_when_every_actionable_issue_has_closed_there_is_nothing_to_batch():
+    events = [_actionable_event(5, _aged(72)), _complete_pass(_aged(0.2), saw=[])]
+    assert loop.next_action(ledger.fold(events), CONFIG)["do"] == "idle"
+
+
+def test_an_issue_missing_only_from_a_pass_that_filled_its_limit_is_still_offered():
+    """Absence from a cut-off list means unread, not closed."""
+    events = [_actionable_event(5, _aged(72)), _triage_pass(_aged(0.2), saw=[9])]
+    action = loop.next_action(ledger.fold(events), CONFIG)
+    assert action["do"] == "batch" and action["issues"] == [5]
+
+
+def test_a_reopened_issue_is_offered_again_once_a_pass_sees_it_open():
+    events = [
+        _actionable_event(5, _aged(72)),
+        _complete_pass(_aged(24), saw=[]),
+        _triage_pass(_aged(0.2), saw=[5]),
+    ]
+    action = loop.next_action(ledger.fold(events), CONFIG)
+    assert action["do"] == "batch" and action["issues"] == [5]
+
+
+def test_a_due_triage_runs_before_a_batch_is_cut_from_an_old_picture():
+    """Below `batch`, the pass that would show an issue had closed never ran for
+    as long as the ledger still offered that issue."""
+    st = state_with(issues={1: {"issue": 1, "verdict": "actionable"}}, last_triage_at=_aged(9))
+    assert loop.next_action(st, CONFIG)["do"] == "triage"
+
+
+def test_a_due_triage_runs_before_a_planned_batch_is_built():
+    st = state_with({"id": "b-001", "state": "planned"}, last_triage_at=_aged(9))
+    assert loop.next_action(st, CONFIG)["do"] == "triage"
+
+
+def test_work_already_in_flight_still_outranks_a_due_triage():
+    """Finish before starting: the refresh gates new work, not a batch holding a branch."""
+    st = state_with({"id": "b-001", "state": "built"}, last_triage_at=_aged(9))
+    assert loop.next_action(st, CONFIG)["do"] == "open_pr"
+
+
+def test_a_planned_batch_whose_every_issue_closed_escalates_instead_of_building():
+    events = [*_planned_events("b-001", [5, 6], _aged(72)), _complete_pass(_aged(0.2), saw=[])]
+    action = loop.next_action(ledger.fold(events), CONFIG)
+    assert action["do"] == "escalate" and action["batch"] == "b-001"
+    assert "#5" in action["reason"] and "#6" in action["reason"]
+
+
+def test_a_closed_planned_batch_escalates_even_with_the_budget_spent():
+    """An escalation costs no CI, so the budget stop is no reason to leave it planned."""
+    events = [*_planned_events("b-001", [5], _aged(72)), _complete_pass(_aged(0.2), saw=[])]
+    st = ledger.fold(events)
+    st.ci_spend = [_spend(60 * 60)]
+    assert loop.next_action(st, CONFIG)["do"] == "escalate"
+
+
+def test_a_planned_batch_with_an_issue_still_open_is_built_and_told_which_closed():
+    """`commands/build.md` already drops an issue that turns out to be wrong; the
+    loop only has to say which one."""
+    events = [*_planned_events("b-001", [5, 9], _aged(72)), _complete_pass(_aged(0.2), saw=[9])]
+    action = loop.next_action(ledger.fold(events), CONFIG)
+    assert action["do"] == "build" and action["batch"] == "b-001"
+    assert "#5" in action["reason"] and "#9" not in action["reason"]
+
+
 # --- issue #62: a batch mid-build is in flight, not nowhere ------------------
 
 

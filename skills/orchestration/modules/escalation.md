@@ -12,6 +12,7 @@ from one that stalls on its first surprise.
 | `futile_push_run` returns a reason | Three pushes in a row left CI red the same way. This, not `caps.pushes`, is the push rule that reads progress — see below. |
 | `stalled_build` returns a reason | Three resumes and the batch still has not reached `built`. Nothing else can see this one — see below. |
 | `merged_leaving_open` returns a batch | A merged batch's issue is still on the tracker, and the ledger cannot say why — see below. |
+| Every issue in a `planned` batch is `missing_from_complete_pass` | Building it would redo finished work, and the ledger cannot say whether each issue closed as done, closed as not planned, or moved. Abandon it, or requeue it if an issue was reopened — see `ledger-schema.md`. |
 | Same test fails identically twice | A second identical failure is evidence, not noise. |
 | Diff touches `protected_paths` | Auth, migrations, payments, and CI config are never auto-merged, however green. Judged on the branch's **real** diff: `merge_blockers` refuses a batch whose paths were never confirmed against it (`batch.py paths --apply`), so an issue that named no file cannot clear the gate by naming none. |
 | The same finding survives a review round | Builder and reviewer are trading one objection. Rounds elapsed is not the test — see `review-gate.md`. |

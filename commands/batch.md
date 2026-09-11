@@ -13,11 +13,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/batch.py" plan > /tmp/foreman-batches.jso
 ```
 
 Plans from the ledger: every issue triage recorded as `actionable` that no batch
-yet holds — the same set `loop.py next` names when it answers `batch`. That is
-the only source that survives a new session. `--triage /tmp/foreman-triage.json`
-plans from a triage file instead, for reading a plan straight after `/foreman:triage`;
-issues a batch already holds are left out either way, because a second batch
-for work already in flight is the runaway the loop guards against.
+yet holds and the last complete triage pass did not leave out — the same set
+`loop.py next` names when it answers `batch`. That is the only source that
+survives a new session. `--triage /tmp/foreman-triage.json` plans from a triage
+file instead, for reading a plan straight after `/foreman:triage`; issues a batch
+already holds are left out either way, because a second batch for work already in
+flight is the runaway the loop guards against. A triage file is not checked
+against earlier passes: it is the newest read of the open list there is.
 
 Prints the batches plus the savings they buy. Read `Skill(foreman:work-batching)`
 for the grouping rules and the arithmetic behind them.
